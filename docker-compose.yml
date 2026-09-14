@@ -1,0 +1,82 @@
+# Steam 工具台 —— 云服务器部署（HTTPS 反代）
+#
+# 代码不从本仓库的 app/ 目录构建,而是由 docker/fetch-release.js 从 GitHub Releases
+# 拉取加密发布包(验签 → sha256 → AES 解密 → 解压)生成构建上下文 docker/dist,
+# 因此改动代码后的更新流程是「本地 build-release.js 发版 → 服务器跑一次 docker/update.sh」。
+#
+# 常用命令:
+#   bash docker/update.sh                 # 更新到最新发布(拉包 → 构建 → 重启)
+#   bash docker/update.sh --source        # 用仓库里的 app/ 直接构建(开发/离线)
+#   docker compose --profile proxy up -d caddy   # 首次启用 Caddy(自带 HTTPS)
+#   docker compose logs -f app
+#   docker compose down                   # 数据在 named volume 里,不会丢
+
+name: steam-tools
+
+services:
+  app:
+    # 构建前必须先生成 docker/dist:bash docker/update.sh 会自动做这件事。
+    # 直接 docker compose up -d --build 会因缺少 docker/dist/Dockerfile 而报错。
+    build:
+      context: ./docker/dist
+      args:
+        APP_VERSION: ${APP_VERSION:-unknown}
+    image: steam-tools:${APP_VERSION:-latest}
+    restart: unless-stopped
+    # .env 里的 PORT / SESSION_TTL_MS / APP_PASSWORD / C5_* 等都会注入容器。
+    # 注意：AUTO_UPDATE / GITHUB_REPO 这些更新器变量在容器里没有作用（launcher 不参与）。
+    env_file:
+      - .env
+    environment:
+      APP_ROOT: /app
+      PORT: "53110"
+      HOST: 0.0.0.0
+      # 多账号同时挂 GC 连接 + 物品 schema 解析，默认给 1G 堆；内存紧可下调、账密多可上调。
+      NODE_OPTIONS: --max-old-space-size=1024
+      # 经 HTTPS 反代访问时必须为 1（否则浏览器按 http 处理，拿不到登录 cookie，会一直在登录页打转）。
+      # 如果哪天改成裸 http://IP:53110 直连，把这行删掉并让 .env 的 COOKIE_SECURE=0 生效。
+      COOKIE_SECURE: "1"
+    ports:
+      # 只绑回环：公网入口一律交给 Caddy / Nginx，别把 53110 直接暴露出去。
+      - "127.0.0.1:53110:53110"
+    volumes:
+      # Steam 会话、maFile、UU token、网页口令哈希、各类缓存都在这里，务必持久化。
+      - steam-tools-data:/app/data
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # 可选的自带 HTTPS 反代。不想要就用 Nginx/Caddy 自己配，见 DOCKER.md。
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["proxy"]
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      # DOMAIN 从项目根 .env 读取（compose 插值用，不是注入给 caddy 进程的）。
+      DOMAIN: ${DOMAIN:?请在 .env 里加一行 DOMAIN=你的域名}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data        # ACME 证书，别丢，否则每次重建都重新申请
+      - caddy-config:/config
+    depends_on:
+      app:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  steam-tools-data:
+  caddy-data:
+  caddy-config:

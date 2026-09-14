@@ -1,0 +1,43 @@
+# 构建上下文越小越快，更重要的是别把凭据送进 daemon。
+# 带前导斜杠 = 只匹配上下文根目录下的路径。
+
+# ---- 运行数据与凭据（这里有 Steam 会话、maFile、UU token、网页口令哈希）----
+/data/
+/.env
+/.env.local
+/.env.production
+!/.env.example
+/update-key.bin
+/public-key.pem
+/inspect_key.txt
+/*.maFile
+
+# ---- 更新器产物与本地状态 ----
+/node_modules/
+/app.prev/
+/app.next/
+/app.broken-*/
+/release/
+/.cache/
+/logs/
+/version.json
+/app/.ready
+/app/.DS_Store
+
+# ---- 开发文档、构建工具、平台启动脚本 ----
+/module-development/
+/tools/
+/re-tools/
+/launcher.js
+/*.bat
+/*.command
+/app/test-*.js
+
+# ---- 版本控制与编辑器 ----
+/.git/
+/.gitignore
+**/.DS_Store
+/DOCKER.md
+
+# ---- 由 docker/fetch-release.js 生成的构建上下文(内含一份 app/ 副本,别重复打包)----
+/docker/dist/

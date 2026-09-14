@@ -1,0 +1,18 @@
+# Caddy 反代配置（配合 docker compose --profile proxy up -d 使用）
+# DOMAIN 由 docker-compose.yml 的 environment 注入。
+
+{$DOMAIN} {
+	encode zstd gzip
+
+	reverse_proxy app:53110 {
+		# 关闭响应缓冲。这个应用有 Socket.IO 长轮询/推送，
+		# 默认缓冲会把响应攒着一起发，表现为界面「转圈半天不刷新」。
+		flush_interval -1
+	}
+
+	# WebSocket 升级（Socket.IO 的 ws 传输）Caddy 会自动透传，无需额外配置。
+
+	# 证书自动申请与续期走 ACME，需要放通 80 和 443。
+	# 想收证书到期提醒邮件就取消下面这行注释：
+	# tls you@example.com
+}

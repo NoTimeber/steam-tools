@@ -1,0 +1,48 @@
+# 注意:NoTimeber/steam-tools 是**公开仓库**,而发布包里的源码是靠 update-key.bin
+# 做 AES-256-GCM 加密保护的。所以这个文件的核心任务是「防止误提交」:
+# 凡是能把源码/密钥/会话泄露出去的东西,一律在这里挡掉,不要依赖推送时的自觉。
+
+# ===== 明文源码:公开仓库绝不能有,否则 update-key.bin 的加密形同虚设 =====
+/app/
+/app.prev/
+/app.next/
+/app.broken-*/
+/launcher.js
+
+# ===== 密钥与本地配置 =====
+.env
+.env.local
+.env.production
+!.env.example
+update-key.bin
+inspect_key.txt
+/tools/keys/
+*.maFile
+
+# ===== 运行数据(Steam 会话 / cookie / UU token / 网页口令哈希 / 缓存)=====
+/data/
+/data
+/app/data/
+/logs/
+/.cache/
+
+# ===== 更新与构建产物 =====
+/release/
+/version.json
+/app/.ready
+# 解密后的源码副本,只在服务器上生成
+/docker/dist/
+/.build-tmp/
+node_modules/
+
+# ===== 本地开发脚本与平台专有文件 =====
+/app/test-*.js
+/module-development/
+/re-tools/
+*.bat
+*.command
+
+# ===== 系统 =====
+.DS_Store
+**/.DS_Store
+*.swp
