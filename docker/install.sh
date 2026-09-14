@@ -321,6 +321,8 @@ if [ -z "$DOMAIN" ]; then
 	# (哪怕只 up app)。所以这里必须留一个占位值。
 	if ! grep -q '^DOMAIN=' "$ENV_FILE"; then
 		set_env DOMAIN "localhost" "$ENV_FILE"
+		warn "已写入占位值 DOMAIN=localhost —— 这只是为了让 compose 解析通过,不是可用域名。"
+		warn "要发布到公网请重跑:bash docker/install.sh --domain 你的真实域名"
 	fi
 	if [ "$WITH_CADDY" = auto ]; then WITH_CADDY=0; fi
 else
@@ -363,14 +365,52 @@ if [ "$_pw_set" = 0 ]; then
 fi
 unset _env_pw _pw_set
 
+# ---- 这次要不要把 Caddy 也一起 up:判据是「Caddy 本来就在跑」,不是「这次传没传 --domain」----
+# 每次更新 app 容器都会被重建、拿到新的容器 IP,而 Caddy 的 `reverse_proxy app:53110`
+# 会记着旧地址。不同步重建 Caddy,域名就会 502 或直接打不开。
+# 两种判据任一命中即可:让 compose 自己解析项目名最准,但它要求 compose 文件此刻
+# 可解析(首次部署时 docker/dist 还没生成),所以补一个纯 label 的兜底。
+caddy_container_exists() {
+	( cd "$ROOT" && docker compose --profile proxy ps -a --format '{{.Service}}' 2>/dev/null | grep -qx 'caddy' ) && return 0
+	docker ps -a \
+		--filter "label=com.docker.compose.service=caddy" \
+		--filter "label=com.docker.compose.project.config_files=$ROOT/docker-compose.yml" \
+		--format '{{.Names}}' 2>/dev/null | grep -q .
+}
+CADDY_EXISTS=0
+if caddy_container_exists; then
+	CADDY_EXISTS=1
+fi
+
+# 例外:DOMAIN 还是占位值 localhost 时不要碰 Caddy —— 那会把一个正在用的站点
+# 换成 localhost,并让 ACME 去给 localhost 签证书。宁可跳过并提示。
+_env_domain="$(sed -n 's/^DOMAIN=//p' "$ENV_FILE" | tail -1 | sed "s/^'//; s/'$//; s/^\"//; s/\"$//")"
+if [ "$CADDY_EXISTS" = 1 ] && [ "$WITH_CADDY" != 1 ] && [ "$_env_domain" = "localhost" ]; then
+	warn "Caddy 正在运行,但 $ENV_FILE 里的 DOMAIN 还是占位值 localhost,已跳过 Caddy 重建。"
+	warn "要用域名请重跑:bash docker/install.sh --domain 你的真实域名"
+	CADDY_EXISTS=0
+fi
+
+# 末尾的完成提示要报「实际在用的站点域名」:裸跑 install.sh 时 $DOMAIN 是空的,
+# 但只要 Caddy 在跑,真实域名就在 .env 里 —— 别再把已经配好反代的站点提示成「还没配反代」。
+SITE_DOMAIN="$DOMAIN"
+if [ -z "$SITE_DOMAIN" ] && [ "$CADDY_EXISTS" = 1 ]; then
+	SITE_DOMAIN="$_env_domain"
+fi
+unset _env_domain
+
 # ============================ 5. 更新上线 ============================
 log "拉取发布包并构建镜像(验签 → sha256 → 解密 → 构建)"
 ( cd "$ROOT" && bash docker/update.sh ${UPDATE_ARGS[@]+"${UPDATE_ARGS[@]}"} )
 
-APP_VERSION="$(tr -d '[:space:]' < "$ROOT/docker/dist/VERSION" 2>/dev/null || echo unknown)"
+# export 必须有:compose 里的 `image: steam-tools:${APP_VERSION:-latest}` 是由 docker 这个
+# 外部进程插值的,只有 export 过的变量它才看得见。不 export 就会拿 :latest 去 pull,
+# 于是报一句 pull access denied,再白白重建一遍镜像。
+export APP_VERSION="$(tr -d '[:space:]' < "$ROOT/docker/dist/VERSION" 2>/dev/null || echo unknown)"
 
-if [ "$WITH_CADDY" = 1 ]; then
-	log "启用 Caddy(自动申请 HTTPS 证书)"
+if [ "$WITH_CADDY" = 1 ] || [ "$CADDY_EXISTS" = 1 ]; then
+	log "启用/重建 Caddy(app 换了容器 IP,必须让它重新解析上游)"
+	log "证书存在 caddy-data 卷里,没到期就直接复用,不会重新申请"
 	( cd "$ROOT" && docker compose --profile proxy up -d caddy )
 	command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active' \
 		&& warn "ufw 是启用状态:Caddy 签证书要走 80,别忘 sudo ufw allow 80,443/tcp"
@@ -387,12 +427,12 @@ done
 [ "$_ok" = 1 ] && log "健康检查通过" \
 	|| warn "60 秒内没通过健康检查,看日志:cd $ROOT && docker compose logs -f app"
 
-if [ -n "$DOMAIN" ]; then
+if [ -n "$SITE_DOMAIN" ]; then
 	cat <<-EOF
 
 	------------------------------------------------------------------
 	部署完成:版本 $APP_VERSION
-	  访问    https://$DOMAIN/login
+	  访问    https://$SITE_DOMAIN/login
 	  日志    cd $ROOT && docker compose logs -f app
 	  下回更新 cd $ROOT && bash docker/install.sh
 	  备份    docker run --rm -v steam-tools-data:/data -v "\$PWD":/backup alpine \\
