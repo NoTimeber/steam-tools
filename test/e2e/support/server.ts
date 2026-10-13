@@ -46,7 +46,7 @@ async function freePort(): Promise<number> {
 export interface FakeSteamEvent {
 	run: string;
 	event: 'logOn' | 'logOff' | 'gamesPlayed' | 'sendToGC' | 'blockedFetch' | 'purchaseInit' | 'microTxnAuthorize' | 'purchaseFinalize'
-		| 'uuRequest' | 'offerAccept' | 'offerConfirm' | 'marketRequest' | 'marketConfirmList' | 'marketConfirm' | 'timeOffset' | 'storeRequest' | 'walletRedeem';
+		| 'uuRequest' | 'offerAccept' | 'offerConfirm' | 'marketRequest' | 'marketConfirmList' | 'marketConfirm' | 'timeOffset' | 'storeRequest' | 'walletRedeem' | 'webLogOn' | 'guardCode';
 	/** walletRedeem:兑换的码 */
 	code?: string;
 	client?: string;

@@ -51,7 +51,7 @@ const {openStore, normalizeStoredAccount} = require('../src/store/index.ts');
 // Steam 登录会话管理(TypeScript):每账号一个会话、登录/重连看门狗、重启自动恢复,见 src/steam/。
 const {createSessionManager} = require('../src/steam/session-manager.ts');
 // GC 相关(TypeScript):币种表、游戏配置、GC 请求收发、钱包扣款授权、在线会话查询,见 src/steam/。
-const {CURRENCY_ISO_TO_COUNTRY, currencyIdToIso, normalizeCountryCode} = require('../src/steam/currencies.ts');
+const {currencyIdToIso} = require('../src/steam/currencies.ts');
 const {
 	GAME_CONFIGS: PURCHASE_GAME_CONFIGS,
 	normalizeGame: normalizePurchaseGame,
@@ -74,6 +74,8 @@ const {createMarketService} = require('../src/market/index.ts');
 const {createBuyGameService} = require('../src/buygame/index.ts');
 // 充值码批量兑换(TypeScript):临时登录 → 兑换 → 登出,见 src/wallet/。
 const {createWalletService} = require('../src/wallet/index.ts');
+// 账号与登录(TypeScript):名单同步、账号资料、maFile、登录/登出/Guard、删除账号、自动恢复凭据,见 src/accounts/。
+const {createProfiles, createAccountService, resolveAccountCountry} = require('../src/accounts/index.ts');
 const {LOCAL_CM_FALLBACKS} = require('../src/steam/cm-fallback.ts');
 
 const PORT = Number(process.env.PORT || 53110);
@@ -268,6 +270,15 @@ try {
 	process.exit(1);
 }
 
+// 账号资料:maFile、会话 cookies(加密库)+ 旧版 cookies 文件 / account_cache.json(只读)
+const profiles = createProfiles({
+	mafiles: store.mafiles,
+	sessions: store.sessions,
+	cookiesDir: CONFIG_COOKIES_DIR,
+	accountCacheFile: ACCOUNT_CACHE_FILE,
+	readJson: readJsonFile
+});
+
 // Steam 登录会话。attempts 是会话表(id -> attempt),内购/库存/UU 等代码直接读它。
 const sessions = createSessionManager({
 	createClient(fingerprint) {
@@ -300,7 +311,7 @@ const sessions = createSessionManager({
 	intents: store.loginIntents,
 	onChange: attempt => io.emit('attempt:update', sessions.publicAttempt(attempt)),
 	onClientCreated: attachGameCoordinators,
-	onWebSession: attempt => refreshAttemptStoreCountry(attempt),   // 后台查真实账户国家(USD 等无法从货币推断)
+	onWebSession: attempt => accountService.refreshCountry(attempt),   // 后台查真实账户国家(USD 等无法从货币推断)
 	currencyIdToIso,
 	resolveWalletCountry: attempt => resolveAccountCountry({
 		country: attempt.country,
@@ -317,6 +328,9 @@ const sessions = createSessionManager({
 	}
 });
 const attempts = sessions.attempts;
+
+// 账号与登录路由的逻辑;拿到 WebSession 后查真实账户国家也在这里
+const accountService = createAccountService({store, sessions, profiles});
 
 // GC 内购下单时要响应 Steam 的钱包扣款授权请求(steam-user 本身不处理这条消息)
 installMicroTxnHooks(SteamUser);
@@ -340,7 +354,7 @@ const uu = createUuService({
 	store: store.uu,
 	attempts: () => attempts.values(),
 	emit: (event, payload) => io.emit(event, payload),
-	hasMaFile: accountName => !!readLocalAccountProfile(accountName).hasMaFile,
+	hasMaFile: accountName => profiles.local(accountName).hasMaFile,
 	pollIntervalMs: Number(process.env.UU_POLL_INTERVAL_MS) || undefined,
 	inspect: {url: process.env.INSPECT_SERVICE_URL || '', key: process.env.INSPECT_KEY || ''}
 });
@@ -349,7 +363,7 @@ const uu = createUuService({
 // 再查随程序打包的社区库 app/services/nameid-db/
 const market = createMarketService({
 	findAttempt: findAttemptByKey,
-	cookiesFor: resolveInventoryCookies,
+	cookiesFor: profiles.cookiesFor,
 	ledgerFile: path.join(DATA_DIR, 'market-buyorders.json'),
 	nameIdCacheFile: path.join(DATA_DIR, 'market-nameids.json'),
 	nameIdDbDir: path.join(CODE_DIR, 'services', 'nameid-db'),
@@ -361,13 +375,13 @@ const market = createMarketService({
 // 买游戏:任务只在内存里(最多 50 个),进度经 socket.io 推送
 const buyGame = createBuyGameService({
 	findAttempt: findAttemptByKey,
-	cookiesFor: resolveInventoryCookies,
+	cookiesFor: profiles.cookiesFor,
 	emit: (event, task) => io.emit(event, task)
 });
 
 // 充值码兑换:没填密码的账号用本地 maFile / 旧 cookies 文件里的 refreshToken 登录,有 shared_secret 自动过令牌
 const wallet = createWalletService({
-	profileFor: accountName => readLocalAccountProfile(accountName),
+	profileFor: accountName => profiles.local(accountName),
 	emit: payload => io.emit('wallet:redeem', payload)
 });
 
@@ -428,8 +442,7 @@ app.get('/api/health', (req, res) => {
 });
 
 app.get('/api/attempts', (req, res) => {
-	const items = sessions.list().map(publicAttempt);
-	res.json({success: true, attempts: items});
+	res.json({success: true, attempts: accountService.listAttempts()});
 });
 
 function readUpdateStatus() {
@@ -498,362 +511,42 @@ app.post('/api/update/restart', (req, res) => {
 	setTimeout(() => process.exit(RESTART_EXIT_CODE), 300);
 });
 
-// 账户名单:多浏览器/多设备共享(存 data/config/accounts.json)。
-// initialized 表示服务端是否已写过名单文件——前端据此决定首次升级时是否把本地名单迁移上来,
+// ===== 账号与登录(src/accounts/)=====
+function sendAccountError(res, err, fallback) {
+	res.status(err && err.statusCode || 500).json({success: false, error: err && err.message || fallback});
+}
+
+// 包一层:成功时把返回对象并进 {success: true},失败按 statusCode 返回
+function accountRoute(handler, fallback) {
+	return async (req, res) => {
+		try {
+			res.json({success: true, ...await handler(req)});
+		} catch (err) {
+			sendAccountError(res, err, fallback);
+		}
+	};
+}
+
+// 账户名单:多浏览器/多设备共享(加密库)。
+// initialized 表示服务端是否写过名单——前端据此决定首次升级时是否把本地名单迁移上来,
 // 避免"已删除账号"被某个仍有旧 localStorage 的浏览器重新推回。
-app.get('/api/accounts/list', (req, res) => {
-	try {
-		res.json({success: true, initialized: store.accounts.isInitialized(), accounts: readAccountList().map(publicStoredAccount)});
-	} catch (err) {
-		res.status(500).json({success: false, error: err && err.message ? err.message : '读取账户名单失败'});
-	}
-});
-
+app.get('/api/accounts/list', accountRoute(() => accountService.listAccounts(), '读取账户名单失败'));
 // 全量替换账户名单(前端 saveAccounts 推送的就是完整 state.accounts)。
-app.post('/api/accounts/list', (req, res) => {
-	const body = req.body || {};
-	const list = Array.isArray(body.accounts) ? body.accounts : [];
-	try {
-		const saved = writeAccountList(mergeClientAccountSecrets(list));
-		res.json({success: true, accounts: saved.map(publicStoredAccount)});
-	} catch (err) {
-		res.status(500).json({success: false, error: err && err.message ? err.message : '保存账户名单失败'});
-	}
-});
-
-app.post('/api/accounts/meta', async (req, res) => {
-	const names = Array.isArray(req.body && req.body.accountNames) ? req.body.accountNames : [];
-	const accounts = {};
-	for (const rawName of names) {
-		const accountName = String(rawName || '').trim();
-		if (!accountName) {
-			continue;
-		}
-		accounts[accountName] = publicAccountProfile(readLocalAccountProfile(accountName));
-	}
-
-	// 缓存/货币推断不出国家的(如 USD 钱包),用持久化 cookie 查商店账户页补全真实国家
-	try {
-		await resolveMissingAccountCountries(accounts);
-	} catch {}
-
-	res.json({success: true, accounts});
-});
-
-// 服务端持久化 maFile：完整 maFile（含 identity_secret）加密存入数据库，
-// 发货/求购确认时从这里取 identity_secret 做手机确认。
-app.post('/api/mafile/import', (req, res) => {
-	const body = req.body || {};
-	const list = Array.isArray(body.mafiles) ? body.mafiles : (body.mafile ? [body.mafile] : []);
-	if (!list.length) {
-		return res.status(400).json({success: false, error: '没有可导入的 maFile'});
-	}
-	const results = [];
-	let saved = 0;
-	for (const entry of list) {
-		const ma = entry && typeof entry === 'object' ? entry : null;
-		const accountName = ma ? String(ma.account_name || ma.accountName || '').trim() : '';
-		if (!ma || !accountName) {
-			results.push({accountName: accountName || '', ok: false, error: '缺少 account_name'});
-			continue;
-		}
-		if (!/^[A-Za-z0-9_.-]+$/u.test(accountName)) {
-			results.push({accountName, ok: false, error: '账号名包含非法字符,无法保存'});
-			continue;
-		}
-		const sharedSecret = String(ma.shared_secret || ma.sharedSecret || '').trim();
-		const identitySecret = String(ma.identity_secret || ma.identitySecret || '').trim();
-		try {
-			store.mafiles.put(accountName, ma);
-			saved++;
-			results.push({
-				accountName,
-				ok: true,
-				hasSharedSecret: !!sharedSecret,
-				hasIdentitySecret: !!identitySecret,
-				profile: publicAccountProfile(readLocalAccountProfile(accountName))
-			});
-		} catch (err) {
-			results.push({accountName, ok: false, error: err && err.message ? err.message : '写入失败'});
-		}
-	}
-	res.json({success: true, saved, results});
-});
-
-app.post('/api/auth-code', (req, res) => {
-	const body = req.body || {};
-	const accountName = String(body.accountName || '').trim();
-	const localProfile = readLocalAccountProfile(accountName);
-	const storedAccount = findStoredAccount(accountName);
-	const sharedSecret = String(body.sharedSecret || localProfile.sharedSecret || (storedAccount && storedAccount.sharedSecret) || '').trim();
-
-	if (!sharedSecret) {
-		return res.status(409).json({success: false, error: '当前账号没有可用的 shared_secret'});
-	}
-
-	try {
-		const code = SteamTotp.generateAuthCode(sharedSecret);
-		const now = SteamTotp.time();
-		const expiresIn = 30 - (now % 30) || 30;
-		res.json({
-			success: true,
-			accountName,
-			code,
-			expiresIn,
-			expiresAt: new Date(Date.now() + expiresIn * 1000).toISOString()
-		});
-	} catch (err) {
-		res.status(500).json({success: false, error: err && err.message ? err.message : '生成验证码失败'});
-	}
-});
-
-app.post('/api/login', (req, res) => {
-	const body = req.body || {};
-	const accountName = String(body.accountName || '').trim();
-	// 浏览器不再持有密码/shared_secret:没传就用服务端名单里存的。
-	const storedAccount = findStoredAccount(accountName);
-	const password = String(body.password || (storedAccount && storedAccount.password) || '');
-	const localProfile = readLocalAccountProfile(accountName);
-	const sharedSecret = String(body.sharedSecret || localProfile.sharedSecret || (storedAccount && storedAccount.sharedSecret) || '').trim();
-	const identitySecret = String(body.identitySecret || localProfile.identitySecret || '').trim();
-	let twoFactorCode = String(body.twoFactorCode || '').trim();
-	// 没传 remember 时按名单里的设置(默认记住):记住才会保存 refreshToken,重启后才能免密恢复
-	const remember = body.remember !== undefined ? !!body.remember : !(storedAccount && storedAccount.remember === false);
-
-	if (!accountName || !password) {
-		return res.status(400).json({success: false, error: '账号和密码不能为空'});
-	}
-
-	// 同一账号已在登录中或在线:直接返回现有会话,不再新建客户端互相顶号。force=true 时强制重登。
-	const existing = body.force ? null : sessions.activeAttemptFor(accountName);
-	if (existing) {
-		return res.json({success: true, attempt: publicAttempt(existing), reused: true});
-	}
-
-	// 新建会话时会先拆掉该账号的旧会话(已登出/掉线/失败的)
-	const attempt = sessions.createAttempt({
-		accountName,
-		remember,
-		sharedSecret,
-		identitySecret,
-		hasMaFile: localProfile.hasMaFile,
-		country: localProfile.country,
-		hasWallet: localProfile.hasWallet,
-		currency: localProfile.currency,
-		currencyISO: localProfile.currencyISO,
-		balance: localProfile.balance
-	});
-
-	if (!body.sharedSecret && localProfile.sharedSecret) {
-		addLog(attempt, 'info', '已从本地 maFile 载入 shared_secret');
-	}
-
-	if (!body.identitySecret && localProfile.identitySecret) {
-		addLog(attempt, 'info', '已从本地 maFile 载入 identity_secret（用于发货确认）');
-	}
-
-	if (!twoFactorCode && sharedSecret) {
-		try {
-			twoFactorCode = SteamTotp.generateAuthCode(sharedSecret);
-			addLog(attempt, 'info', '已使用 shared_secret 生成移动令牌验证码');
-		} catch (err) {
-			addLog(attempt, 'warn', 'shared_secret 无法生成验证码: ' + err.message);
-		}
-	}
-
-	sessions.startLogon(attempt, {
-		accountName,
-		password,
-		twoFactorCode: twoFactorCode || undefined
-	});
-
-	res.json({success: true, attempt: publicAttempt(attempt)});
-});
-
-app.post('/api/login-refresh', (req, res) => {
-	const body = req.body || {};
-	const refreshToken = String(body.refreshToken || '').trim();
-	const accountName = String(body.accountName || '').trim();
-
-	if (!refreshToken) {
-		return res.status(400).json({success: false, error: 'refreshToken 不能为空'});
-	}
-
-	const localProfile = readLocalAccountProfile(accountName);
-	const attempt = sessions.createAttempt({
-		accountName,
-		remember: !!body.remember,
-		sharedSecret: localProfile.sharedSecret,
-		identitySecret: localProfile.identitySecret,
-		hasMaFile: localProfile.hasMaFile,
-		country: localProfile.country,
-		hasWallet: localProfile.hasWallet,
-		currency: localProfile.currency,
-		currencyISO: localProfile.currencyISO,
-		balance: localProfile.balance
-	});
-
-	sessions.startLogon(attempt, {refreshToken});
-	res.json({success: true, attempt: publicAttempt(attempt)});
-});
-
-app.post('/api/guard/:id', (req, res) => {
-	const attempt = getAttempt(req.params.id, res);
-	if (!attempt) {
-		return;
-	}
-
-	const code = String((req.body && req.body.code) || '').trim();
-	if (!code) {
-		return res.status(400).json({success: false, error: '验证码不能为空'});
-	}
-
-	if (!attempt.guardCallback) {
-		return res.status(409).json({success: false, error: '当前任务不需要 Steam Guard 验证码'});
-	}
-
-	sessions.submitGuardCode(attempt, code);
-
-	res.json({success: true, attempt: publicAttempt(attempt)});
-});
-
-app.post('/api/web-session/:id', (req, res) => {
-	const attempt = getAttempt(req.params.id, res);
-	if (!attempt) {
-		return;
-	}
-
-	if (!attempt.client || !attempt.client.steamID) {
-		return res.status(409).json({success: false, error: 'Steam 尚未登录'});
-	}
-
-	try {
-		attempt.status = 'web_session_pending';
-		addLog(attempt, 'info', '正在获取 WebSession cookies');
-		attempt.client.webLogOn();
-		emitAttempt(attempt);
-		res.json({success: true, attempt: publicAttempt(attempt)});
-	} catch (err) {
-		addLog(attempt, 'error', '获取 WebSession 失败: ' + err.message);
-		emitAttempt(attempt);
-		res.status(500).json({success: false, error: err.message});
-	}
-});
-
-app.post('/api/logout/:id', (req, res) => {
-	const attempt = getAttempt(req.params.id, res);
-	if (!attempt) {
-		return;
-	}
-
-	// 手动登出:取消待执行的登录重试,并清掉"重启后自动恢复"的意图
-	sessions.logout(attempt);
-	res.json({success: true, attempt: publicAttempt(attempt)});
-});
-
-// 前端删除账户时调用：把这些账号对应的后端保活会话一并清理。
-// 1) 登出在线客户端并移出内存任务表（这样 /api/attempts 不会再返回它们）；
-// 2) 删除数据库里已保存的 session（避免残留凭据）。
-app.post('/api/accounts/cleanup', (req, res) => {
-	const body = req.body || {};
-	const list = Array.isArray(body.accounts) ? body.accounts : [];
-
-	const names = [];
-	const ids = [];
-	for (const item of list) {
-		const accountName = item && item.accountName ? String(item.accountName).trim() : '';
-		const attemptId = item && item.attemptId ? String(item.attemptId).trim() : '';
-		if (accountName) {
-			names.push(accountName);
-		}
-		if (attemptId) {
-			ids.push(attemptId);
-		}
-	}
-
-	// 登出并移出会话表、清掉登录意图;session 按 accountName / steamID / id 任一作 key 保存过,一并删掉。
-	const {removedAttempts, sessionKeys} = sessions.removeAccounts(names, ids);
-	let removedFiles = 0;
-	try {
-		removedFiles = store.sessions.remove(sessionKeys);
-	} catch (err) {
-		console.warn('[cleanup] 删除 session 失败', err && err.message);
-	}
-
-	// 同步从持久化名单中移除,确保即使前端防抖推送未及时发出,服务端名单也保持一致。
-	let removedFromList = false;
-	try {
-		removedFromList = removeAccountsFromList(names);
-	} catch (err) {
-		console.warn('[cleanup] 更新账户名单失败', err && err.message);
-	}
-
-	res.json({success: true, removedAttempts, removedFiles, removedFromList});
-});
-
-app.post('/api/gc/connect/:id', (req, res) => {
-	const attempt = getAttempt(req.params.id, res);
-	if (!attempt) {
-		return;
-	}
-	const game = getPurchaseGame(req);
-	const config = getPurchaseGameConfig(game);
-
-	if (!attempt.client || !attempt.client.steamID || attempt.status === 'logged_out') {
-		return res.status(409).json({success: false, error: '当前账号尚未登录 Steam'});
-	}
-
-	try {
-		ensureAttemptGameSession(attempt, config.id);
-		try {
-			attempt.client.webLogOn();
-		} catch {}
-		addLog(attempt, 'info', `已请求连接 ${config.label} GC`);
-		emitAttempt(attempt);
-		res.json({success: true, attempt: publicAttempt(attempt)});
-	} catch (err) {
-		res.status(500).json({success: false, error: err.message || '连接 GC 失败'});
-	}
-});
-
-app.post('/api/gc/disconnect/:id', (req, res) => {
-	const attempt = getAttempt(req.params.id, res);
-	if (!attempt) {
-		return;
-	}
-	const game = getPurchaseGame(req);
-	const config = getPurchaseGameConfig(game);
-
-	if (!attempt.client || attempt.status === 'logged_out') {
-		return res.status(409).json({success: false, error: '当前账号尚未登录 Steam'});
-	}
-
-	try {
-		disconnectAttemptGameSession(attempt, config.id);
-		addLog(attempt, 'info', `已请求断开 ${config.label} GC`);
-		emitAttempt(attempt);
-		res.json({success: true, attempt: publicAttempt(attempt)});
-	} catch (err) {
-		res.status(500).json({success: false, error: err.message || '断开 GC 失败'});
-	}
-});
-
-app.get('/api/cookies/:id', debugOnly, (req, res) => {
-	const attempt = getAttempt(req.params.id, res);
-	if (!attempt) {
-		return;
-	}
-
-	if (!attempt.cookies || !attempt.cookies.length) {
-		return res.status(404).json({success: false, error: '当前任务没有 cookies'});
-	}
-
-	res.json({
-		success: true,
-		cookies: attempt.cookies,
-		cookieHeader: attempt.cookies.join('; ')
-	});
-});
+app.post('/api/accounts/list', accountRoute(req => accountService.saveAccounts(req.body || {}), '保存账户名单失败'));
+app.post('/api/accounts/meta', accountRoute(req => accountService.meta(req.body || {}), '读取账号资料失败'));
+// 服务端持久化 maFile:完整 maFile(含 identity_secret)加密存入数据库,发货/求购确认时取 identity_secret。
+app.post('/api/mafile/import', accountRoute(req => accountService.importMaFiles(req.body || {}), '导入 maFile 失败'));
+app.post('/api/auth-code', accountRoute(req => accountService.authCode(req.body || {}), '生成验证码失败'));
+app.post('/api/login', accountRoute(req => accountService.login(req.body || {}), '登录失败'));
+app.post('/api/login-refresh', accountRoute(req => accountService.loginWithRefreshToken(req.body || {}), '登录失败'));
+app.post('/api/guard/:id', accountRoute(req => accountService.submitGuard(req.params.id, req.body || {}), '提交验证码失败'));
+app.post('/api/web-session/:id', accountRoute(req => accountService.requestWebSession(req.params.id), '获取 WebSession 失败'));
+app.post('/api/logout/:id', accountRoute(req => accountService.logout(req.params.id), '登出失败'));
+// 前端删除账户时调用:登出、移出会话表,删掉保存的 session,并从名单移除。
+app.post('/api/accounts/cleanup', accountRoute(req => accountService.cleanup(req.body || {}), '清理失败'));
+app.post('/api/gc/connect/:id', accountRoute(req => accountService.connectGc(req.params.id, getPurchaseGame(req)), '连接 GC 失败'));
+app.post('/api/gc/disconnect/:id', accountRoute(req => accountService.disconnectGc(req.params.id, getPurchaseGame(req)), '断开 GC 失败'));
+app.get('/api/cookies/:id', debugOnly, accountRoute(req => accountService.cookies(req.params.id), '读取 cookies 失败'));
 
 app.get('/api/inventory/:id', async (req, res) => {
 	const attempt = getAttempt(req.params.id, res);
@@ -1234,7 +927,7 @@ function sendBuyGameError(res, err, fallback) {
 
 // 可购买账户:已登录且有 WebSession cookie 的账号(买游戏只需 cookie,不需要 GC)。
 app.get('/api/buygame/online-accounts', (req, res) => {
-	res.json({success: true, accounts: listCookieFlowAccounts(attempts.values(), resolveInventoryCookies)});
+	res.json({success: true, accounts: listCookieFlowAccounts(attempts.values(), profiles.cookiesFor)});
 });
 
 // 解析一个 subid(packageid):返回游戏名/价格,供前端确认购买内容。query: { packageId|subid, accountId? }
@@ -1266,7 +959,7 @@ function sendMarketError(res, err, fallback) {
 
 // 可挂求购的在线账户(同「买游戏」:已登录 + 有 WebSession cookie)。
 app.get('/api/market/online-accounts', (req, res) => {
-	res.json({success: true, accounts: listCookieFlowAccounts(attempts.values(), resolveInventoryCookies)});
+	res.json({success: true, accounts: listCookieFlowAccounts(attempts.values(), profiles.cookiesFor)});
 });
 
 // 行情参考。query: { accountId|account, url | (appid, marketHashName), itemNameId? }
@@ -1488,30 +1181,7 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 sessions.start();
 if (SESSION_RESTORE_ENABLED) {
 	// 按登录意图恢复上次在线的账号:优先用保存的 refreshToken,失效再用名单里的密码 + maFile 令牌
-	sessions.restoreAll(accountName => {
-		const stored = findStoredAccount(accountName);
-		if (!stored) {
-			return null;   // 账号已从名单删除
-		}
-		const profile = readLocalAccountProfile(stored.accountName);
-		const saved = store.sessions.get(safeName(stored.accountName));
-		return {
-			profile: {
-				accountName: stored.accountName,
-				remember: stored.remember !== false,
-				sharedSecret: profile.sharedSecret || stored.sharedSecret || '',
-				identitySecret: profile.identitySecret || '',
-				hasMaFile: profile.hasMaFile,
-				country: profile.country || stored.country || '',
-				hasWallet: profile.hasWallet || stored.hasWallet,
-				currency: profile.currency != null ? profile.currency : stored.currency,
-				currencyISO: profile.currencyISO || '',
-				balance: profile.balance != null ? profile.balance : stored.balance
-			},
-			refreshToken: saved && saved.refreshToken ? String(saved.refreshToken) : '',
-			password: stored.password || ''
-		};
-	});
+	sessions.restoreAll(accountName => accountService.restoreCredentials(accountName));
 }
 
 // 给新建的 Steam 客户端挂 CS2/TF2 GC 模块(会话本身由 src/steam/session-manager.ts 管理)。
@@ -1607,10 +1277,6 @@ function getPurchaseGame(req) {
 	);
 }
 
-function saveSession(attempt) {
-	sessions.saveSession(attempt);
-}
-
 function getAttempt(id, res) {
 	const attempt = attempts.get(id);
 	if (!attempt) {
@@ -1631,301 +1297,6 @@ function emitAttempt(attempt) {
 
 function publicAttempt(attempt) {
 	return sessions.publicAttempt(attempt);
-}
-
-function safeName(value) {
-	return String(value || 'session')
-		.replace(/[^a-z0-9_.-]+/gi, '_')
-		.replace(/^_+|_+$/g, '')
-		.slice(0, 80) || 'session';
-}
-
-function publicAccountProfile(profile) {
-	return {
-		accountName: profile.accountName,
-		steamId: profile.steamID || profile.steamId || '',
-		hasMaFile: !!profile.hasMaFile,
-		hasIdentitySecret: !!profile.identitySecret,
-		country: profile.country || '',
-		hasWallet: !!profile.hasWallet,
-		currency: profile.currency == null ? null : Number(profile.currency),
-		currencyISO: profile.currencyISO || '',
-		balance: profile.balance == null ? null : Number(profile.balance)
-	};
-}
-
-// ===== 账户名单持久化(多浏览器同步) =====
-// 只保存"耐久"字段;运行态(status/gcConnected/inventoryCount...)由前端登录后自行刷新,不落盘。
-function sanitizeStoredAccount(account) {
-	return normalizeStoredAccount(account);
-}
-
-function readAccountList() {
-	return store.accounts.list();
-}
-
-// 整表替换;规范化与按账号名去重(保留首次出现的位置,值取最后一次)在 src/store/accounts.ts。
-function writeAccountList(list) {
-	return store.accounts.replaceAll(Array.isArray(list) ? list : []);
-}
-
-// 从名单中移除指定账号(删除账户时调用),返回是否有改动。
-function removeAccountsFromList(accountNames) {
-	return store.accounts.removeByNames(accountNames || []);
-}
-
-// 下发给浏览器的名单不含密码/shared_secret/一次性验证码,只给"有没有"的标记。
-function publicStoredAccount(account) {
-	const {password, sharedSecret, twoFactorCode, ...rest} = account;
-	return {...rest, hasPassword: !!password, hasSharedSecret: !!sharedSecret};
-}
-
-// 浏览器推回来的名单里这几个字段通常为空(服务端从不下发),空值 = 沿用服务端已存的值,非空才覆盖。
-function mergeClientAccountSecrets(list) {
-	const stored = new Map(readAccountList().map(acc => [acc.accountName.toLowerCase(), acc]));
-	return (Array.isArray(list) ? list : []).map(item => {
-		const acc = sanitizeStoredAccount(item);
-		if (!acc) {
-			return null;
-		}
-		const prev = stored.get(acc.accountName.toLowerCase());
-		if (prev) {
-			if (!acc.password) acc.password = prev.password;
-			if (!acc.sharedSecret) acc.sharedSecret = prev.sharedSecret;
-			if (!acc.twoFactorCode) acc.twoFactorCode = prev.twoFactorCode;
-		}
-		return acc;
-	}).filter(Boolean);
-}
-
-function findStoredAccount(accountName) {
-	const key = String(accountName || '').trim().toLowerCase();
-	if (!key) {
-		return null;
-	}
-	return readAccountList().find(acc => acc.accountName.toLowerCase() === key) || null;
-}
-
-function readLocalAccountProfile(accountName) {
-	const name = String(accountName || '').trim();
-	const profile = {
-		accountName: name,
-		hasMaFile: false,
-		sharedSecret: '',
-		identitySecret: '',
-		refreshToken: '',
-		country: '',
-		hasWallet: false,
-		currency: null,
-		currencyISO: '',
-		balance: null
-	};
-
-	if (!name) {
-		return profile;
-	}
-
-	const maFile = store.mafiles.get(name);
-	if (maFile && typeof maFile === 'object') {
-		profile.hasMaFile = true;
-		profile.sharedSecret = String(maFile.shared_secret || maFile.sharedSecret || '').trim();
-		profile.identitySecret = String(maFile.identity_secret || maFile.identitySecret || '').trim();
-		profile.steamID = String(maFile.SteamID || maFile.steamID || '').trim();
-		const session = maFile.Session && typeof maFile.Session === 'object' ? maFile.Session : null;
-		if (session && session.RefreshToken) {
-			profile.refreshToken = String(session.RefreshToken).trim();
-		}
-	}
-
-	const cookies = readJsonFile(path.join(CONFIG_COOKIES_DIR, name + '.json'));
-	if (cookies && typeof cookies === 'object' && !profile.refreshToken && cookies.refreshToken) {
-		profile.refreshToken = String(cookies.refreshToken).trim();
-	}
-
-	const cache = readJsonFile(ACCOUNT_CACHE_FILE);
-	const cached = findCachedAccount(cache, name);
-	if (cached && typeof cached === 'object') {
-		profile.currency = cached.currency == null ? null : Number(cached.currency);
-		profile.currencyISO = String(cached.currencyISO || currencyIdToIso(profile.currency) || '').trim().toUpperCase();
-		profile.balance = cached.balance == null ? null : Number(cached.balance);
-		profile.hasWallet = profile.balance != null && Number.isFinite(profile.balance);
-		profile.country = resolveAccountCountry({
-			country: cached.country,
-			currency: profile.currency,
-			currencyISO: profile.currencyISO
-		});
-	}
-
-	return profile;
-}
-
-
-function resolveAccountCountry(details) {
-	const currencyISO = String((details && details.currencyISO) || currencyIdToIso(details && details.currency) || '').trim().toUpperCase();
-	if (currencyISO && CURRENCY_ISO_TO_COUNTRY[currencyISO]) {
-		return CURRENCY_ISO_TO_COUNTRY[currencyISO];
-	}
-
-	if (!currencyISO && details) {
-		return normalizeCountryCode(details.country);
-	}
-
-	return '';
-}
-
-// 账户"国家/地区"内存缓存(accountName 小写 -> CC),避免重复请求商店页
-const accountStoreCountryCache = new Map();
-// 上次请求时间(accountName 小写 -> ms),给失败的账户加冷却,避免每次轮询都打 Steam
-const accountStoreCountryFetchedAt = new Map();
-const ACCOUNT_COUNTRY_COOLDOWN_MS = 5 * 60 * 1000;
-
-// 用账户自己的 cookie 请求 Steam 商店账户页,解析出"账户国家/地区"。
-// 这是账户在 Steam 上设置的商店国家(网页"国家/地区"显示的值),权威且不随登录 IP 变化;
-// 数据源是商店页 #application_config 的 data-config JSON 里的 COUNTRY 字段。
-//
-// 注意:刚登录的账户只有 steamLoginSecure/sessionid 等,首次访问 /account/ 时 Steam 会 302
-// 回自身并下发 browserid/Steam_Language/steamCountry,必须带上这些新 cookie 再请一次才会返回
-// 200。Node fetch 跨重定向不带 Set-Cookie,所以这里手动跟随重定向并累积 cookie。
-async function fetchAccountStoreCountry(attempt) {
-	const cookies = resolveInventoryCookies(attempt);
-	if (!cookies.length) {
-		return '';
-	}
-	const jar = new Map();
-	const putCookie = raw => {
-		const kv = String(raw).split(';')[0];
-		const idx = kv.indexOf('=');
-		if (idx > 0) {
-			jar.set(kv.slice(0, idx).trim(), kv.slice(idx + 1).trim());
-		}
-	};
-	cookies.forEach(putCookie);
-	const baseHeaders = {
-		Accept: 'text/html,application/xhtml+xml',
-		'Accept-Language': 'en-US,en;q=0.9',
-		'User-Agent': (attempt && attempt.userAgent) || 'Mozilla/5.0'
-	};
-	const controller = new AbortController();
-	const timer = setTimeout(() => controller.abort(), 9000);
-	let url = 'https://store.steampowered.com/account/';
-	try {
-		for (let hop = 0; hop < 5; hop++) {
-			const cookieHeader = Array.from(jar.entries()).map(([k, v]) => `${k}=${v}`).join('; ');
-			const res = await fetch(url, {headers: {...baseHeaders, Cookie: cookieHeader}, redirect: 'manual', signal: controller.signal});
-			const setCookies = typeof res.headers.getSetCookie === 'function' ? res.headers.getSetCookie() : [];
-			setCookies.forEach(putCookie);
-			if (res.status >= 300 && res.status < 400) {
-				const loc = res.headers.get('location');
-				if (!loc) {
-					throw new Error('账户页重定向缺少 location');
-				}
-				url = new URL(loc, url).href;
-				if (/\/login\b/i.test(url)) {
-					throw new Error('账户页跳转到登录页(cookie 已失效,需重新登录)');
-				}
-				continue;
-			}
-			if (!res.ok) {
-				throw new Error('账户页 HTTP ' + res.status + '(cookie 可能已失效)');
-			}
-			const html = await res.text();
-			// 必须确认是"已登录"的账户页,否则 application_config.COUNTRY 可能是按 IP 的访客值
-			const loggedIn = /account_pulldown/.test(html)
-				|| (attempt && attempt.steamID && html.includes(String(attempt.steamID)));
-			if (!loggedIn) {
-				throw new Error('账户页未登录(cookie 可能已失效)');
-			}
-			const m = html.match(/&quot;COUNTRY&quot;:&quot;([A-Za-z]{2})&quot;/)
-				|| html.match(/"COUNTRY"\s*:\s*"([A-Za-z]{2})"/)
-				|| html.match(/"countrycode"\s*:\s*"([A-Za-z]{2})"/);
-			return m ? normalizeCountryCode(m[1]) : '';
-		}
-		throw new Error('账户页重定向次数过多(cookie 可能已失效)');
-	} finally {
-		clearTimeout(timer);
-	}
-}
-
-// 在线账户登录拿到 WebSession 后,后台刷新其真实账户国家,更新 attempt 并下发(不阻塞登录)。
-function refreshAttemptStoreCountry(attempt) {
-	if (!attempt) {
-		return;
-	}
-	const key = String(attempt.accountName || '').toLowerCase();
-	fetchAccountStoreCountry(attempt).then(country => {
-		if (key) {
-			accountStoreCountryFetchedAt.set(key, Date.now());
-		}
-		if (!country) {
-			return;
-		}
-		if (key) {
-			accountStoreCountryCache.set(key, country);
-		}
-		if (country !== attempt.country) {
-			attempt.country = country;
-			addLog(attempt, 'info', '账户国家/地区: ' + country);
-			saveSession(attempt);
-			emitAttempt(attempt);
-		}
-	}).catch(err => {
-		if (key) {
-			accountStoreCountryFetchedAt.set(key, Date.now());
-		}
-		addLog(attempt, 'warn', '获取账户国家失败: ' + (err && err.message ? err.message : err));
-	});
-}
-
-// 给账户列表(/api/accounts/meta)补全缺失的"国家/地区":用持久化的 cookie 查商店账户页。
-// 整体有时间预算 + 并发上限 + 失败冷却,保证接口不会被网络请求长时间拖住。
-async function resolveMissingAccountCountries(accounts) {
-	const pending = Object.keys(accounts).filter(name => !accounts[name].country);
-	if (!pending.length) {
-		return;
-	}
-	const deadline = Date.now() + 6000;
-	const queue = pending.slice();
-	const worker = async () => {
-		while (queue.length && Date.now() < deadline) {
-			const name = queue.shift();
-			const key = name.toLowerCase();
-			const cached = accountStoreCountryCache.get(key);
-			if (cached) {
-				accounts[name].country = cached;
-				continue;
-			}
-			const last = accountStoreCountryFetchedAt.get(key) || 0;
-			if (Date.now() - last < ACCOUNT_COUNTRY_COOLDOWN_MS) {
-				continue;
-			}
-			accountStoreCountryFetchedAt.set(key, Date.now());
-			try {
-				const country = await fetchAccountStoreCountry({accountName: name});
-				if (country) {
-					accountStoreCountryCache.set(key, country);
-					accounts[name].country = country;
-				}
-			} catch {}
-		}
-	};
-	const concurrency = Math.min(5, pending.length);
-	await Promise.all(Array.from({length: concurrency}, worker));
-}
-
-function findCachedAccount(cache, accountName) {
-	if (!cache || typeof cache !== 'object') {
-		return null;
-	}
-	if (cache[accountName]) {
-		return cache[accountName];
-	}
-	const lowered = accountName.toLowerCase();
-	for (const key of Object.keys(cache)) {
-		if (key.toLowerCase() === lowered) {
-			return cache[key];
-		}
-	}
-	return null;
 }
 
 // 不存在返回 null;损坏时先备份坏文件再返回 null(见 lib/atomic-file.js)。
@@ -2304,30 +1675,9 @@ function pickTag(tags, category) {
 	return tag ? (tag.localized_tag_name || tag.name || tag.internal_name || '') : '';
 }
 
+// 会话的 WebSession cookies(终端机、库存还在用),见 src/accounts/profiles.ts
 function resolveInventoryCookies(attempt) {
-	if (Array.isArray(attempt.cookies) && attempt.cookies.length) {
-		return attempt.cookies;
-	}
-
-	const session = store.sessions.get(safeName(attempt.accountName || attempt.steamID || attempt.id));
-	if (session && Array.isArray(session.cookies) && session.cookies.length) {
-		return session.cookies;
-	}
-
-	const cookiesFile = path.join(CONFIG_COOKIES_DIR, safeName(attempt.accountName) + '.json');
-	const cookieData = readJsonFile(cookiesFile);
-	const rawCookieData = readJsonFile(path.join(CONFIG_COOKIES_DIR, String(attempt.accountName || '').trim() + '.json'));
-	const source = cookieData || rawCookieData;
-	if (source) {
-		if (Array.isArray(source.cookies) && source.cookies.length) {
-			return source.cookies;
-		}
-		if (typeof source.cookieHeader === 'string' && source.cookieHeader.trim()) {
-			return source.cookieHeader.split(/;\s*/).filter(Boolean);
-		}
-	}
-
-	return [];
+	return profiles.cookiesFor(attempt);
 }
 
 function serializeForJson(value, seen = new WeakSet()) {

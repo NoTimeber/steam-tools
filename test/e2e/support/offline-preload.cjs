@@ -110,6 +110,10 @@ class FakeSteamUser extends EventEmitter {
 		});
 		setTimeout(() => {
 			const name = details.accountName || String(details.refreshToken || '').replace(/^RT-GOOD-/, '');
+			if (details.password === 'pw-guard' && !details.twoFactorCode) {
+				this.askGuard(name, false);
+				return;
+			}
 			const ok = (details.refreshToken && String(details.refreshToken).startsWith('RT-GOOD-')) || details.password === 'pw-good';
 			if (!ok) {
 				const err = new Error(details.refreshToken ? 'AccessDenied' : 'InvalidPassword');
@@ -117,12 +121,25 @@ class FakeSteamUser extends EventEmitter {
 				this.emit('error', err);
 				return;
 			}
-			this.steamID = {getSteamID64: () => '76561190' + String(100000000 + name.length * 1111)};
-			this.emit('loggedOn', {});
-			this.emit('wallet', true, 1, this.walletCents / 100);
-			this.emit('refreshToken', 'RT-GOOD-' + name);
-			this.emit('webSession', 'sid-' + this.n, ['steamLoginSecure=fake-' + this.n]);
+			this.succeed(name);
 		}, 30);
+	}
+
+	// 密码 pw-guard:要移动令牌验证码,24680 才对
+	askGuard(name, lastCodeWrong) {
+		this.emit('steamGuard', null, code => {
+			record({event: 'guardCode', client: this.n, code});
+			setTimeout(() => (code === '24680' ? this.succeed(name) : this.askGuard(name, true)), 10);
+		}, lastCodeWrong);
+	}
+
+	succeed(name) {
+		this.steamID = {getSteamID64: () => '76561190' + String(100000000 + name.length * 1111)};
+		this.emit('loggedOn', {});
+		this.emit('wallet', true, 1, this.walletCents / 100);
+		this.emit('refreshToken', 'RT-GOOD-' + name);
+		this.emit('webSession', 'sid-' + this.n, ['steamLoginSecure=fake-' + this.n]);
+		this.sessionReady = true;
 	}
 
 	logOff() {
@@ -133,7 +150,14 @@ class FakeSteamUser extends EventEmitter {
 		this.playing = [];
 	}
 
-	webLogOn() {}
+	// 登录完成后再调(手动刷新 WebSession、进游戏时)才回新的 webSession;登录过程中那次由 succeed() 发
+	webLogOn() {
+		if (!this.sessionReady) {
+			return;
+		}
+		record({event: 'webLogOn', client: this.n});
+		setTimeout(() => this.emit('webSession', 'sid-' + this.n, ['steamLoginSecure=fake-' + this.n]), 10);
+	}
 
 	gamesPlayed(apps) {
 		const next = (apps || []).map(Number);
@@ -510,6 +534,22 @@ function fakeStore(url, init) {
 	const tokenOk = !!owner && url.searchParams.get('access_token') === 'WT-' + owner;
 
 	switch (where) {
+		// 账户页(查真实国家用),只在设了 FAKE_STORE_COUNTRY 时模拟,否则照旧被拦(其它测试的国家不受影响)。
+		// 和真实 Steam 一样:第一次没有 browserid 会 302 回自己并下发 cookie
+		case 'store.steampowered.com/account/': {
+			const country = process.env.FAKE_STORE_COUNTRY;
+			if (!country) {
+				return null;
+			}
+			record({event: 'storeRequest', method: 'GET', path: where, owner});
+			if (!owner) {
+				return new Response('', {status: 302, headers: {location: 'https://store.steampowered.com/login/'}});
+			}
+			if (!cookieValue(headers.cookie, 'browserid')) {
+				return new Response('', {status: 302, headers: {location: '/account/', 'set-cookie': 'browserid=4242; Path=/'}});
+			}
+			return new Response(`<div id="account_pulldown">${owner}</div><div id="application_config" data-config="{&quot;COUNTRY&quot;:&quot;${country}&quot;}"></div>`, {status: 200});
+		}
 		case 'store.steampowered.com/api/packagedetails': {
 			record({event: 'storeRequest', method: 'GET', path: where, owner, query: Object.fromEntries(url.searchParams)});
 			const ids = String(url.searchParams.get('packageids') || '').split(',');
