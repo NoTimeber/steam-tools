@@ -63,7 +63,8 @@ const {writeFileAtomic, writeJsonAtomic, readJsonFileSafe} = require('./lib/atom
 const PORT = Number(process.env.PORT || 53110);
 const HOST = process.env.HOST || '0.0.0.0';
 const ROOT = APP_ROOT;
-const DATA_DIR = path.join(ROOT, 'data');
+// 运行数据目录。Docker 部署时挂卷到这里(DATA_DIR=/data),本地默认仍是安装根下的 data/。
+const DATA_DIR = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(ROOT, 'data');
 const SESSION_DIR = path.join(DATA_DIR, 'sessions');
 const STEAM_USER_DIR = path.join(DATA_DIR, 'steam-user');
 
@@ -2396,6 +2397,35 @@ server.listen(PORT, HOST, () => {
 		console.warn(`[auth] 初始化令牌: ${auth.setupToken}  (本次启动有效;可用 SETUP_TOKEN 环境变量固定)`);
 	}
 });
+
+// 未处理的 Promise 拒绝只记日志不退出:进程一退,所有在线 Steam 会话都会掉。
+process.on('unhandledRejection', reason => {
+	console.error('[unhandledRejection]', reason && reason.stack ? reason.stack : reason);
+});
+
+// docker stop / Ctrl+C:先登出所有 Steam 会话再退出;10 秒兜底强退。
+let shuttingDown = false;
+function shutdown(signal) {
+	if (shuttingDown) {
+		return;
+	}
+	shuttingDown = true;
+	console.log(`[shutdown] 收到 ${signal},登出 ${attempts.size} 个会话并关闭服务`);
+	for (const attempt of attempts.values()) {
+		clearLoginWatchdog(attempt);
+		try {
+			if (attempt.client) attempt.client.logOff();
+		} catch (_) {}
+	}
+	io.close();
+	server.close(() => process.exit(0));
+	if (typeof server.closeAllConnections === 'function') {
+		server.closeAllConnections();
+	}
+	setTimeout(() => process.exit(0), 10000).unref();
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
 
 function createAttempt(options) {
 	const attempt = {

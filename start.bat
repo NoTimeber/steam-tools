@@ -6,7 +6,7 @@ cd /d "%~dp0"
 :: Check Node.js
 where node >nul 2>&1
 if %errorlevel% neq 0 (
-    echo [ERROR] Node.js not found. Please install Node.js ^>= 20.6
+    echo [ERROR] Node.js not found. Please install Node.js ^>= 20.12
     echo Download: https://nodejs.org
     echo.
     pause

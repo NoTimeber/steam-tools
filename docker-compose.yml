@@ -1,0 +1,47 @@
+services:
+  steam-tools:
+    build: .
+    image: steam-tools:latest
+    container_name: steam-tools
+    restart: unless-stopped
+    # tini 做 PID 1,docker stop 的 SIGTERM 能传到 node,让它先登出 Steam 会话再退出
+    init: true
+    stop_grace_period: 15s
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATA_DIR: /data
+      HOST: 0.0.0.0
+      PORT: 53110
+      # 反代经 docker bridge 网络进来(172.16/12 等),要信任它转发的 X-Forwarded-*
+      TRUST_PROXY: loopback,uniquelocal
+    volumes:
+      # 账号/maFile/session/UU token 全在这里。宿主目录需属于 uid 1000(容器内 node 用户)
+      - ./data:/data
+    ports:
+      # 只绑本机,公网只能经反代(HTTPS)访问
+      - "127.0.0.1:53110:53110"
+
+  # 可选:自带 Caddy 反代,自动申请 HTTPS 证书。
+  # 用法:.env 里设 DOMAIN=tools.example.com,然后 docker compose --profile caddy up -d
+  # 已有 Nginx 的话不用启它,参考 deploy/nginx.conf.example。
+  caddy:
+    image: caddy:2
+    profiles: ["caddy"]
+    restart: unless-stopped
+    depends_on:
+      - steam-tools
+    environment:
+      DOMAIN: ${DOMAIN:-}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:
