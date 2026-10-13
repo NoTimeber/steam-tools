@@ -672,11 +672,11 @@ function fakeInventory(url, init) {
 	const json = value => new Response(JSON.stringify(value), {status: 200, headers: {'content-type': 'application/json'}});
 	const rifle = {
 		classid: '1', instanceid: '0', name: 'AK-47 | 红线 (久经沙场)', market_hash_name: 'AK-47 | Redline (Field-Tested)', tradable: 1, marketable: 1, icon_url: 'ak',
-		tags: [{category: 'Type', localized_tag_name: '步枪'}, {category: 'Rarity', localized_tag_name: '保密'}, {category: 'Exterior', localized_tag_name: '久经沙场'}]
+		tags: [{category: 'Type', internal_name: 'CSGO_Type_Rifle', localized_tag_name: '步枪'}, {category: 'Rarity', internal_name: 'Rarity_Legendary_Weapon', localized_tag_name: '保密'}, {category: 'Exterior', internal_name: 'WearCategory2', localized_tag_name: '久经沙场'}]
 	};
 	const key = {
 		classid: '2', instanceid: '0', name: '武器箱钥匙', market_hash_name: 'CS:GO Case Key', tradable: 0, marketable: 0,
-		owner_descriptions: [{value: 'Tradable After Feb 03, 2099 (7:00:00) GMT'}], tags: [{category: 'Type', localized_tag_name: '钥匙'}]
+		owner_descriptions: [{value: 'Tradable After Feb 03, 2099 (7:00:00) GMT'}], tags: [{category: 'Type', internal_name: 'CSGO_Tool_WeaponCase_KeyTag', localized_tag_name: '钥匙'}]
 	};
 	if (!url.searchParams.get('start_assetid')) {
 		return json({
