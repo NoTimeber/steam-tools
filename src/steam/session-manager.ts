@@ -10,6 +10,7 @@ import type {EventEmitter} from 'node:events';
 import {randomBytes} from 'node:crypto';
 import type {SteamSessionStore} from '../store/steam-sessions.ts';
 import type {LoginIntentStore} from '../store/login-intents.ts';
+import {normalizeGame} from './games.ts';
 
 export interface SteamClient extends EventEmitter {
 	steamID: {getSteamID64(): string} | null;
@@ -242,7 +243,7 @@ export function createSessionManager(options: SessionManagerOptions) {
 			gcConnected: !!attempt.gcConnected,
 			cs2GcConnected: !!attempt.cs2GcConnected,
 			tf2GcConnected: !!attempt.tf2GcConnected,
-			activeGame: String(attempt.activeGame || '').trim().toLowerCase() === 'tf2' ? 'tf2' : 'cs2',
+			activeGame: normalizeGame(attempt.activeGame),
 			inventoryCount: Number(attempt.inventoryCount || 0),
 			inventorySource: attempt.inventorySource || '',
 			guard: attempt.guard,

@@ -63,6 +63,21 @@ const {writeFileAtomic, writeJsonAtomic, readJsonFileSafe} = require('./lib/atom
 const {openStore, normalizeStoredAccount, uuTokenId} = require('../src/store/index.ts');
 // Steam 登录会话管理(TypeScript):每账号一个会话、登录/重连看门狗、重启自动恢复,见 src/steam/。
 const {createSessionManager} = require('../src/steam/session-manager.ts');
+// GC 相关(TypeScript):币种表、游戏配置、价目表解析、GC 请求收发,见 src/steam/。
+const {CURRENCY_ISO_TO_COUNTRY} = require('../src/steam/currencies.ts');
+const {
+	GAME_CONFIGS: PURCHASE_GAME_CONFIGS,
+	normalizeGame: normalizePurchaseGame,
+	gameConfig: getPurchaseGameConfig
+} = require('../src/steam/games.ts');
+const {decodePriceSheet, extractStorePrices, normalizePriceMap} = require('../src/steam/price-sheet.ts');
+const {
+	sendGcRequest: sendGameGcRequest,
+	updateDefaultGcState: updateAttemptDefaultGcState,
+	ensureGameSession: ensureAttemptGameSession,
+	disconnectGameSession: disconnectAttemptGameSession,
+	waitForGcConnection: waitForAttemptGcConnection
+} = require('../src/steam/gc-client.ts');
 
 const PORT = Number(process.env.PORT || 53110);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -141,52 +156,6 @@ const TF2_APP_ID = 440;
 const INVENTORY_APP_ID = CS2_APP_ID;
 const INVENTORY_CONTEXT_ID = 2;
 const INVENTORY_PAGE_SIZE = 2000;
-const CURRENCY_ISO_TO_COUNTRY = Object.freeze({
-	AED: 'AE',
-	ARS: 'AR',
-	AUD: 'AU',
-	BGN: 'BG',
-	BRL: 'BR',
-	BYN: 'BY',
-	CAD: 'CA',
-	CHF: 'CH',
-	CLP: 'CL',
-	CNY: 'CN',
-	COP: 'CO',
-	CRC: 'CR',
-	CZK: 'CZ',
-	DKK: 'DK',
-	EUR: 'EU',
-	GBP: 'GB',
-	HKD: 'HK',
-	HRK: 'HR',
-	HUF: 'HU',
-	IDR: 'ID',
-	ILS: 'IL',
-	INR: 'IN',
-	JPY: 'JP',
-	KRW: 'KR',
-	KWD: 'KW',
-	KZT: 'KZ',
-	MYR: 'MY',
-	MXN: 'MX',
-	NOK: 'NO',
-	NZD: 'NZ',
-	PEN: 'PE',
-	PHP: 'PH',
-	PLN: 'PL',
-	QAR: 'QA',
-	RUB: 'RU',
-	SAR: 'SA',
-	SGD: 'SG',
-	THB: 'TH',
-	TRY: 'TR',
-	TWD: 'TW',
-	UAH: 'UA',
-	UYU: 'UY',
-	VND: 'VN',
-	ZAR: 'ZA'
-});
 const LOCAL_CM_FALLBACKS = [
 	{
 		endpoint: 'cm0.steampowered.com:443',
@@ -337,26 +306,6 @@ const PURCHASE_CATEGORY_INDEX = Object.freeze(PURCHASE_CATEGORY_ORDER.reduce((ma
 }, Object.create(null)));
 const PURCHASE_PRICE_SHEET_DIR = path.join(DATA_DIR, 'price-sheets');
 const PURCHASE_CATALOG_CACHE_DIR = path.join(DATA_DIR, 'purchase-catalogs');
-const PURCHASE_GAME_CONFIGS = Object.freeze({
-	cs2: {
-		id: 'cs2',
-		label: 'CS2',
-		taskType: 'cs2-purchase',
-		appId: CS2_APP_ID,
-		moduleKey: 'csgo',
-		gcStateKey: 'cs2GcConnected',
-		defaultPublicGcKey: 'gcConnected'
-	},
-	tf2: {
-		id: 'tf2',
-		label: 'TF2',
-		taskType: 'tf2-purchase',
-		appId: TF2_APP_ID,
-		moduleKey: 'tf2',
-		gcStateKey: 'tf2GcConnected',
-		defaultPublicGcKey: 'tf2GcConnected'
-	}
-});
 const purchaseCatalogStates = {
 	cs2: null,
 	tf2: null
@@ -2871,112 +2820,11 @@ function handleGcInventoryChanged(attempt, csgo) {
 	emitAttempt(attempt);
 }
 
-function normalizePurchaseGame(value) {
-	const raw = String(value || '').trim().toLowerCase();
-	if (raw === 'tf2' || raw === '440' || raw === 'teamfortress2' || raw === 'team fortress 2') {
-		return 'tf2';
-	}
-	return 'cs2';
-}
-
 function getPurchaseGame(req) {
 	return normalizePurchaseGame(
 		req && req.query && req.query.game
 		|| req && req.body && req.body.game
 	);
-}
-
-function getPurchaseGameConfig(game) {
-	return PURCHASE_GAME_CONFIGS[normalizePurchaseGame(game)] || PURCHASE_GAME_CONFIGS.cs2;
-}
-
-function updateAttemptDefaultGcState(attempt) {
-	if (!attempt) {
-		return;
-	}
-	attempt.gcConnected = !!attempt.cs2GcConnected;
-	if (!attempt.activeGame) {
-		attempt.activeGame = 'cs2';
-	}
-}
-
-function ensureAttemptGameSession(attempt, game) {
-	if (!attempt || !attempt.client) {
-		return false;
-	}
-	const config = getPurchaseGameConfig(game);
-	const nextGame = normalizePurchaseGame(config.id);
-	const currentGame = normalizePurchaseGame(attempt.activeGame);
-	const gcStateKey = config.gcStateKey;
-	if (currentGame === nextGame && attempt[gcStateKey]) {
-		return true;
-	}
-	if (nextGame === 'tf2') {
-		attempt.cs2GcConnected = false;
-		attempt.gcConnected = false;
-	} else {
-		attempt.tf2GcConnected = false;
-	}
-	attempt[gcStateKey] = false;
-	attempt.activeGame = config.id;
-	attempt.client.gamesPlayed([config.appId]);
-	try {
-		attempt.client.webLogOn();
-	} catch {}
-	updateAttemptDefaultGcState(attempt);
-	return true;
-}
-
-function disconnectAttemptGameSession(attempt, game) {
-	if (!attempt || !attempt.client) {
-		return false;
-	}
-	try {
-		attempt.client.gamesPlayed([]);
-	} catch {}
-	attempt.gcConnected = false;
-	attempt.cs2GcConnected = false;
-	attempt.tf2GcConnected = false;
-	attempt.inventoryCount = 0;
-	attempt.inventorySource = '';
-	attempt.inventoryCache = null;
-	attempt.communityInvTriedAt = 0;
-	attempt.inventoryInflight = null;
-	if (game) {
-		attempt.activeGame = normalizePurchaseGame(game);
-	}
-	return true;
-}
-
-function waitForAttemptGcConnection(attempt, game, timeoutMs = PURCHASE_GC_TIMEOUT_MS) {
-	const config = getPurchaseGameConfig(game);
-	if (attempt && attempt[config.gcStateKey]) {
-		return Promise.resolve();
-	}
-	const module = attempt && attempt[config.moduleKey];
-	if (!module || typeof module.once !== 'function') {
-		return Promise.reject(new Error(`当前账号缺少 ${config.label} GC 模块`));
-	}
-	return new Promise((resolve, reject) => {
-		let settled = false;
-		const finish = (handler) => {
-			if (settled) {
-				return;
-			}
-			settled = true;
-			clearTimeout(timer);
-			module.removeListener('connectedToGC', onConnected);
-			module.removeListener('error', onError);
-			handler();
-		};
-		const onConnected = () => finish(resolve);
-		const onError = (err) => finish(() => reject(err instanceof Error ? err : new Error(String(err || 'GC error'))));
-		const timer = setTimeout(() => {
-			finish(() => reject(new Error(`等待 ${config.label} GC 连接超时`)));
-		}, Math.max(1000, Number(timeoutMs || 0)));
-		module.once('connectedToGC', onConnected);
-		module.once('error', onError);
-	});
 }
 
 function saveSession(attempt) {
@@ -4440,111 +4288,18 @@ function buildPurchaseCatalogItemsFromStoreData(storeData) {
 		: [];
 }
 
-async function parseCs2PriceSheet(response) {
-	const raw = response && response.price_sheet ? Buffer.from(response.price_sheet) : Buffer.alloc(0);
-	if (!raw.length) {
-		const err = new Error('GC 返回的 price_sheet 为空');
-		err.statusCode = 502;
-		throw err;
-	}
-
-	if (raw[0] === 0) {
-		return {
-			parsed: BinaryKvParser.parse(raw),
-			source: 'raw-binarykv',
-			sourceBuffer: raw
-		};
-	}
-
-	if (raw.slice(0, 4).toString('ascii') === 'LZMA' && raw.length > 17) {
-		try {
-			const declaredSize = raw.readUInt32LE(4);
-			const properties = raw.slice(12, 17);
-			const compressedData = raw.slice(17);
-			const uncompressedSizeBuffer = Buffer.alloc(8);
-			uncompressedSizeBuffer.writeUInt32LE(declaredSize, 0);
-			uncompressedSizeBuffer.writeUInt32LE(0, 4);
-			const decompressed = await lzma.decompress(Buffer.concat([properties, uncompressedSizeBuffer, compressedData]));
-			const buffer = Buffer.isBuffer(decompressed) ? decompressed : Buffer.from(decompressed);
-			return {
-				parsed: BinaryKvParser.parse(buffer),
-				source: 'valve-lzma-binarykv',
-				sourceBuffer: buffer
-			};
-		} catch (valveLzmaError) {
-			try {
-				return {
-					parsed: BinaryKvParser.parse(raw),
-					source: 'raw-binarykv-fallback',
-					sourceBuffer: raw
-				};
-			} catch (rawError) {
-				const err = new Error(`price_sheet 解析失败: ${valveLzmaError.message}; raw fallback: ${rawError.message}`);
-				err.statusCode = 502;
-				throw err;
-			}
-		}
-	}
-
-	try {
-		const decompressed = await lzma.decompress(raw);
-		const buffer = Buffer.isBuffer(decompressed) ? decompressed : Buffer.from(decompressed);
-		return {
-			parsed: BinaryKvParser.parse(buffer),
-			source: 'lzma-binarykv',
-			sourceBuffer: buffer
-		};
-	} catch (lzmaError) {
-		try {
-			return {
-				parsed: BinaryKvParser.parse(raw),
-				source: 'raw-binarykv-fallback',
-				sourceBuffer: raw
-			};
-		} catch (rawError) {
-			const err = new Error(`price_sheet 解析失败: ${lzmaError.message}; raw fallback: ${rawError.message}`);
-			err.statusCode = 502;
-			throw err;
-		}
-	}
+// 解码 GC 回包里的 price_sheet(解压 + BinaryKV),见 src/steam/price-sheet.ts。
+function parseCs2PriceSheet(response) {
+	return decodePriceSheet(response && response.price_sheet ? Buffer.from(response.price_sheet) : Buffer.alloc(0));
 }
 
+// 价格提取在 src/steam/price-sheet.ts(纯计算,有真实样本回归测试);
+// 条目名 → defIndex、商品名称/分类依赖物品 schema,仍在这里。
 function buildPurchaseCatalogItemsFromParsedSheet(parsedSheet, primaryCurrencyISO = '', game = 'cs2') {
 	const root = parsedSheet && parsedSheet.parsed ? parsedSheet.parsed : null;
-	const store = root && root.store ? root.store : root;
-	const entries = store && store.entries && typeof store.entries === 'object' ? store.entries : {};
-	const localPriceSheet = store && store.inventoryvalvegcpricesheet && typeof store.inventoryvalvegcpricesheet === 'object'
-		? store.inventoryvalvegcpricesheet
-		: {};
-	const directItems = collectPriceSheetItemPrices(root, localPriceSheet);
-	const items = [];
-	const seen = new Set();
-
-	for (const [entryName, entry] of Object.entries(entries)) {
-		const defIndex = resolveDefIndexFromStoreEntry(entryName, entry, game);
-		if (!defIndex || seen.has(defIndex)) {
-			continue;
-		}
-		const prices = resolvePricesForStoreEntry(entry, localPriceSheet, directItems.get(defIndex) || null);
-		if (!Object.keys(prices).length) {
-			continue;
-		}
-		items.push(buildPurchaseCatalogItemFromDefinition(defIndex, prices, entry, entryName, game));
-		seen.add(defIndex);
-	}
-
-	for (const [defIndex, prices] of directItems.entries()) {
-		if (seen.has(defIndex) || !Object.keys(prices).length) {
-			continue;
-		}
-		items.push(buildPurchaseCatalogItemFromDefinition(defIndex, prices, null, '', game));
-		seen.add(defIndex);
-	}
-
-	items.sort((left, right) => {
-		return comparePurchaseCatalogItems(left, right);
-	});
-
+	const items = extractStorePrices(root, (entryName, entry) => resolveDefIndexFromStoreEntry(entryName, entry, game))
+		.map(item => buildPurchaseCatalogItemFromDefinition(item.defIndex, item.prices, item.entry, item.entryName, game));
+	items.sort(comparePurchaseCatalogItems);
 	return filterPurchaseCatalogItemsForGame(items, game);
 }
 
@@ -4638,143 +4393,6 @@ function resolveDefIndexFromStoreEntry(entryName, entry, game = 'cs2') {
 	}
 	const byName = getPurchaseSchemaNameIndex(game);
 	return Number(byName[lowered] || 0);
-}
-
-function resolvePricesForStoreEntry(entry, localPriceSheet, directPrices = null) {
-	const prices = directPrices ? {...directPrices} : {};
-	if (entry && entry.prices && typeof entry.prices === 'object') {
-		Object.assign(prices, normalizePriceMap(entry.prices));
-	}
-	const basePrice = Number(entry && (entry.base_price || entry.price || entry.regular_price || entry.current_price));
-	if (basePrice > 0) {
-		const mapped = localPriceSheet[String(basePrice)];
-		if (mapped && typeof mapped === 'object') {
-			for (const [iso, value] of Object.entries(mapped)) {
-				const cents = normalizePriceValue(value);
-				if (Number.isFinite(cents) && cents > 0) {
-					prices[String(iso).trim().toUpperCase()] = cents;
-				}
-			}
-		}
-	}
-	return normalizePriceMap(prices);
-}
-
-function collectPriceSheetItemPrices(node, localPriceSheet) {
-	const map = new Map();
-	const visit = (value, depth = 0) => {
-		if (!value || typeof value !== 'object' || depth > 12) {
-			return;
-		}
-		const defIndex = Number(
-			value.item_def
-			|| value.item_def_id
-			|| value.def_index
-			|| value.defindex
-			|| value.item_definition_index
-			|| value.itemdef
-			|| value.id
-		);
-		if (defIndex > 0) {
-			const prices = extractPriceMapFromNode(value, localPriceSheet);
-			if (Object.keys(prices).length) {
-				map.set(defIndex, {
-					...(map.get(defIndex) || {}),
-					...prices
-				});
-			}
-		}
-		for (const child of Object.values(value)) {
-			visit(child, depth + 1);
-		}
-	};
-	visit(node, 0);
-	return map;
-}
-
-function extractPriceMapFromNode(node, localPriceSheet) {
-	const prices = {};
-	if (!node || typeof node !== 'object') {
-		return prices;
-	}
-
-	for (const [key, value] of Object.entries(node)) {
-		const iso = String(key || '').trim().toUpperCase();
-		const cents = normalizePriceValue(value);
-		if (CURRENCY_ISO_TO_COUNTRY[iso] && Number.isFinite(cents) && cents > 0) {
-			prices[iso] = cents;
-		}
-	}
-
-	if (node.prices && typeof node.prices === 'object') {
-		Object.assign(prices, normalizePriceMap(node.prices));
-	}
-
-	const localKeyCandidates = [
-		node.base_price,
-		node.price,
-		node.regular_price,
-		node.current_price
-	];
-	for (const localKey of localKeyCandidates) {
-		const numeric = Number(localKey);
-		if (!(numeric > 0)) {
-			continue;
-		}
-		const mapped = localPriceSheet[String(numeric)];
-		if (!mapped || typeof mapped !== 'object') {
-			continue;
-		}
-		for (const [iso, value] of Object.entries(mapped)) {
-			const cents = normalizePriceValue(value);
-			if (Number.isFinite(cents) && cents > 0) {
-				prices[String(iso).trim().toUpperCase()] = cents;
-			}
-		}
-	}
-
-	return normalizePriceMap(prices);
-}
-
-function normalizePriceMap(prices) {
-	const normalized = {};
-	for (const [key, value] of Object.entries(prices || {})) {
-		const iso = String(key || '').trim().toUpperCase();
-		const cents = normalizePriceValue(value);
-		if (iso && Number.isFinite(cents) && cents > 0) {
-			normalized[iso] = cents;
-		}
-	}
-	return normalized;
-}
-
-function normalizePriceValue(value) {
-	if (value == null || value === '') {
-		return 0;
-	}
-	if (typeof value === 'number') {
-		return Number.isFinite(value) ? Math.round(value) : 0;
-	}
-	if (typeof value === 'bigint') {
-		return Number(value);
-	}
-	if (typeof value === 'string') {
-		const parsed = Number(value);
-		return Number.isFinite(parsed) ? Math.round(parsed) : 0;
-	}
-	if (typeof value === 'object') {
-		if (typeof value.low === 'number' && typeof value.high === 'number') {
-			const low = BigInt(value.low >>> 0);
-			const high = BigInt(value.high >>> 0);
-			const merged = (high << 32n) | low;
-			return Number(merged);
-		}
-		if (typeof value.toString === 'function' && value.toString !== Object.prototype.toString) {
-			const parsed = Number(value.toString());
-			return Number.isFinite(parsed) ? Math.round(parsed) : 0;
-		}
-	}
-	return 0;
 }
 
 function buildPurchaseCatalogItemFromDefinition(defIndex, prices, entry = null, entryName = '', game = 'cs2') {
@@ -5469,74 +5087,6 @@ async function sendTf2GcRequest(attempt, requestMsgType, requestProto, body, res
 		responseProto,
 		options
 	);
-}
-
-async function sendGameGcRequest(attempt, game, requestMsgType, requestProto, body, responseMsgType, responseProto, options = {}) {
-	const config = getPurchaseGameConfig(game);
-	if (!attempt || !attempt.client || typeof attempt.client.sendToGC !== 'function') {
-		const err = new Error('当前账号没有可用的 Steam GC 客户端');
-		err.statusCode = 409;
-		throw err;
-	}
-	if (!attempt[config.gcStateKey]) {
-		const err = new Error(`当前账号尚未连接 ${config.label} GC`);
-		err.statusCode = 409;
-		throw err;
-	}
-
-	return new Promise((resolve, reject) => {
-		let settled = false;
-		const client = attempt.client;
-		const cleanup = () => {
-			clearTimeout(timeout);
-			client.removeListener('receivedFromGC', onReceivedFromGc);
-		};
-		const finish = (handler) => {
-			if (settled) {
-				return;
-			}
-			settled = true;
-			cleanup();
-			handler();
-		};
-		const handleResponsePayload = (appid, msgType, payload) => {
-			if (appid !== config.appId) {
-				return;
-			}
-			if (msgType !== responseMsgType) {
-				return;
-			}
-			finish(() => {
-				try {
-					const decoded = responseProto.decode(payload);
-					resolve(responseProto.toObject(decoded, {longs: String, bytes: Buffer}));
-				} catch (err) {
-					reject(new Error(`GC 响应解码失败: ${err.message}`));
-				}
-			});
-		};
-		const onReceivedFromGc = (appid, msgType, payload) => {
-			handleResponsePayload(appid, msgType, payload);
-		};
-		const timeout = setTimeout(() => {
-			finish(() => reject(new Error(`GC 请求超时 msg=${requestMsgType}`)));
-		}, Math.max(1000, Number(options.timeoutMs || PURCHASE_GC_TIMEOUT_MS)));
-
-		try {
-			client.on('receivedFromGC', onReceivedFromGc);
-			client.sendToGC(
-				config.appId,
-				requestMsgType,
-				{},
-				requestProto.encode(body || {}).finish(),
-				(appid, msgType, payload) => {
-					handleResponsePayload(appid, msgType, payload);
-				}
-			);
-		} catch (err) {
-			finish(() => reject(err));
-		}
-	});
 }
 
 function longToString(value) {

@@ -31,3 +31,4 @@ module-development/
 deploy/
 *.md
 **/*.test.ts
+test/
