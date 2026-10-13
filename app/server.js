@@ -209,18 +209,80 @@ const PURCHASE_SCHEMA_NAME_INDEXES = {
 	tf2: null
 };
 
+// ===== 部署相关:反代信任 / cookie Secure / 同源校验 =====
+// TRUST_PROXY:未设置=loopback(只信任本机反代)。Docker 里反代经 bridge 网络进来,设 loopback,uniquelocal。
+// 也可填 true / 跳数 / 网段,语义同 Express 的 'trust proxy'。
+function parseTrustProxy(value) {
+	const v = String(value == null ? '' : value).trim();
+	if (!v) return 'loopback';
+	if (v === 'true') return true;
+	if (v === 'false') return false;
+	if (/^\d+$/.test(v)) return Number(v);
+	return v;
+}
+
+// COOKIE_SECURE:1=总是加 Secure;0=从不加;auto(默认)=经 HTTPS(含反代转发)访问时才加。
+function parseCookieSecure(value) {
+	const v = String(value == null ? '' : value).trim().toLowerCase();
+	if (v === '1' || v === 'true') return true;
+	if (v === '0' || v === 'false') return false;
+	return 'auto';
+}
+
+// 额外允许的来源(逗号分隔的完整 origin,如 https://tools.example.com)。默认只允许与请求 Host 同域。
+const ALLOWED_ORIGINS = new Set(String(process.env.ALLOWED_ORIGINS || '')
+	.split(',').map(item => item.trim().replace(/\/+$/, '').toLowerCase()).filter(Boolean));
+
+function headerHostname(value) {
+	const first = String(value || '').split(',')[0].trim();
+	if (!first) return '';
+	try {
+		return new URL('http://' + first).hostname.toLowerCase();
+	} catch (_) {
+		return '';
+	}
+}
+
+// 写操作和 WebSocket 握手的 CSRF 兜底:浏览器带了 Origin 时,其主机名必须等于本次请求的 Host
+// (或反代转发的 X-Forwarded-Host)。没有 Origin(curl 等非浏览器)放行;跨站页面伪造不了这些请求头。
+function isAllowedOrigin(headers) {
+	const origin = String((headers && headers.origin) || '').trim();
+	if (!origin) return true;
+	if (ALLOWED_ORIGINS.has(origin.replace(/\/+$/, '').toLowerCase())) return true;
+	let originHost;
+	try {
+		originHost = new URL(origin).hostname.toLowerCase();
+	} catch (_) {
+		return false; // 含 Origin: null(沙箱 iframe / file://)
+	}
+	const hosts = [headerHostname(headers.host), headerHostname(headers['x-forwarded-host'])].filter(Boolean);
+	return hosts.includes(originHost);
+}
+
+// 调试端点(会返回 Steam cookies / 可触发真实下单),默认关闭,ENABLE_DEBUG_ENDPOINTS=1 才开。
+const DEBUG_ENDPOINTS_ENABLED = String(process.env.ENABLE_DEBUG_ENDPOINTS || '') === '1';
+function debugOnly(req, res, next) {
+	if (DEBUG_ENDPOINTS_ENABLED) return next();
+	res.status(404).json({success: false, error: 'not found'});
+}
+
 const app = express();
+// 反代后面要信任 X-Forwarded-*,才能拿到真实客户端 IP(登录限速)和是否 HTTPS(Secure cookie)。
+app.set('trust proxy', parseTrustProxy(process.env.TRUST_PROXY));
 const server = http.createServer((req, res) => {
 		if (String(req.url || '').startsWith('/socket.io/')) { return; }
 		app(req, res);
 	});
-const io = new Server(server);
+const io = new Server(server, {
+	allowRequest: (req, callback) => callback(null, isAllowedOrigin(req.headers))
+});
 const AUTH_FILE = path.join(SHARED_CONFIG_DIR, 'auth.json');
 const auth = createAuth({
 	envPassword: process.env.APP_PASSWORD || '',
 	authFile: AUTH_FILE,
 	ttlMs: Number(process.env.SESSION_TTL_MS || 7 * 24 * 60 * 60 * 1000),
-	cookieSecure: String(process.env.COOKIE_SECURE || '') === '1'
+	cookieSecure: parseCookieSecure(process.env.COOKIE_SECURE),
+	setupToken: process.env.SETUP_TOKEN || ''
 });
 io.use(auth.socketAuth);
 
@@ -353,7 +415,25 @@ fs.mkdirSync(UU_DIR, {recursive: true});
 
 installSteamMicroTxnHooks();
 
+app.disable('x-powered-by');
+app.use((req, res, next) => {
+	res.setHeader('X-Content-Type-Options', 'nosniff');
+	res.setHeader('X-Frame-Options', 'DENY');
+	res.setHeader('Referrer-Policy', 'same-origin');
+	next();
+});
+// 非幂等请求一律做同源校验(含 /api/auth/*,防登录 CSRF)
+app.use((req, res, next) => {
+	if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') return next();
+	if (isAllowedOrigin(req.headers)) return next();
+	res.status(403).json({success: false, error: '来源校验失败,跨站请求已拒绝'});
+});
 app.use(express.json({limit: '1mb'}));
+
+// 容器/反代健康检查:无需登录,不暴露任何运行状态
+app.get('/healthz', (req, res) => {
+	res.json({ok: true});
+});
 
 // ===== 鉴权(公开端点,先于网关注册) =====
 app.get('/login', (req, res) => {
@@ -364,19 +444,6 @@ app.post('/api/auth/logout', (req, res) => auth.logout(req, res));
 app.get('/api/auth/status', (req, res) => auth.status(req, res));
 app.post('/api/auth/setup', (req, res) => auth.setup(req, res));
 app.post('/api/auth/password', (req, res) => auth.changePassword(req, res));
-
-// 调试端点：查看当前鉴权状态（无需登录，方便排查 cookie 问题）
-app.get('/api/auth/debug', (req, res) => {
-	const cookieHeader = String((req.headers && req.headers.cookie) || '');
-	const sidMatch = cookieHeader.match(/sid=([^;]+)/);
-	res.json({
-		success: true,
-		configured: auth.configured,
-		authed: auth.isAuthed(req),
-		cookieReceived: cookieHeader.length > 0,
-		cookieSidPreview: sidMatch ? (sidMatch[1].slice(0, 8) + '...') : '(none)'
-	});
-});
 
 // 网关:其余所有请求(含静态资源、API、socket.io)未登录一律拦截
 app.use(auth.middleware);
@@ -481,7 +548,7 @@ app.post('/api/update/restart', (req, res) => {
 // 避免"已删除账号"被某个仍有旧 localStorage 的浏览器重新推回。
 app.get('/api/accounts/list', (req, res) => {
 	try {
-		res.json({success: true, initialized: fs.existsSync(ACCOUNT_LIST_FILE), accounts: readAccountList()});
+		res.json({success: true, initialized: fs.existsSync(ACCOUNT_LIST_FILE), accounts: readAccountList().map(publicStoredAccount)});
 	} catch (err) {
 		res.status(500).json({success: false, error: err && err.message ? err.message : '读取账户名单失败'});
 	}
@@ -492,8 +559,8 @@ app.post('/api/accounts/list', (req, res) => {
 	const body = req.body || {};
 	const list = Array.isArray(body.accounts) ? body.accounts : [];
 	try {
-		const saved = writeAccountList(list);
-		res.json({success: true, accounts: saved});
+		const saved = writeAccountList(mergeClientAccountSecrets(list));
+		res.json({success: true, accounts: saved.map(publicStoredAccount)});
 	} catch (err) {
 		res.status(500).json({success: false, error: err && err.message ? err.message : '保存账户名单失败'});
 	}
@@ -562,7 +629,8 @@ app.post('/api/auth-code', (req, res) => {
 	const body = req.body || {};
 	const accountName = String(body.accountName || '').trim();
 	const localProfile = readLocalAccountProfile(accountName);
-	const sharedSecret = String(body.sharedSecret || localProfile.sharedSecret || '').trim();
+	const storedAccount = findStoredAccount(accountName);
+	const sharedSecret = String(body.sharedSecret || localProfile.sharedSecret || (storedAccount && storedAccount.sharedSecret) || '').trim();
 
 	if (!sharedSecret) {
 		return res.status(409).json({success: false, error: '当前账号没有可用的 shared_secret'});
@@ -587,9 +655,11 @@ app.post('/api/auth-code', (req, res) => {
 app.post('/api/login', (req, res) => {
 	const body = req.body || {};
 	const accountName = String(body.accountName || '').trim();
-	const password = String(body.password || '');
+	// 浏览器不再持有密码/shared_secret:没传就用服务端名单里存的。
+	const storedAccount = findStoredAccount(accountName);
+	const password = String(body.password || (storedAccount && storedAccount.password) || '');
 	const localProfile = readLocalAccountProfile(accountName);
-	const sharedSecret = String(body.sharedSecret || localProfile.sharedSecret || '').trim();
+	const sharedSecret = String(body.sharedSecret || localProfile.sharedSecret || (storedAccount && storedAccount.sharedSecret) || '').trim();
 	const identitySecret = String(body.identitySecret || localProfile.identitySecret || '').trim();
 	let twoFactorCode = String(body.twoFactorCode || '').trim();
 
@@ -856,7 +926,7 @@ app.post('/api/gc/disconnect/:id', (req, res) => {
 	}
 });
 
-app.get('/api/cookies/:id', (req, res) => {
+app.get('/api/cookies/:id', debugOnly, (req, res) => {
 	const attempt = getAttempt(req.params.id, res);
 	if (!attempt) {
 		return;
@@ -1384,7 +1454,7 @@ app.post('/api/task/tf2-purchase', (req, res) => {
 
 // 协议购买整款 Steam 游戏(钱包给自己买)。默认 dryRun:只验证到最终价、不扣款。
 // body: { id: <账号attempt id>, packageIds: [subid...], dryRun?: true|false }
-app.post('/api/steam-purchase/test', async (req, res) => {
+app.post('/api/steam-purchase/test', debugOnly, async (req, res) => {
 	const body = req.body || {};
 	const key = String(body.id || body.accountId || body.accountName || '').trim();
 	let attempt = attempts.get(key);
@@ -2321,9 +2391,9 @@ io.on('connection', socket => {
 server.listen(PORT, HOST, () => {
 	const shownHost = HOST === '0.0.0.0' ? '<本机所有网卡>' : HOST;
 	console.log(`Steam 工具台 listening on http://${shownHost}:${PORT}`);
-	if (auth.configured) {
-	} else {
-		console.warn(`[auth] 尚未设置口令, 请用浏览器打开 http://${shownHost}:${PORT}/login 设置初始口令(设置前已锁定)`);
+	if (!auth.configured) {
+		console.warn(`[auth] 尚未设置口令, 请用浏览器打开 /login 设置初始口令(设置前已锁定)`);
+		console.warn(`[auth] 初始化令牌: ${auth.setupToken}  (本次启动有效;可用 SETUP_TOKEN 环境变量固定)`);
 	}
 });
 
@@ -3404,6 +3474,38 @@ function removeAccountsFromList(accountNames) {
 	}
 	writeAccountList(kept);
 	return true;
+}
+
+// 下发给浏览器的名单不含密码/shared_secret/一次性验证码,只给"有没有"的标记。
+function publicStoredAccount(account) {
+	const {password, sharedSecret, twoFactorCode, ...rest} = account;
+	return {...rest, hasPassword: !!password, hasSharedSecret: !!sharedSecret};
+}
+
+// 浏览器推回来的名单里这几个字段通常为空(服务端从不下发),空值 = 沿用服务端已存的值,非空才覆盖。
+function mergeClientAccountSecrets(list) {
+	const stored = new Map(readAccountList().map(acc => [acc.accountName.toLowerCase(), acc]));
+	return (Array.isArray(list) ? list : []).map(item => {
+		const acc = sanitizeStoredAccount(item);
+		if (!acc) {
+			return null;
+		}
+		const prev = stored.get(acc.accountName.toLowerCase());
+		if (prev) {
+			if (!acc.password) acc.password = prev.password;
+			if (!acc.sharedSecret) acc.sharedSecret = prev.sharedSecret;
+			if (!acc.twoFactorCode) acc.twoFactorCode = prev.twoFactorCode;
+		}
+		return acc;
+	}).filter(Boolean);
+}
+
+function findStoredAccount(accountName) {
+	const key = String(accountName || '').trim().toLowerCase();
+	if (!key) {
+		return null;
+	}
+	return readAccountList().find(acc => acc.accountName.toLowerCase() === key) || null;
 }
 
 function readLocalAccountProfile(accountName) {
@@ -7554,12 +7656,6 @@ async function verifyUuSmsLogin({loginSessionId, code, accountName, gameId} = {}
 	// 注意不能直接用 normalizeUuGameId(undefined)——它会落到 TF2。
 	const gameIdNorm = uuDefaultGameId(gameId);
 
-	// 备份 token 到 data/uu/last-token.txt（与 CLI 对齐，便于排查/复用）
-	try {
-		fs.writeFileSync(path.join(UU_DIR, 'last-token.txt'), String(token), 'utf8');
-	} catch (err) {
-		// 备份失败不影响主流程
-	}
 
 	// 持久化 token 到 tokens.json + 查 UU 绑定的 Steam 账号
 	let linkedSteamId = '';

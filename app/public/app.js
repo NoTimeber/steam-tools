@@ -939,7 +939,7 @@ async function loginAccount(account, options = {}) {
 		return;
 	}
 
-	if (!account.password) {
+	if (!account.password && !account.hasPassword) {
 		account.status = '登录失败';
 		saveAccounts();
 		renderAccounts();
@@ -4696,9 +4696,11 @@ function upsertAccount(input) {
 	if (account) {
 		if (input.password) {
 			account.password = input.password;
+			account.hasPassword = true;
 		}
 		if (input.sharedSecret) {
 			account.sharedSecret = input.sharedSecret;
+			account.hasSharedSecret = true;
 		}
 		if (input.twoFactorCode) {
 			account.twoFactorCode = input.twoFactorCode;
@@ -4721,6 +4723,8 @@ function addAccount(input) {
 		accountName: String(input.accountName || '').trim(),
 		password: input.password || '',
 		sharedSecret: input.sharedSecret || '',
+		hasPassword: !!input.password,
+		hasSharedSecret: !!input.sharedSecret,
 		twoFactorCode: input.twoFactorCode || '',
 		remember: input.remember !== false,
 		status: '未登录',
@@ -4767,7 +4771,7 @@ function maFilePill(account) {
 }
 
 function renderMaFileCell(account) {
-	const canShowCode = !!(account.hasMaFile || account.sharedSecret);
+	const canShowCode = !!(account.hasMaFile || account.sharedSecret || account.hasSharedSecret);
 	return `
 		<div class="mafile-cell">
 			${maFilePill(account)}
@@ -6311,6 +6315,8 @@ function normalizeStoredAccount(account) {
 		accountName: normalized.accountName,
 		password: normalized.password,
 		sharedSecret: normalized.sharedSecret,
+		hasPassword: !!(normalized.password || account.hasPassword),
+		hasSharedSecret: !!(normalized.sharedSecret || account.hasSharedSecret),
 		twoFactorCode: normalized.twoFactorCode,
 		remember: normalized.remember,
 		status: '未登录',
@@ -6338,10 +6344,18 @@ function saveAccounts() {
 	schedulePushAccounts();
 }
 
-// 本地缓存:刷新后可立即出图,服务端不可达时也不丢操作。
+// 本地缓存:刷新后可立即出图。密码/shared_secret 只存服务端,这里只留"有没有"的标记。
 function saveAccountsLocal() {
 	try {
-		localStorage.setItem(STORAGE_KEY, JSON.stringify(state.accounts));
+		const safe = state.accounts.map(account => {
+			const {password, sharedSecret, twoFactorCode, ...rest} = account;
+			return {
+				...rest,
+				hasPassword: !!(password || account.hasPassword),
+				hasSharedSecret: !!(sharedSecret || account.hasSharedSecret)
+			};
+		});
+		localStorage.setItem(STORAGE_KEY, JSON.stringify(safe));
 	} catch {}
 }
 
@@ -6369,8 +6383,10 @@ function serializeAccountForServer(account) {
 async function pushAccountsToServer() {
 	try {
 		await postJson('/api/accounts/list', {accounts: state.accounts.map(serializeAccountForServer)});
+		return true;
 	} catch {
-		// 同步失败不阻塞本地操作;本地 localStorage 仍是缓存,下次操作会再次尝试推送。
+		// 同步失败不阻塞本地操作;下次操作会再次尝试推送。
+		return false;
 	}
 }
 
@@ -6406,7 +6422,9 @@ async function syncAccountsFromServer() {
 
 	// 服务端从未写过名单(首次升级)且本地有数据 -> 把本地名单迁移上去,保留本地账户。
 	if (!data.initialized && serverAccounts.length === 0 && state.accounts.length > 0) {
-		await pushAccountsToServer();
+		if (await pushAccountsToServer()) {
+			saveAccountsLocal();   // 迁移成功后,把旧版缓存里的明文密码从 localStorage 清掉
+		}
 		return;
 	}
 

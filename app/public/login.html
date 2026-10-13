@@ -97,7 +97,7 @@
 </head>
 <body>
   <form class="card" id="login-form">
-    <div class="brand-mark"><span class="dot"></span>本地安全访问</div>
+    <div class="brand-mark"><span class="dot"></span>安全访问</div>
     <h1>Steam 工具台</h1>
     <p class="sub" id="sub">请输入访问口令</p>
     <label for="password" id="password-label">口令</label>
@@ -105,6 +105,8 @@
     <div id="confirm-wrap" style="display:none">
       <label for="confirm" style="margin-top:14px">确认口令</label>
       <input id="confirm" type="password" autocomplete="new-password">
+      <label for="setup-token" style="margin-top:14px">初始化令牌</label>
+      <input id="setup-token" type="text" autocomplete="off" spellcheck="false" placeholder="见服务端启动日志(docker compose logs)">
     </div>
     <button type="submit" id="submit-btn">登录</button>
     <div class="err" id="err"></div>
@@ -114,6 +116,7 @@
     const pwd = document.getElementById('password');
     const confirm = document.getElementById('confirm');
     const confirmWrap = document.getElementById('confirm-wrap');
+    const setupTokenInput = document.getElementById('setup-token');
     const btn = document.getElementById('submit-btn');
     const err = document.getElementById('err');
     const sub = document.getElementById('sub');
@@ -134,7 +137,7 @@
       }
       // 未配置 或 检测失败：进入设置模式
       setupMode = true;
-      sub.textContent = '首次使用,请设置一个访问口令';
+      sub.textContent = '首次使用,请设置访问口令(至少 8 位)';
       pwdLabel.textContent = '新口令';
       pwd.setAttribute('autocomplete', 'new-password');
       confirmWrap.style.display = '';
@@ -154,7 +157,9 @@
         const resp = await fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ password: pwd.value })
+          body: JSON.stringify(setupMode
+            ? { password: pwd.value, setupToken: setupTokenInput.value.trim() }
+            : { password: pwd.value })
         });
         const data = await resp.json().catch(() => ({}));
         if (resp.ok && data.success) {
