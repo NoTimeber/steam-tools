@@ -12,6 +12,7 @@
 // 全部一次性生成后写入 data/fingerprint_cache.json,之后按账号名复用。
 
 const fs = require('fs');
+const {writeJsonAtomic} = require('../lib/atomic-file');
 const path = require('path');
 const crypto = require('crypto');
 
@@ -46,8 +47,7 @@ function createFingerprintStore(options = {}) {
 
 	function persist() {
 		try {
-			fs.mkdirSync(dataDir, {recursive: true});
-			fs.writeFileSync(cacheFile, JSON.stringify(cache, null, 2));
+			writeJsonAtomic(cacheFile, cache);
 		} catch (err) {
 			log('warn', '写入 fingerprint_cache.json 失败: ' + err.message);
 		}

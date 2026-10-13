@@ -58,6 +58,7 @@ const {createFingerprintStore} = require('./services/fingerprint');
 const {createSteamStorePurchaser} = require('./services/steamStorePurchase');
 const {createSteamMarketBuyOrder} = require('./services/steamMarketBuyOrder');
 const {createCs2Terminal} = require('./lib/cs2-terminal');
+const {writeFileAtomic, writeJsonAtomic, readJsonFileSafe} = require('./lib/atomic-file');
 
 const PORT = Number(process.env.PORT || 53110);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -541,7 +542,7 @@ app.post('/api/mafile/import', (req, res) => {
 		const sharedSecret = String(ma.shared_secret || ma.sharedSecret || '').trim();
 		const identitySecret = String(ma.identity_secret || ma.identitySecret || '').trim();
 		try {
-			fs.writeFileSync(path.join(CONFIG_MAFILE_DIR, accountName + '.maFile'), JSON.stringify(ma, null, 2), 'utf8');
+			writeJsonAtomic(path.join(CONFIG_MAFILE_DIR, accountName + '.maFile'), ma);
 			saved++;
 			results.push({
 				accountName,
@@ -1035,7 +1036,7 @@ async function fetchCs2SkinDb() {
 		if (res.ok) {
 			const map = buildCs2SkinDbMap(await res.json());
 			if (Object.keys(map).length) {
-				try { fs.writeFileSync(CS2_SKIN_DB_CACHE, JSON.stringify({fetchedAt: new Date().toISOString(), map})); } catch (_) {}
+				try { writeJsonAtomic(CS2_SKIN_DB_CACHE, {fetchedAt: new Date().toISOString(), map}, 0); } catch (_) {}
 				return map;
 			}
 		}
@@ -1132,7 +1133,7 @@ function appendTerminalOffer(terminalId, defIndex, offer) {
 	rec.defIndex = Number(defIndex) || rec.defIndex || 0;
 	rec.updatedAt = new Date().toISOString();
 	map[key] = rec;
-	try { fs.writeFileSync(TERMINAL_OFFERS_FILE, JSON.stringify(map, null, 2)); } catch (_) {}
+	try { writeJsonAtomic(TERMINAL_OFFERS_FILE, map); } catch (_) {}
 	return rec.offers;
 }
 
@@ -1489,7 +1490,7 @@ function loadMarketBuyOrders() {
 
 function saveMarketBuyOrders(list) {
 	try {
-		fs.writeFileSync(MARKET_BUYORDERS_FILE, JSON.stringify(list, null, 2), 'utf8');
+		writeJsonAtomic(MARKET_BUYORDERS_FILE, list);
 	} catch (err) {
 		console.log('[market-buyorder] 账本保存失败: ' + (err && err.message ? err.message : err));
 	}
@@ -1519,7 +1520,7 @@ function saveMarketNameId(appid, marketHashName, nameId) {
 	}
 	map[key] = id;
 	try {
-		fs.writeFileSync(MARKET_NAMEIDS_FILE, JSON.stringify(map, null, 2), 'utf8');
+		writeJsonAtomic(MARKET_NAMEIDS_FILE, map);
 	} catch (err) {
 		console.log('[market-buyorder] nameid 缓存保存失败: ' + (err && err.message ? err.message : err));
 	}
@@ -1555,7 +1556,7 @@ async function downloadNameIdDb(game) {
 	}
 	try {
 		fs.mkdirSync(NAMEID_DB_DIR, {recursive: true});
-		fs.writeFileSync(path.join(NAMEID_DB_DIR, game + '.json'), text, 'utf8');
+		writeFileAtomic(path.join(NAMEID_DB_DIR, game + '.json'), text, 'utf8');
 	} catch (err) {
 		console.log('[market-buyorder] nameid 库落盘失败(' + game + '): ' + (err && err.message ? err.message : err));
 	}
@@ -2108,18 +2109,13 @@ app.post('/api/uu/login/cancel', (req, res) => {
 // 获取 token 后先存到这里，等下再绑到具体 Steam 账号
 
 function loadUuTokensFromFile() {
-	try {
-		const raw = fs.readFileSync(UU_TOKENS_FILE, 'utf8');
-		const arr = JSON.parse(raw);
-		return Array.isArray(arr) ? arr : [];
-	} catch (err) {
-		return [];
-	}
+	const arr = readJsonFileSafe(UU_TOKENS_FILE);
+	return Array.isArray(arr) ? arr : [];
 }
 
 function saveUuTokensToFile(tokens) {
 	try {
-		fs.writeFileSync(UU_TOKENS_FILE, JSON.stringify(tokens, null, 2), 'utf8');
+		writeJsonAtomic(UU_TOKENS_FILE, tokens);
 	} catch (err) {
 		console.warn('[uu] 保存 tokens.json 失败:', err.message);
 	}
@@ -3260,7 +3256,7 @@ function saveSession(attempt) {
 		updatedAt: new Date().toISOString()
 	};
 
-	fs.writeFileSync(file, JSON.stringify(payload, null, 2), 'utf8');
+	writeJsonAtomic(file, payload);
 	addLog(attempt, 'info', '已保存 session: ' + file);
 }
 
@@ -3391,7 +3387,7 @@ function writeAccountList(list) {
 		byKey.set(key, acc);
 	}
 	const deduped = order.map(key => byKey.get(key));
-	fs.writeFileSync(ACCOUNT_LIST_FILE, JSON.stringify(deduped, null, 2), 'utf8');
+	writeJsonAtomic(ACCOUNT_LIST_FILE, deduped);
 	return deduped;
 }
 
@@ -3637,15 +3633,9 @@ function findCachedAccount(cache, accountName) {
 	return null;
 }
 
+// 不存在返回 null;损坏时先备份坏文件再返回 null(见 lib/atomic-file.js)。
 function readJsonFile(file) {
-	try {
-		if (!fs.existsSync(file)) {
-			return null;
-		}
-		return JSON.parse(fs.readFileSync(file, 'utf8'));
-	} catch {
-		return null;
-	}
+	return readJsonFileSafe(file);
 }
 
 function countGcInventoryItems(csgo) {
@@ -3887,7 +3877,7 @@ function savePurchaseCatalogCacheToDisk(game = 'cs2', state = null) {
 		cachedAt: new Date().toISOString()
 	};
 	try {
-		fs.writeFileSync(filePath, JSON.stringify(payload, null, 2), 'utf8');
+		writeJsonAtomic(filePath, payload);
 	} catch (err) {
 		console.warn('[purchase] failed to save catalog cache:', err.message);
 	}
@@ -6727,7 +6717,7 @@ function saveUuConfig() {
 		};
 	}
 	try {
-		fs.writeFileSync(UU_CONFIG_FILE, JSON.stringify(out, null, 2), 'utf8');
+		writeJsonAtomic(UU_CONFIG_FILE, out);
 	} catch (err) {
 		console.warn('[uu] 保存发货配置失败:', err.message);
 	}
