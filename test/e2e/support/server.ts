@@ -46,7 +46,9 @@ async function freePort(): Promise<number> {
 export interface FakeSteamEvent {
 	run: string;
 	event: 'logOn' | 'logOff' | 'gamesPlayed' | 'sendToGC' | 'blockedFetch' | 'purchaseInit' | 'microTxnAuthorize' | 'purchaseFinalize'
-		| 'uuRequest' | 'offerAccept' | 'offerConfirm' | 'marketRequest' | 'marketConfirmList' | 'marketConfirm' | 'timeOffset' | 'storeRequest';
+		| 'uuRequest' | 'offerAccept' | 'offerConfirm' | 'marketRequest' | 'marketConfirmList' | 'marketConfirm' | 'timeOffset' | 'storeRequest' | 'walletRedeem';
+	/** walletRedeem:兑换的码 */
+	code?: string;
 	client?: string;
 	details?: Record<string, unknown>;
 	apps?: number[];
@@ -311,6 +313,72 @@ export class Client {
 			throw new Error(`登录失败 ${res.status}: ${res.text}`);
 		}
 		this.adoptCookie(res);
+	}
+}
+
+// ===== socket.io 推送 =====
+
+/** 极简 socket.io 客户端(Engine.IO v4 over WebSocket):收集服务端推送的事件 */
+export class SocketListener {
+	readonly events: Array<{name: string; payload: any}> = [];
+	private readonly ws: WebSocket;
+
+	private constructor(ws: WebSocket) {
+		this.ws = ws;
+	}
+
+	/** 用登录后的 cookie 连上,等到命名空间连接成功 */
+	static connect(client: Client, timeoutMs = 5000): Promise<SocketListener> {
+		const url = client.baseUrl.replace('http', 'ws') + '/socket.io/?EIO=4&transport=websocket';
+		// Node 的 WebSocket(undici)支持自定义握手头
+		const ws = new WebSocket(url, {headers: {cookie: client.cookie, origin: client.baseUrl}} as unknown as string[]);
+		const listener = new SocketListener(ws);
+		return new Promise((resolve, reject) => {
+			const timer = setTimeout(() => reject(new Error('socket.io 连接超时')), timeoutMs);
+			ws.onmessage = event => {
+				const message = String(event.data);
+				if (message.startsWith('0{')) {
+					ws.send('40');
+				} else if (message === '2') {
+					ws.send('3');   // 心跳
+				} else if (message.startsWith('40')) {
+					clearTimeout(timer);
+					resolve(listener);
+				} else if (message.startsWith('44')) {
+					clearTimeout(timer);
+					reject(new Error('socket.io 拒绝连接: ' + message));
+				} else if (message.startsWith('42')) {
+					const [name, payload] = JSON.parse(message.slice(2)) as [string, unknown];
+					listener.events.push({name, payload});
+				}
+			};
+			ws.onerror = () => reject(new Error('socket.io 连接失败'));
+		});
+	}
+
+	named(name: string): any[] {
+		return this.events.filter(event => event.name === name).map(event => event.payload);
+	}
+
+	/** 等到某个事件满足条件 */
+	async waitFor(name: string, ok: (payload: any) => boolean, timeoutMs = 10000): Promise<any> {
+		const deadline = Date.now() + timeoutMs;
+		while (Date.now() < deadline) {
+			const found = this.named(name).find(ok);
+			if (found) {
+				return found;
+			}
+			await sleep(50);
+		}
+		throw new Error(`等 ${name} 超时;已收到: ${JSON.stringify(this.named(name)).slice(0, 2000)}`);
+	}
+
+	close(): void {
+		try {
+			this.ws.close();
+		} catch {
+			// 已关闭
+		}
 	}
 }
 

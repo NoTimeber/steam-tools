@@ -12,6 +12,7 @@ import type {SteamSessionStore} from '../store/steam-sessions.ts';
 import type {LoginIntentStore} from '../store/login-intents.ts';
 import {normalizeGame} from './games.ts';
 import {normalizeCountryCode} from './currencies.ts';
+import {patchCmFallback} from './cm-fallback.ts';
 
 export interface SteamClient extends EventEmitter {
 	steamID: {getSteamID64(): string} | null;
@@ -386,26 +387,13 @@ export function createSessionManager(options: SessionManagerOptions) {
 	}
 
 	function withCmFallback(attempt: Attempt, client: SteamClient): void {
-		if (typeof client._apiRequest !== 'function') {
-			return;
-		}
-		const originalApiRequest = client._apiRequest.bind(client);
-		client._apiRequest = async function patchedApiRequest(...args: unknown[]) {
-			try {
-				return await originalApiRequest(...args);
-			} catch (err) {
-				const [, iface, method] = args;
-				if (iface === 'ISteamDirectory' && method === 'GetCMListForConnect') {
-					if (!attempt.cmFallbackApplied) {
-						attempt.cmFallbackApplied = true;
-						addLog(attempt, 'warn', 'Steam 目录服务不可达，改用本地 WebSocket CM');
-						emit(attempt);
-					}
-					return {response: {serverlist: options.cmFallbackServers}};
-				}
-				throw err;
+		patchCmFallback(client, options.cmFallbackServers, () => {
+			if (!attempt.cmFallbackApplied) {
+				attempt.cmFallbackApplied = true;
+				addLog(attempt, 'warn', 'Steam 目录服务不可达，改用本地 WebSocket CM');
+				emit(attempt);
 			}
-		};
+		});
 	}
 
 	function startLogon(attempt: Attempt, details: LogonDetails): void {

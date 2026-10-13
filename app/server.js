@@ -42,7 +42,6 @@ try {
 const SteamTotp = require('steam-totp');
 const SteamUser = require('steam-user');
 const {describeGcItem, loadItemsGameSchema} = require('./items-game-schema');
-const {redeemForAccount} = require('./lib/wallet-code');
 const {createAuth} = require('./lib/auth');
 const {createFingerprintStore} = require('./services/fingerprint');
 const {createCs2Terminal} = require('./lib/cs2-terminal');
@@ -73,6 +72,9 @@ const {createUuService} = require('../src/uu/index.ts');
 const {createMarketService} = require('../src/market/index.ts');
 // 买游戏(TypeScript):Steam 商店结算协议、多账号购买任务,见 src/buygame/。
 const {createBuyGameService} = require('../src/buygame/index.ts');
+// 充值码批量兑换(TypeScript):临时登录 → 兑换 → 登出,见 src/wallet/。
+const {createWalletService} = require('../src/wallet/index.ts');
+const {LOCAL_CM_FALLBACKS} = require('../src/steam/cm-fallback.ts');
 
 const PORT = Number(process.env.PORT || 53110);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -136,16 +138,6 @@ const TF2_APP_ID = 440;
 const INVENTORY_APP_ID = CS2_APP_ID;
 const INVENTORY_CONTEXT_ID = 2;
 const INVENTORY_PAGE_SIZE = 2000;
-const LOCAL_CM_FALLBACKS = [
-	{
-		endpoint: 'cm0.steampowered.com:443',
-		type: 'websockets',
-		realm: 'steamglobal',
-		load: 0,
-		wtd_load: 0
-	}
-];
-
 fs.mkdirSync(STEAM_USER_DIR, {recursive: true});
 fs.mkdirSync(CONFIG_COOKIES_DIR, {recursive: true});
 
@@ -371,6 +363,12 @@ const buyGame = createBuyGameService({
 	findAttempt: findAttemptByKey,
 	cookiesFor: resolveInventoryCookies,
 	emit: (event, task) => io.emit(event, task)
+});
+
+// 充值码兑换:没填密码的账号用本地 maFile / 旧 cookies 文件里的 refreshToken 登录,有 shared_secret 自动过令牌
+const wallet = createWalletService({
+	profileFor: accountName => readLocalAccountProfile(accountName),
+	emit: payload => io.emit('wallet:redeem', payload)
 });
 
 app.disable('x-powered-by');
@@ -1439,116 +1437,15 @@ app.delete('/api/uu/token', (req, res) => {
 	}
 });
 
-// ===== 充值码兑换 =====
-// 左侧账户(账号----密码,按行)与右侧充值码(按行)1:1 配对兑换。
-// 多线程并发:按 concurrency 起 N 个 worker 从同一队列取任务,逐条通过
-// wallet:redeem 事件回推结果(payload.index 为本次提交 pairs 数组内的下标,
-// 前端用它映射回结果行,从而支持「只重试失败项」)。
-const WALLET_REDEEM_MAX_PAIRS = 500;
-const WALLET_REDEEM_MAX_CONCURRENCY = 10;
-const WALLET_REDEEM_DEFAULT_CONCURRENCY = 3;
-
+// ===== 充值码兑换(src/wallet/)=====
+// body: { pairs:[{account, password, code}...], concurrency };进度经 wallet:redeem 推送
 app.post('/api/wallet/redeem', (req, res) => {
-	const body = req.body || {};
-	const rawPairs = Array.isArray(body.pairs) ? body.pairs : [];
-	const pairs = [];
-	for (const item of rawPairs) {
-		const account = String(item && item.account || '').trim();
-		const password = item && item.password != null ? String(item.password) : '';
-		const code = String(item && item.code || '').trim();
-		if (!account || !code) {
-			continue;
-		}
-		pairs.push({account, password, code});
-	}
-
-	if (!pairs.length) {
-		return res.status(400).json({success: false, error: '没有可兑换的账户/充值码配对'});
-	}
-	if (pairs.length > WALLET_REDEEM_MAX_PAIRS) {
-		return res.status(400).json({success: false, error: `单次最多兑换 ${WALLET_REDEEM_MAX_PAIRS} 条`});
-	}
-
-	let concurrency = Math.floor(Number(body.concurrency));
-	if (!Number.isFinite(concurrency) || concurrency < 1) {
-		concurrency = WALLET_REDEEM_DEFAULT_CONCURRENCY;
-	}
-	concurrency = Math.min(concurrency, WALLET_REDEEM_MAX_CONCURRENCY, pairs.length);
-
-	const jobId = Date.now().toString(36) + '-' + crypto.randomBytes(3).toString('hex');
-	const job = {id: jobId, pairs, concurrency, createdAt: Date.now()};
-	res.json({success: true, jobId, total: pairs.length, concurrency});
-	runWalletRedeemJob(job).catch(err => {
-		console.error('[wallet] redeem job error', err);
-		io.emit('wallet:redeem', {jobId, status: 'done', message: '任务异常终止'});
-	});
-});
-
-function emitWalletRedeem(payload) {
-	io.emit('wallet:redeem', payload);
-}
-
-// 兑换单条配对(自带兜底:任何异常都转成 error 结果,绝不抛出,以免拖垮 worker)。
-async function redeemWalletPair(job, index) {
-	const pair = job.pairs[index];
-	emitWalletRedeem({jobId: job.id, index, account: pair.account, status: 'processing', message: '正在登录并兑换…'});
-
-	// 本地 maFile 提供 shared_secret(自动 2FA);无密码时回退到本地 refreshToken。
-	const profile = readLocalAccountProfile(pair.account);
-	const sharedSecret = profile.sharedSecret || '';
-	const refreshToken = pair.password ? '' : (profile.refreshToken || '');
-
 	try {
-		const result = await redeemForAccount({
-			accountName: pair.account,
-			password: pair.password,
-			refreshToken,
-			sharedSecret,
-			code: pair.code,
-			timeoutMs: 60000,
-			logger: (level, message) => {
-				emitWalletRedeem({jobId: job.id, index, account: pair.account, status: 'processing', logLevel: level, logMessage: message});
-			}
-		});
-		emitWalletRedeem({
-			jobId: job.id,
-			index,
-			account: pair.account,
-			status: 'success',
-			message: result.message,
-			balance: result.formattedNewWalletBalance || ''
-		});
+		res.json({success: true, ...wallet.start(req.body || {})});
 	} catch (err) {
-		emitWalletRedeem({
-			jobId: job.id,
-			index,
-			account: pair.account,
-			status: 'error',
-			message: err && err.message ? err.message : '兑换失败'
-		});
+		res.status(err && err.statusCode || 500).json({success: false, error: err && err.message || '提交兑换任务失败'});
 	}
-}
-
-async function runWalletRedeemJob(job) {
-	let cursor = 0;
-	async function worker() {
-		while (true) {
-			const index = cursor++;
-			if (index >= job.pairs.length) {
-				return;
-			}
-			await redeemWalletPair(job, index);
-		}
-	}
-
-	const workerCount = Math.max(1, Math.min(job.concurrency, job.pairs.length));
-	const workers = [];
-	for (let i = 0; i < workerCount; i++) {
-		workers.push(worker());
-	}
-	await Promise.all(workers);
-	emitWalletRedeem({jobId: job.id, status: 'done', message: '全部处理完成'});
-}
+});
 
 io.on('connection', socket => {
 	socket.emit('hello', {ts: Date.now()});

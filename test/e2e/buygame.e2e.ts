@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import {mkdirSync, writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {randomBytes} from 'node:crypto';
-import {Client, removeDir, sleep, startServer, tempDir} from './support/server.ts';
+import {Client, removeDir, sleep, SocketListener, startServer, tempDir} from './support/server.ts';
 import type {FakeSteamEvent, TestServer} from './support/server.ts';
 
 interface TaskAccount {
@@ -34,6 +34,7 @@ describe('买游戏', () => {
 	let server: TestServer;
 	let client: Client;
 	let alphaId: string;
+	let socket: SocketListener;
 
 	const events = (name: FakeSteamEvent['event']) => server.steamEvents().filter(event => event.event === name);
 	const storeCalls = (path: string) => events('storeRequest').filter(event => event.path === path);
@@ -61,6 +62,7 @@ describe('买游戏', () => {
 		server = await startServer({appRoot, env: {APP_PASSWORD: password, FAKE_STORE_PACKAGES: JSON.stringify({30: {name: 'Pricey Game', final: 5000, appid: 3030}})}});
 		client = new Client(server.baseUrl);
 		await client.login(password);
+		socket = await SocketListener.connect(client);
 		await client.post('/api/login', {accountName: 'alpha'});
 		await client.post('/api/login', {accountName: 'charlie'});
 		let accounts: Array<{account: string; attemptId: string}> = [];
@@ -73,6 +75,7 @@ describe('买游戏', () => {
 
 	after(async () => {
 		await server?.kill();
+		socket?.close();
 		removeDir(appRoot);
 	});
 
@@ -122,6 +125,16 @@ describe('买游戏', () => {
 		assert.equal(task.accounts[0]?.status, 'failed');
 		assert.equal(task.accounts[0]?.error, '余额不足:本单需 $50.00,钱包余额 $5.01', '买过一份 4.99 后剩 5.01');
 		assert.equal(storeCalls('checkout.steampowered.com/checkout/inittransaction/').length, inits);
+	});
+
+	test('进度推送:建任务、每个账号状态变化、完成都经 socket.io 推给前端', async () => {
+		const task = await runTask({items: [{account: 'charlie', packageIds: [20]}], dryRun: true});
+		const created = await socket.waitFor('buygame:task-created', t => t.id === task.id);
+		assert.equal(created.status, 'queued');
+		const completed = await socket.waitFor('buygame:task-completed', t => t.id === task.id);
+		assert.deepEqual(completed.accounts.map((a: TaskAccount) => [a.account, a.status]), [['charlie', 'verified']]);
+		const updates = socket.named('buygame:task-updated').filter(t => t.id === task.id);
+		assert.ok(updates.some(t => t.accounts[0].status === 'running'));
 	});
 
 	test('没有有效购买项报 400', async () => {

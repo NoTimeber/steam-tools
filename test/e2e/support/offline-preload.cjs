@@ -17,7 +17,7 @@
 // 4. 假悠悠接口(*.youpin898.com):按 FAKE_UU_FILE 里的场景回包(测试随时改这个文件),见 fakeUu();
 //    token 不在场景里的一律回登录失效(84101)。
 // 5. 报价接受:steam-tradeoffer-manager / steamcommunity 换成替身,报价从场景的 offers 里取;
-//    接受、手机确认只记日志,不连 Steam。
+//    接受、手机确认只记日志,不连 Steam。充值码兑换的 steamstore 也换成替身,按码的前缀决定结果。
 // 6. 假 Steam 市场(steamcommunity.com/market/*),有状态:挂求购、手机确认、撤单、我的求购单,见 fakeMarket();
 //    场景开关在 FAKE_MARKET_FILE。steamcommunity 替身的 getConfirmations 列出待确认的求购单;
 //    steam-totp 的 getTimeOffset 换成离线版(返回 0)。
@@ -342,7 +342,32 @@ class FakeSteamCommunity {
 	}
 }
 
-for (const [name, exports] of [['steam-tradeoffer-manager', FakeTradeOfferManager], ['steamcommunity', FakeSteamCommunity]]) {
+// ===== 充值码兑换(steamstore)替身 =====
+// 码按前缀决定结果:GOOD- 成功(余额 +5.00);USED- 码已被使用(steamstore 抛错);
+// LIMIT- 被限流(steamstore 不抛错,而是回 eresult=2 / detail=53,真实库就是这样)
+class FakeSteamStore {
+	constructor() {
+		this.cookies = [];
+	}
+	setCookies(cookies) {
+		this.cookies = cookies;
+	}
+	async redeemWalletCode(code) {
+		record({event: 'walletRedeem', code, owner: cookieValue(this.cookies.join('; '), 'steamLoginSecure')});
+		if (code.startsWith('GOOD-')) {
+			return {eresult: 1, detail: 0, formattedNewWalletBalance: '$15.00', amount: 500};
+		}
+		if (code.startsWith('USED-')) {
+			throw Object.assign(new Error('Wallet code is not valid'), {eresult: 2, purchaseresultdetail: 15});
+		}
+		if (code.startsWith('LIMIT-')) {
+			return {eresult: 2, detail: 53, formattedNewWalletBalance: undefined, amount: undefined};
+		}
+		throw Object.assign(new Error('Wallet code is not valid'), {eresult: 2, purchaseresultdetail: 14});
+	}
+}
+
+for (const [name, exports] of [['steam-tradeoffer-manager', FakeTradeOfferManager], ['steamcommunity', FakeSteamCommunity], ['steamstore', FakeSteamStore]]) {
 	const resolved = require.resolve(name, {paths: [ROOT]});
 	require.cache[resolved] = {id: resolved, filename: resolved, loaded: true, exports, children: [], paths: []};
 }
