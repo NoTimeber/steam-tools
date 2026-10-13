@@ -5,6 +5,9 @@
 .env
 inspect_key.txt
 
+# 数据库主密钥(和 data/ 分开保管、分开备份)
+/secrets/
+
 # 发布签名/加密密钥。私钥已移到 ~/.steam-tools-keys/,这里兜底再拦一次。
 /tools/keys/
 *.pem

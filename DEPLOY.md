@@ -27,7 +27,21 @@ cp .env.example .env
 
 `DATA_DIR`、`HOST`、`PORT`、`TRUST_PROXY` 已在 `docker-compose.yml` 里设好，不用再改。
 
-## 3. 迁移现有数据（可选）
+## 3. 生成主密钥
+
+账号密码、shared_secret、maFile、Steam session、UU token 在数据库里都是 AES-256-GCM 密文，解密全靠这把主密钥。
+
+```bash
+mkdir -p secrets
+openssl rand -base64 32 > secrets/master.key
+sudo chown 1000:1000 secrets/master.key && chmod 400 secrets/master.key
+```
+
+- 容器里以 uid 1000 运行，密钥文件要归它所有，否则读不到。
+- **丢了 `master.key`，数据库里的凭据就再也解不开。** 把它和 `data/` 分开备份，比如放进密码管理器。
+- 数据库会记住第一次用的密钥。挂错密钥文件时服务直接拒绝启动，不会用新密钥混写。
+
+## 4. 迁移现有数据（可选）
 
 本地已有账号数据时，把本地安装目录下的 `data/` 整个拷到服务器项目目录下：
 
@@ -36,7 +50,7 @@ cp .env.example .env
 scp -r data/ user@server:~/steam-tools/
 ```
 
-`data/` 里有账号密码、maFile（shared_secret / identity_secret）、refreshToken 和 UU token，**全部是明文**。传输和备份都要当作密码库对待。
+旧版 `data/` 里的账号密码、maFile、refreshToken、UU token **全部是明文**，传输过程要当作密码库对待。
 
 容器里以 uid 1000 运行，所以宿主机上的数据目录要归它所有：
 
@@ -44,7 +58,20 @@ scp -r data/ user@server:~/steam-tools/
 mkdir -p data && sudo chown -R 1000:1000 data && chmod 700 data
 ```
 
-## 4. 启动
+首次启动时，服务端会自动把这些明文文件导入加密数据库 `data/steam-tools.db`：
+
+- 导入的有：`config/accounts.json`、`config/mafile/*.maFile`、`sessions/*.json`、`uu/tokens.json`、`uu/delivery-config.json`。
+- 原文件会挪到 `data/_migrated_plaintext/<时间>/` 下，不会删除。启动日志里有导入数量。
+- 登录网页确认账号、maFile、UU 绑定都正常后，**手动删除 `data/_migrated_plaintext/`**：
+
+```bash
+docker compose logs steam-tools | grep legacy-import
+sudo rm -rf data/_migrated_plaintext
+```
+
+- 数据库里已有某类数据时，同类旧文件只归档、不导入，防止旧备份覆盖新数据。
+
+## 5. 启动
 
 自带 Caddy（自动申请 HTTPS 证书）：
 
@@ -64,7 +91,7 @@ docker compose up -d --build
 docker compose logs -f steam-tools
 ```
 
-## 5. 首次登录
+## 6. 首次登录
 
 - 迁移过来的 `data/config/auth.json` 会保留原来的访问口令。
 - 全新部署时打开 `https://你的域名/login` 设置口令。页面会要求输入「初始化令牌」，令牌打印在启动日志里：
@@ -75,7 +102,7 @@ docker compose logs steam-tools | grep 初始化令牌
 
 口令至少 8 位。同一 IP 连续输错 5 次锁定 15 分钟。
 
-## 6. 更新
+## 7. 更新
 
 ```bash
 git pull
@@ -84,12 +111,20 @@ docker compose up -d --build
 
 容器停止时会先登出所有 Steam 会话。重启后需要在「账户管理」里重新登录账号（与以前本地重启一样）。
 
+## 8. 备份
+
+需要备份两样东西，**分开存放**：
+
+- `data/`：其中 `steam-tools.db`（含 `-wal`、`-shm`）是加密数据库。备份前先 `docker compose stop`，或者用 `sqlite3 data/steam-tools.db ".backup backup.db"` 做在线备份。
+- `secrets/master.key`：没有它，数据库备份就是一堆解不开的密文。
+
 ## 安全说明
 
 - 应用端口只绑定宿主机 `127.0.0.1`，公网只能经反代的 HTTPS 访问。不要把 53110 直接开到公网。
 - cookie 已设置 `HttpOnly` 和 `SameSite=Lax`；经 HTTPS 访问时自动加上 `Secure`。
 - 所有写请求和 WebSocket 握手都会校验 `Origin`，跨站请求会被拒绝。
-- 浏览器不再保存或接收 Steam 密码、shared_secret，这些只存在服务端 `data/config/accounts.json`。
+- 账号密码、shared_secret、maFile、Steam session、UU token 在数据库里是 AES-256-GCM 密文，主密钥单独挂载。
+- 浏览器不再保存或接收 Steam 密码、shared_secret、UU token 原文。
 - 返回 Steam cookies 的 `/api/cookies/:id`，以及能真实下单的 `/api/steam-purchase/test`，默认都关闭。需要时在 `.env` 里设 `ENABLE_DEBUG_ENDPOINTS=1`。
 
 ## 注意事项

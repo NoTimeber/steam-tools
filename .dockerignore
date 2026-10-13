@@ -5,6 +5,7 @@ logs/
 .env.*
 !.env.example
 inspect_key.txt
+secrets/
 *.pem
 update-key.bin
 
@@ -29,3 +30,4 @@ re-tools/
 module-development/
 deploy/
 *.md
+**/*.test.ts

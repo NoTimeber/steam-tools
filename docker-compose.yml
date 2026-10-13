@@ -17,8 +17,11 @@ services:
       # 反代经 docker bridge 网络进来(172.16/12 等),要信任它转发的 X-Forwarded-*
       TRUST_PROXY: loopback,uniquelocal
     volumes:
-      # 账号/maFile/session/UU token 全在这里。宿主目录需属于 uid 1000(容器内 node 用户)
+      # 加密数据库 steam-tools.db 和其它运行数据。宿主目录需属于 uid 1000(容器内 node 用户)
       - ./data:/data
+    secrets:
+      # 主密钥:解开数据库里的密码/令牌全靠它。和 data/ 分开备份,丢了数据就解不开
+      - master_key
     ports:
       # 只绑本机,公网只能经反代(HTTPS)访问
       - "127.0.0.1:53110:53110"
@@ -41,6 +44,10 @@ services:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
+
+secrets:
+  master_key:
+    file: ./secrets/master.key
 
 volumes:
   caddy_data:

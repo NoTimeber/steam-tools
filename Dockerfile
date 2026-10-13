@@ -1,11 +1,8 @@
 # syntax=docker/dockerfile:1
 
-# ---- 依赖层:lzma-native 是原生模块,有预编译包就直接用,没有就现场编译(需要这些工具) ----
+# ---- 依赖层:唯一的原生模块 lzma-native 自带 linux-x64/arm64 预编译包,不需要编译工具 ----
 FROM node:24-bookworm-slim AS deps
 WORKDIR /srv/steam-tools
-RUN apt-get update \
-	&& apt-get install -y --no-install-recommends python3 make g++ \
-	&& rm -rf /var/lib/apt/lists/*
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --no-audit --no-fund
 
@@ -15,6 +12,7 @@ ENV NODE_ENV=production \
 	TZ=Asia/Shanghai \
 	APP_ROOT=/srv/steam-tools \
 	DATA_DIR=/data \
+	MASTER_KEY_FILE=/run/secrets/master_key \
 	HOST=0.0.0.0 \
 	PORT=53110
 RUN apt-get update \
@@ -26,6 +24,8 @@ WORKDIR /srv/steam-tools
 COPY --from=deps /srv/steam-tools/node_modules ./node_modules
 COPY package.json ./
 COPY app ./app
+# 新代码是 TypeScript,Node 24 直接运行(类型擦除),不需要构建步骤
+COPY src ./src
 
 # 以非 root 运行;/data 挂卷存放账号、maFile、session、UU token 等全部运行数据
 USER node

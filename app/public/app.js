@@ -5208,7 +5208,7 @@ async function autoBindMatchedTokens() {
 	const attempts = state.accounts || [];
 	let boundCount = 0;
 	for (const t of tokens) {
-		if (!t.linkedSteamId || !t.token) continue;
+		if (!t.linkedSteamId || !t.id) continue;
 		// 按 SteamID 在「账户管理」里找账号——不限在线状态，只要该账号登录过一次、
 		// 本地存过 steamID 就能匹配上；账号是否在线只影响能否发货，不影响能否绑定。
 		const matchedAccount = attempts.find(a => a.steamID === t.linkedSteamId);
@@ -5220,7 +5220,8 @@ async function autoBindMatchedTokens() {
 		try {
 			console.log('[uu] 自动绑定: token SteamID ' + t.linkedSteamId + ' -> 账号 ' + matchedAccount.accountName);
 			// 不传 gameId：token 通用，绑一次即可，CS2/TF2 发货开关各自独立。
-			await postJson('/api/uu/bind', {accountName: matchedAccount.accountName, token: t.token});
+			// 浏览器拿不到 token 原文,按 id 绑定,服务端自己取 token
+			await postJson('/api/uu/bind', {accountName: matchedAccount.accountName, tokenId: t.id});
 			addLine('info', 'UU Token：已自动绑定到 ' + matchedAccount.accountName);
 			boundCount++;
 		} catch (err) {
@@ -5253,7 +5254,7 @@ async function autoBindMatchedTokens() {
 		var tokens = Array.isArray(state.uu.tokens) ? state.uu.tokens : [];
 		for (var j = 0; j < tokens.length; j++) {
 			var token = tokens[j];
-			if (!token || !token.token) { continue; }
+			if (!token || !token.id) { continue; }
 			if (token.userId && claimedUserIds[String(token.userId)]) { continue; }
 			rows.push({kind: 'token', token: token, local: findUuLocalAccountBySteamId(token.linkedSteamId)});
 		}
@@ -5375,7 +5376,7 @@ async function autoBindMatchedTokens() {
 			+ '<div class="uu-row-toggle"></div>'
 			+ '<div class="uu-row-stats">' + hint + '</div>'
 			+ '<div class="uu-row-actions">'
-				+ '<button type="button" class="uu-token-del-btn uu-row-token-del-btn" data-uu-token="' + escapeAttr(token.token || '') + '">删除 Token</button>'
+				+ '<button type="button" class="uu-token-del-btn uu-row-token-del-btn" data-uu-token-id="' + escapeAttr(token.id || '') + '">删除 Token</button>'
 			+ '</div>'
 			+ '</div>';
 	}
@@ -5453,7 +5454,7 @@ async function autoBindMatchedTokens() {
 			btn.addEventListener('click', function() { loginUuAccount(btn.dataset.uuAccount, btn); });
 		});
 		table.querySelectorAll('.uu-row-token-del-btn').forEach(function(btn) {
-			btn.addEventListener('click', function() { deleteUuTokenByValue(btn.dataset.uuToken); });
+			btn.addEventListener('click', function() { deleteUuTokenById(btn.dataset.uuTokenId); });
 		});
 	}
 
@@ -5475,10 +5476,10 @@ async function autoBindMatchedTokens() {
 		}
 	}
 
-	// 删除未匹配到账号的 token（这类 token 没有 accountName，只能按 token 值删）
-	async function deleteUuTokenByValue(token) {
-		var tok = String(token || '').trim();
-		if (!tok) { return; }
+	// 删除未匹配到账号的 token（这类 token 没有 accountName，按服务端给的 token id 删）
+	async function deleteUuTokenById(tokenId) {
+		var id = String(tokenId || '').trim();
+		if (!id) { return; }
 		var confirmed = await confirmDialog('确定删除这个尚未匹配到账号的 UU Token？', {
 			title: '删除 Token',
 			confirmText: '删除',
@@ -5486,7 +5487,7 @@ async function autoBindMatchedTokens() {
 		});
 		if (!confirmed) { return; }
 		try {
-			await postJson('/api/uu/token', {token: tok}, 'DELETE');
+			await postJson('/api/uu/token', {tokenId: id}, 'DELETE');
 			addLine('info', 'UU Token：已删除未匹配的 Token');
 			await refreshUuTokens();
 			await refreshUuState({force: true});

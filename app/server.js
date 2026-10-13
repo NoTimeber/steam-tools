@@ -59,6 +59,8 @@ const {createSteamStorePurchaser} = require('./services/steamStorePurchase');
 const {createSteamMarketBuyOrder} = require('./services/steamMarketBuyOrder');
 const {createCs2Terminal} = require('./lib/cs2-terminal');
 const {writeFileAtomic, writeJsonAtomic, readJsonFileSafe} = require('./lib/atomic-file');
+// 凭据数据层(TypeScript,由 Node 24 直接运行):SQLite + 字段加密,见 src/store/。
+const {openStore, normalizeStoredAccount, uuTokenId} = require('../src/store/index.ts');
 
 const PORT = Number(process.env.PORT || 53110);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -186,9 +188,7 @@ const LOCAL_CM_FALLBACKS = [
 	}
 ];
 
-fs.mkdirSync(SESSION_DIR, {recursive: true});
 fs.mkdirSync(STEAM_USER_DIR, {recursive: true});
-fs.mkdirSync(CONFIG_MAFILE_DIR, {recursive: true});
 fs.mkdirSync(CONFIG_COOKIES_DIR, {recursive: true});
 
 const ITEMS_GAME_SCHEMA = loadItemsGameSchema(ITEMS_GAME_FILE, {
@@ -414,6 +414,29 @@ const uuDelivery = new Map(); // accountName -> 发货状态
 const uuLoginSessions = new Map(); // loginSessionId -> 短信登录会话
 fs.mkdirSync(UU_DIR, {recursive: true});
 
+// 加密数据库:账户名单、maFile、Steam session、UU token/发货配置都存在这里(敏感字段 AES-256-GCM)。
+// 首次启动时把旧版明文 JSON 导入,原文件挪到 data/_migrated_plaintext/ 下等你确认后删除。
+// 主密钥:MASTER_KEY 环境变量 > MASTER_KEY_FILE > <安装根>/secrets/master.key(开发环境缺失时自动生成)。
+let store;
+try {
+	store = openStore({
+		dataDir: DATA_DIR,
+		defaultKeyFile: path.join(APP_ROOT, 'secrets', 'master.key'),
+		env: process.env,
+		legacy: {
+			accountsFile: ACCOUNT_LIST_FILE,
+			mafileDir: CONFIG_MAFILE_DIR,
+			sessionDir: SESSION_DIR,
+			uuTokensFile: UU_TOKENS_FILE,
+			uuConfigFile: UU_CONFIG_FILE,
+			uuLastTokenFile: path.join(UU_DIR, 'last-token.txt')
+		}
+	});
+} catch (err) {
+	console.error('[store] 打开数据库失败:', err && err.message ? err.message : err);
+	process.exit(1);
+}
+
 installSteamMicroTxnHooks();
 
 app.disable('x-powered-by');
@@ -549,7 +572,7 @@ app.post('/api/update/restart', (req, res) => {
 // 避免"已删除账号"被某个仍有旧 localStorage 的浏览器重新推回。
 app.get('/api/accounts/list', (req, res) => {
 	try {
-		res.json({success: true, initialized: fs.existsSync(ACCOUNT_LIST_FILE), accounts: readAccountList().map(publicStoredAccount)});
+		res.json({success: true, initialized: store.accounts.isInitialized(), accounts: readAccountList().map(publicStoredAccount)});
 	} catch (err) {
 		res.status(500).json({success: false, error: err && err.message ? err.message : '读取账户名单失败'});
 	}
@@ -586,8 +609,8 @@ app.post('/api/accounts/meta', async (req, res) => {
 	res.json({success: true, accounts});
 });
 
-// 服务端持久化 maFile：把完整 maFile（含 identity_secret）写入 data/config/mafile/，
-// 这样独立部署后无需父目录 config 也能在发货时取到 identity_secret 做手机确认。
+// 服务端持久化 maFile：完整 maFile（含 identity_secret）加密存入数据库，
+// 发货/求购确认时从这里取 identity_secret 做手机确认。
 app.post('/api/mafile/import', (req, res) => {
 	const body = req.body || {};
 	const list = Array.isArray(body.mafiles) ? body.mafiles : (body.mafile ? [body.mafile] : []);
@@ -610,7 +633,7 @@ app.post('/api/mafile/import', (req, res) => {
 		const sharedSecret = String(ma.shared_secret || ma.sharedSecret || '').trim();
 		const identitySecret = String(ma.identity_secret || ma.identitySecret || '').trim();
 		try {
-			writeJsonAtomic(path.join(CONFIG_MAFILE_DIR, accountName + '.maFile'), ma);
+			store.mafiles.put(accountName, ma);
 			saved++;
 			results.push({
 				accountName,
@@ -815,7 +838,7 @@ app.post('/api/logout/:id', (req, res) => {
 
 // 前端删除账户时调用：把这些账号对应的后端保活会话一并清理。
 // 1) 登出在线客户端并移出内存任务表（这样 /api/attempts 不会再返回它们）；
-// 2) 删除磁盘上已保存的 session 文件（避免残留凭据）。
+// 2) 删除数据库里已保存的 session（避免残留凭据）。
 app.post('/api/accounts/cleanup', (req, res) => {
 	const body = req.body || {};
 	const list = Array.isArray(body.accounts) ? body.accounts : [];
@@ -850,23 +873,17 @@ app.post('/api/accounts/cleanup', (req, res) => {
 				console.warn('[cleanup] logOff 失败', id, err && err.message);
 			}
 		}
-		// session 文件按 accountName / steamID / id 任一命名，逐一登记以确保删除。
+		// session 按 accountName / steamID / id 任一作 key 保存，逐一登记以确保删除。
 		fileKeys.add(safeName(attempt.accountName || attempt.steamID || attempt.id));
 		attempts.delete(id);
 		removedAttempts++;
 	}
 
 	let removedFiles = 0;
-	for (const key of fileKeys) {
-		const file = path.join(SESSION_DIR, key + '.json');
-		try {
-			if (fs.existsSync(file)) {
-				fs.unlinkSync(file);
-				removedFiles++;
-			}
-		} catch (err) {
-			console.warn('[cleanup] 删除 session 文件失败', file, err && err.message);
-		}
+	try {
+		removedFiles = store.sessions.remove(Array.from(fileKeys));
+	} catch (err) {
+		console.warn('[cleanup] 删除 session 失败', err && err.message);
 	}
 
 	// 同步从持久化名单中移除,确保即使前端防抖推送未及时发出,服务端名单也保持一致。
@@ -2071,7 +2088,16 @@ app.get('/api/uu/state', (req, res) => {
 app.post('/api/uu/bind', async (req, res) => {
 	try {
 		const body = req.body || {};
-		const account = await bindUuToken(body.accountName, body.token, body.gameId);
+		// 浏览器拿不到 token 原文:自动绑定时传 tokenId,由服务端查出 token;手动粘贴时仍直接传 token。
+		let token = String(body.token || '').trim();
+		if (!token && body.tokenId) {
+			const entry = store.uu.findToken(String(body.tokenId));
+			if (!entry) {
+				return res.status(404).json({success: false, error: '找不到该 token,请刷新后重试'});
+			}
+			token = entry.token;
+		}
+		const account = await bindUuToken(body.accountName, token, body.gameId);
 		res.json({success: true, account});
 	} catch (err) {
 		res.status(err.statusCode || 500).json({success: false, error: err.message || 'token 绑定失败'});
@@ -2162,7 +2188,8 @@ app.post('/api/uu/login/verify', async (req, res) => {
 			accountName: body.accountName,
 			gameId: body.gameId
 		});
-		res.json({success: true, ...data});
+		const {token, ...rest} = data || {};
+		res.json({success: true, ...rest, tokenId: token ? uuTokenId({token, userId: rest.userId}) : ''});
 	} catch (err) {
 		res.status(err.statusCode || 500).json({success: false, error: err.message || '登录失败'});
 	}
@@ -2177,19 +2204,24 @@ app.post('/api/uu/login/cancel', (req, res) => {
 });
 
 // ===== 独立 token 管理（不依赖账号选择）=====
-// 获取 token 后先存到这里，等下再绑到具体 Steam 账号
+// 获取 token 后先存到这里(加密库 uu_tokens 表)，等下再绑到具体 Steam 账号
 
-function loadUuTokensFromFile() {
-	const arr = readJsonFileSafe(UU_TOKENS_FILE);
-	return Array.isArray(arr) ? arr : [];
+function loadUuTokens() {
+	return store.uu.listTokens();
 }
 
-function saveUuTokensToFile(tokens) {
+function saveUuTokens(tokens) {
 	try {
-		writeJsonAtomic(UU_TOKENS_FILE, tokens);
+		store.uu.replaceTokens(Array.isArray(tokens) ? tokens : []);
 	} catch (err) {
-		console.warn('[uu] 保存 tokens.json 失败:', err.message);
+		console.warn('[uu] 保存 token 列表失败:', err.message);
 	}
+}
+
+// 下发给浏览器的 token 条目:不含 token 原文,只给稳定 id 和掩码;绑定/删除都按 id 进行。
+function publicUuTokenEntry(entry) {
+	const {token, ...rest} = entry || {};
+	return {...rest, id: uuTokenId(entry || {}), tokenMask: maskUuToken(token)};
 }
 
 app.post('/api/uu/token/acquire', async (req, res) => {
@@ -2227,16 +2259,16 @@ app.post('/api/uu/token/acquire', async (req, res) => {
 		};
 
 		// 持久化：按 userId 去重，不按游戏（与 verifyUuSmsLogin 保持一致）
-		const tokens = loadUuTokensFromFile();
+		const tokens = loadUuTokens();
 		const idx = tokens.findIndex(t => t.userId === entry.userId);
 		if (idx >= 0) {
 			tokens[idx] = entry;
 		} else {
 			tokens.push(entry);
 		}
-		saveUuTokensToFile(tokens);
+		saveUuTokens(tokens);
 
-		res.json({success: true, token: entry});
+		res.json({success: true, token: publicUuTokenEntry(entry)});
 	} catch (err) {
 		res.status(err.statusCode || 500).json({success: false, error: err.message || '保存 token 失败'});
 	}
@@ -2244,8 +2276,7 @@ app.post('/api/uu/token/acquire', async (req, res) => {
 
 app.get('/api/uu/tokens', (req, res) => {
 	try {
-		const tokens = loadUuTokensFromFile();
-		res.json({success: true, tokens});
+		res.json({success: true, tokens: loadUuTokens().map(publicUuTokenEntry)});
 	} catch (err) {
 		res.status(500).json({success: false, error: err.message || '读取 token 列表失败'});
 	}
@@ -2254,20 +2285,26 @@ app.get('/api/uu/tokens', (req, res) => {
 app.delete('/api/uu/token', (req, res) => {
 	try {
 		const body = req.body || {};
-		// 按账号删除（行内“删除 Token”按钮）：解绑该账号并从 tokens.json 移除
+		// 按账号删除（行内“删除 Token”按钮）：解绑该账号并从 token 列表移除
 		const accountName = String(body.accountName || '').trim();
 		if (accountName) {
 			const account = deleteUuAccountToken(accountName);
 			return res.json({success: true, account});
 		}
+		// 未匹配到账号的 token：按 id 删除(浏览器只有 id)
+		const tokenId = String(body.tokenId || '').trim();
+		if (tokenId) {
+			saveUuTokens(loadUuTokens().filter(t => uuTokenId(t) !== tokenId));
+			return res.json({success: true});
+		}
 		// 兼容：按 token 字符串删除
 		const token = String(body.token || '').trim();
 		if (!token) {
-			return res.status(400).json({success: false, error: 'token 或 accountName 不能为空'});
+			return res.status(400).json({success: false, error: 'tokenId、token 或 accountName 不能为空'});
 		}
-		let tokens = loadUuTokensFromFile();
+		let tokens = loadUuTokens();
 		tokens = tokens.filter(t => t.token !== token);
-		saveUuTokensToFile(tokens);
+		saveUuTokens(tokens);
 		res.json({success: true});
 	} catch (err) {
 		res.status(err.statusCode || 500).json({success: false, error: err.message || '删除 token 失败'});
@@ -3341,7 +3378,6 @@ function saveSession(attempt) {
 	}
 
 	const key = safeName(attempt.accountName || attempt.steamID || attempt.id);
-	const file = path.join(SESSION_DIR, key + '.json');
 	const payload = {
 		accountName: attempt.accountName,
 		steamID: attempt.steamID,
@@ -3356,8 +3392,8 @@ function saveSession(attempt) {
 		updatedAt: new Date().toISOString()
 	};
 
-	writeJsonAtomic(file, payload);
-	addLog(attempt, 'info', '已保存 session: ' + file);
+	store.sessions.put(key, payload);
+	addLog(attempt, 'info', '已保存 session(加密): ' + key);
 }
 
 function getAttempt(id, res) {
@@ -3441,69 +3477,21 @@ function publicAccountProfile(profile) {
 // ===== 账户名单持久化(多浏览器同步) =====
 // 只保存"耐久"字段;运行态(status/gcConnected/inventoryCount...)由前端登录后自行刷新,不落盘。
 function sanitizeStoredAccount(account) {
-	if (!account || typeof account !== 'object') {
-		return null;
-	}
-	const accountName = String(account.accountName || '').trim();
-	if (!accountName) {
-		return null;
-	}
-	return {
-		id: account.id ? String(account.id) : '',
-		accountName,
-		password: account.password == null ? '' : String(account.password),
-		sharedSecret: account.sharedSecret == null ? '' : String(account.sharedSecret),
-		twoFactorCode: account.twoFactorCode == null ? '' : String(account.twoFactorCode),
-		remember: account.remember !== false,
-		hasMaFile: !!account.hasMaFile,
-		steamID: String(account.steamID || account.steamId || '').trim(),
-		country: String(account.country || '').trim(),
-		balance: account.balance == null ? null : Number(account.balance),
-		currency: account.currency == null ? null : Number(account.currency),
-		hasWallet: !!account.hasWallet,
-		activeGame: String(account.activeGame || 'cs2'),
-		source: String(account.source || '').trim()
-	};
+	return normalizeStoredAccount(account);
 }
 
 function readAccountList() {
-	const data = readJsonFile(ACCOUNT_LIST_FILE);
-	if (!Array.isArray(data)) {
-		return [];
-	}
-	return data.map(sanitizeStoredAccount).filter(Boolean);
+	return store.accounts.list();
 }
 
+// 整表替换;规范化与按账号名去重(保留首次出现的位置,值取最后一次)在 src/store/accounts.ts。
 function writeAccountList(list) {
-	const sanitized = Array.isArray(list) ? list.map(sanitizeStoredAccount).filter(Boolean) : [];
-	// 按 accountName 去重(保留首次出现的位置,值取最后一次),防止前端误传重复项。
-	const order = [];
-	const byKey = new Map();
-	for (const acc of sanitized) {
-		const key = acc.accountName.toLowerCase();
-		if (!byKey.has(key)) {
-			order.push(key);
-		}
-		byKey.set(key, acc);
-	}
-	const deduped = order.map(key => byKey.get(key));
-	writeJsonAtomic(ACCOUNT_LIST_FILE, deduped);
-	return deduped;
+	return store.accounts.replaceAll(Array.isArray(list) ? list : []);
 }
 
 // 从名单中移除指定账号(删除账户时调用),返回是否有改动。
 function removeAccountsFromList(accountNames) {
-	const drop = new Set((accountNames || []).map(name => String(name || '').trim().toLowerCase()).filter(Boolean));
-	if (!drop.size || !fs.existsSync(ACCOUNT_LIST_FILE)) {
-		return false;
-	}
-	const current = readAccountList();
-	const kept = current.filter(acc => !drop.has(acc.accountName.toLowerCase()));
-	if (kept.length === current.length) {
-		return false;
-	}
-	writeAccountList(kept);
-	return true;
+	return store.accounts.removeByNames(accountNames || []);
 }
 
 // 下发给浏览器的名单不含密码/shared_secret/一次性验证码,只给"有没有"的标记。
@@ -3557,7 +3545,7 @@ function readLocalAccountProfile(accountName) {
 		return profile;
 	}
 
-	const maFile = readJsonFile(path.join(CONFIG_MAFILE_DIR, name + '.maFile'));
+	const maFile = store.mafiles.get(name);
 	if (maFile && typeof maFile === 'object') {
 		profile.hasMaFile = true;
 		profile.sharedSecret = String(maFile.shared_secret || maFile.sharedSecret || '').trim();
@@ -6599,8 +6587,7 @@ function resolveInventoryCookies(attempt) {
 		return attempt.cookies;
 	}
 
-	const sessionFile = path.join(SESSION_DIR, safeName(attempt.accountName || attempt.steamID || attempt.id) + '.json');
-	const session = readJsonFile(sessionFile);
+	const session = store.sessions.get(safeName(attempt.accountName || attempt.steamID || attempt.id));
 	if (session && Array.isArray(session.cookies) && session.cookies.length) {
 		return session.cookies;
 	}
@@ -6788,7 +6775,7 @@ function addUuLog(state, level, message) {
 }
 
 function loadUuConfig() {
-	const raw = readJsonFile(UU_CONFIG_FILE);
+	const raw = store.uu.loadDeliveryConfig();
 	if (!raw || typeof raw !== 'object') {
 		return;
 	}
@@ -6849,7 +6836,7 @@ function saveUuConfig() {
 		};
 	}
 	try {
-		writeJsonAtomic(UU_CONFIG_FILE, out);
+		store.uu.saveDeliveryConfig(out);
 	} catch (err) {
 		console.warn('[uu] 保存发货配置失败:', err.message);
 	}
@@ -6920,7 +6907,7 @@ function publicUuAccount(accountName) {
 		bound: !!(state && state.token),
 		gameId: state ? state.gameId : String(TF2_APP_ID),
 		nickname: state ? state.nickname : '',
-		// UU 用户 id：前端用它把 tokens.json 里的 token 与本行对应起来，
+		// UU 用户 id：前端用它把已获取的 token 与本行对应起来，
 		// 从而判断哪些 token 还没匹配到「账户管理」里的账号。
 		userId: state && state.userId ? String(state.userId) : '',
 		tokenMask: state ? maskUuToken(state.token) : '',
@@ -7008,7 +6995,7 @@ async function bindUuToken(accountName, token, gameId) {
 }
 
 
-// 删除某账号已获取/绑定的 token：停轮询 + 清空绑定状态 + 从 tokens.json 移除
+// 删除某账号已获取/绑定的 token：停轮询 + 清空绑定状态 + 从 token 列表移除
 function deleteUuAccountToken(accountName) {
 	const name = String(accountName || '').trim();
 	if (!name) {
@@ -7033,15 +7020,15 @@ function deleteUuAccountToken(accountName) {
 	state.boundAt = '';
 	addUuLog(state, 'info', '已删除该账号的 UU token，自动发货已停止');
 	saveUuConfig();
-	// 同步从已获取 token 列表（tokens.json）中移除该 token。
+	// 同步从已获取 token 列表中移除该 token。
 	// 按 userId 删(顺带兼容按 token 字符串)：历史上同一 UU 账号可能因为按游戏分开存
 	// 而留下多条记录，只按 token 字符串过滤会漏删，残留那条会被前端自动绑定逻辑再绑回来。
 	try {
-		const tokens = loadUuTokensFromFile().filter(t =>
+		const tokens = loadUuTokens().filter(t =>
 			t.token !== removedToken && !(removedUserId && String(t.userId) === removedUserId));
-		saveUuTokensToFile(tokens);
+		saveUuTokens(tokens);
 	} catch (err) {
-		console.warn('[uu] 清理 tokens.json 失败:', err.message);
+		console.warn('[uu] 清理 token 列表失败:', err.message);
 	}
 	emitUuAccount(name);
 	return publicUuAccount(name);
@@ -7687,7 +7674,7 @@ async function verifyUuSmsLogin({loginSessionId, code, accountName, gameId} = {}
 	const gameIdNorm = uuDefaultGameId(gameId);
 
 
-	// 持久化 token 到 tokens.json + 查 UU 绑定的 Steam 账号
+	// 持久化 token 到加密库 + 查 UU 绑定的 Steam 账号
 	let linkedSteamId = '';
 	const jwt = decodeJwt(token);
 	const userId = jwt && jwt.Id ? String(jwt.Id) : '';
@@ -7702,12 +7689,12 @@ async function verifyUuSmsLogin({loginSessionId, code, accountName, gameId} = {}
 		// cookie/pull 失败不阻断
 	}
 
-	// 写入 tokens.json —— 按 userId 去重，**不按游戏**。
+	// 写入 token 列表 —— 按 userId 去重，**不按游戏**。
 	// UU token 是按 UU 账号发放的(JWT 里只有 Id/Name，没有游戏字段)，CS2/TF2 通用；
 	// 以前这里的 key 是 (userId, gameId)，同一个 UU 账号在弹窗里选 CS2 登一次、选 TF2 再登一次
 	// 就会存成两条、两个不同的 JWT，然后被自动绑定逻辑各绑一次。
 	try {
-		const tokens = loadUuTokensFromFile();
+		const tokens = loadUuTokens();
 		const idx = tokens.findIndex(t => t.userId === userId);
 		const entry = {token, userId, nickname, linkedSteamId, jwtExp, acquiredAt: new Date().toISOString()};
 		if (idx >= 0) {
@@ -7715,7 +7702,7 @@ async function verifyUuSmsLogin({loginSessionId, code, accountName, gameId} = {}
 		} else {
 			tokens.push(entry);
 		}
-		saveUuTokensToFile(tokens);
+		saveUuTokens(tokens);
 	} catch (err) {
 		// 持久化失败不阻断
 	}
