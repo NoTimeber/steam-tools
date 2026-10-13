@@ -18,9 +18,12 @@
 //    token 不在场景里的一律回登录失效(84101)。
 // 5. 报价接受:steam-tradeoffer-manager / steamcommunity 换成替身,报价从场景的 offers 里取;
 //    接受、手机确认只记日志,不连 Steam。
-// 6. 外网拦截:全局 fetch 只放行本机;汇率接口返回固定数据;其余外部请求直接失败。
+// 6. 假 Steam 市场(steamcommunity.com/market/*),有状态:挂求购、手机确认、撤单、我的求购单,见 fakeMarket();
+//    场景开关在 FAKE_MARKET_FILE。steamcommunity 替身的 getConfirmations 列出待确认的求购单;
+//    steam-totp 的 getTimeOffset 换成离线版(返回 0)。
+// 7. 外网拦截:全局 fetch 只放行本机;汇率接口返回固定数据;其余外部请求直接失败。
 //
-// logOn / logOff / gamesPlayed / sendToGC / 下单各步 / 悠悠请求 / 报价接受 / 被拦的外部请求
+// logOn / logOff / gamesPlayed / sendToGC / 下单各步 / 悠悠请求 / 报价接受 / 市场请求和确认 / 被拦的外部请求
 // 都追加一行 JSON 到 FAKE_STEAM_LOG(设置了才写)。
 
 const path = require('path');
@@ -308,17 +311,137 @@ class FakeTradeOfferManager {
 FakeTradeOfferManager.ETradeOfferState = {Active: ACTIVE_OFFER_STATE};
 
 class FakeSteamCommunity {
-	constructor() {}
-	setCookies() {}
+	constructor() {
+		this.owner = '';
+	}
+	setCookies(cookies) {
+		this.owner = cookieValue((cookies || []).join('; '), 'steamLoginSecure');
+	}
 	acceptConfirmationForObject(identitySecret, objectId, callback) {
 		record({event: 'offerConfirm', offerId: String(objectId), identitySecret});
 		callback(null);
+	}
+	// 手机令牌确认列表:这个账号还没确认的求购单
+	getConfirmations(time, key, callback) {
+		record({event: 'marketConfirmList', owner: this.owner, tag: key && key.tag});
+		const list = [...market.confs.entries()]
+			.filter(([, conf]) => conf.owner === this.owner && !conf.allowed)
+			.map(([id, conf]) => ({
+				id,
+				creator: conf.creator,
+				type: 3,
+				respond(respondTime, respondKey, accept, done) {
+					record({event: 'marketConfirm', owner: conf.owner, confId: id, tag: respondKey && respondKey.tag, accept});
+					conf.allowed = !!accept;
+					done(null);
+				}
+			}));
+		setImmediate(() => callback(null, list));
 	}
 }
 
 for (const [name, exports] of [['steam-tradeoffer-manager', FakeTradeOfferManager], ['steamcommunity', FakeSteamCommunity]]) {
 	const resolved = require.resolve(name, {paths: [ROOT]});
 	require.cache[resolved] = {id: resolved, filename: resolved, loaded: true, exports, children: [], paths: []};
+}
+
+// steam-totp 查 Steam 时间差走的是 https 模块(不经 fetch),换成离线版
+const steamTotp = require(require.resolve('steam-totp', {paths: [ROOT]}));
+steamTotp.getTimeOffset = callback => {
+	record({event: 'timeOffset'});
+	setImmediate(() => callback(null, 0, 0));
+};
+
+// ===== 假 Steam 市场 =====
+// 场景文件(可选)形如:{needConfirmation: true, createFail: {success: 25}, filled: [<buy_orderid>...]}
+//   needConfirmation:挂单先回 success=22,手机确认后带 confirmation 重发才落单(和真实流程一样);
+//   createFail:挂单一律回这个;filled:这些求购单已成交,从「我的求购单」里消失。
+// 账号按 cookie 里的 steamLoginSecure 区分;表单里的 sessionid 必须等于 cookie 里的(CSRF),否则回 success=15。
+const market = {seq: 0, orders: new Map(), confs: new Map()};
+
+function marketScenario() {
+	const file = process.env.FAKE_MARKET_FILE;
+	try {
+		return file ? JSON.parse(fs.readFileSync(file, 'utf8')) : {};
+	} catch (_) {
+		return {};
+	}
+}
+
+function cookieValue(header, name) {
+	const match = new RegExp('(?:^|;\\s*)' + name + '=([^;]*)').exec(String(header || ''));
+	return match ? decodeURIComponent(match[1]) : '';
+}
+
+function placeMarketOrder(owner, form) {
+	const id = String(7000000000 + ++market.seq);
+	const quantity = Number(form.quantity);
+	market.orders.set(id, {owner, appid: Number(form.appid), name: form.market_hash_name, price: Number(form.price_total) / quantity, quantity, currency: Number(form.currency)});
+	return id;
+}
+
+function fakeMarket(url, init) {
+	const headers = Object.fromEntries(Object.entries((init && init.headers) || {}).map(([key, value]) => [key.toLowerCase(), String(value)]));
+	const owner = cookieValue(headers.cookie, 'steamLoginSecure');
+	const form = init && init.body ? Object.fromEntries(new URLSearchParams(String(init.body))) : {};
+	const scenario = marketScenario();
+	record({event: 'marketRequest', method: (init && init.method) || 'GET', path: url.pathname, query: Object.fromEntries(url.searchParams), owner, form, referer: headers.referer || ''});
+	const json = value => new Response(JSON.stringify(value), {status: 200, headers: {'content-type': 'application/json'}});
+	if (url.pathname.startsWith('/market/listings/')) {
+		const name = decodeURIComponent(url.pathname.split('/')[4] || '');
+		return new Response(`<html><title>Steam Community Market :: Listings for ${name}</title></html>`, {status: 200});
+	}
+	if (url.pathname === '/market/itemordershistogram') {
+		return json({success: 1, highest_buy_order: '120', lowest_sell_order: '150'});
+	}
+	if (url.pathname === '/market/priceoverview/') {
+		return json({success: true, lowest_price: '$1.50', median_price: '$1.40', volume: '321'});
+	}
+	if (!owner) {
+		return new Response('<html>Sign In</html>', {status: 200});   // 没登录:Steam 回登录页
+	}
+	const csrfOk = !!form.sessionid && form.sessionid === cookieValue(headers.cookie, 'sessionid');
+	switch (url.pathname) {
+		case '/market/createbuyorder/': {
+			if (!csrfOk) {
+				return json({success: 15});
+			}
+			if (scenario.createFail) {
+				return json(scenario.createFail);
+			}
+			if (form.confirmation) {
+				const conf = market.confs.get(form.confirmation);
+				if (conf && conf.owner === owner && conf.allowed) {
+					market.confs.delete(form.confirmation);
+					return json({success: 1, buy_orderid: placeMarketOrder(owner, conf.form)});
+				}
+				return json({success: 22, need_confirmation: true, confirmation: {confirmation_id: form.confirmation}});
+			}
+			if (scenario.needConfirmation) {
+				const confId = String(9000 + ++market.seq);
+				market.confs.set(confId, {owner, form, creator: String(5000 + market.seq), allowed: false});
+				return json({success: 22, need_confirmation: true, confirmation: {confirmation_id: confId}});
+			}
+			return json({success: 1, buy_orderid: placeMarketOrder(owner, form)});
+		}
+		case '/market/cancelbuyorder/': {
+			const order = market.orders.get(form.buy_orderid);
+			if (!csrfOk || !order || order.owner !== owner) {
+				return json({success: csrfOk ? 8 : 15});
+			}
+			market.orders.delete(form.buy_orderid);
+			return json({success: 1});
+		}
+		case '/market/mylistings/': {
+			const filled = new Set((scenario.filled || []).map(String));
+			const buyOrders = [...market.orders.entries()]
+				.filter(([id, order]) => order.owner === owner && !filled.has(id))
+				.map(([id, order]) => ({buy_orderid: id, price: String(order.price), quantity: String(order.quantity), quantity_remaining: String(order.quantity),
+					description: {appid: order.appid, market_hash_name: order.name}}));
+			return json({success: true, buy_orders: buyOrders});
+		}
+	}
+	return json({success: 8});
 }
 
 // ===== 外网拦截 =====
@@ -331,6 +454,9 @@ globalThis.fetch = async function offlineFetch(input, init) {
 	}
 	if (url.hostname.endsWith('.youpin898.com')) {
 		return fakeUu(url, init);
+	}
+	if (url.hostname === 'steamcommunity.com' && url.pathname.startsWith('/market/')) {
+		return fakeMarket(url, init);
 	}
 	if (url.origin + url.pathname === 'https://open.er-api.com/v6/latest/USD') {
 		return new Response(JSON.stringify(FIXED_USD_RATES), {status: 200, headers: {'content-type': 'application/json'}});

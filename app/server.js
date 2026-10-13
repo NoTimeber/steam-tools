@@ -46,7 +46,6 @@ const {redeemForAccount} = require('./lib/wallet-code');
 const {createAuth} = require('./lib/auth');
 const {createFingerprintStore} = require('./services/fingerprint');
 const {createSteamStorePurchaser} = require('./services/steamStorePurchase');
-const {createSteamMarketBuyOrder} = require('./services/steamMarketBuyOrder');
 const {createCs2Terminal} = require('./lib/cs2-terminal');
 const {writeFileAtomic, writeJsonAtomic, readJsonFileSafe} = require('./lib/atomic-file');
 // 凭据数据层(TypeScript,由 Node 24 直接运行):SQLite + 字段加密,见 src/store/。
@@ -71,6 +70,8 @@ const {findOnlineAttempt} = require('../src/steam/attempts.ts');
 const {createPurchaseService, normalizeCartData, publicTask: publicPurchaseTask} = require('../src/purchase/index.ts');
 // UU(悠悠有品)发货/自动上架/token 管理(TypeScript),见 src/uu/。
 const {createUuService} = require('../src/uu/index.ts');
+// Steam 社区市场求购单(TypeScript):行情参考、挂求购/手机确认、撤单、对账,见 src/market/。
+const {createMarketService} = require('../src/market/index.ts');
 
 const PORT = Number(process.env.PORT || 53110);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -89,11 +90,6 @@ const fingerprintStore = createFingerprintStore({
 // Steam 商店「协议购买整款游戏」(钱包给自己买),见 services/steamStorePurchase.js。
 const steamStorePurchaser = createSteamStorePurchaser({
 	logger: (level, message) => console.log(`[steam-purchase:${level}] ${message}`)
-});
-
-// Steam 社区市场「求购单」(挂求购/撤求购/行情参考),见 services/steamMarketBuyOrder.js。
-const steamMarketBuyOrder = createSteamMarketBuyOrder({
-	logger: (level, message) => console.log(`[market-buyorder:${level}] ${message}`)
 });
 
 // CS2「创世终端机」开启(P0/P1/P2:抓包 + 拉报价 + 解封,不含花钱兑换),见 lib/cs2-terminal.js。
@@ -117,11 +113,6 @@ const SESSION_RESTORE_INTERVAL_MS = Math.max(1000, Number(process.env.SESSION_RE
 
 // launcher 在检测到新版本时写这个文件;前端据此提示"重启生效"。
 const UPDATE_STATUS_FILE = path.join(DATA_DIR, 'update-status.json');
-// 市场求购单本地账本(只记由本工具挂出的求购,供「我的求购单」列表/撤销用)。
-const MARKET_BUYORDERS_FILE = path.join(DATA_DIR, 'market-buyorders.json');
-// item_nameid 缓存({appid|market_hash_name: nameid})。Steam 改版后商品页抓不到 nameid,
-// 一旦由用户手填/任何途径拿到一次就缓存复用,供「行情参考」抓盘口(最高求购/最低在售)。
-const MARKET_NAMEIDS_FILE = path.join(DATA_DIR, 'market-nameids.json');
 // 子进程以此退出码退出时,launcher 会"应用暂存更新并重启"(见 launcher.js)。
 const RESTART_EXIT_CODE = 75;
 // 静态参考资料(CS2/TF2 物品 schema + 本地化文案)。放在 app/schema/ 内,
@@ -370,6 +361,19 @@ const uu = createUuService({
 	hasMaFile: accountName => !!readLocalAccountProfile(accountName).hasMaFile,
 	pollIntervalMs: Number(process.env.UU_POLL_INTERVAL_MS) || undefined,
 	inspect: {url: process.env.INSPECT_SERVICE_URL || '', key: process.env.INSPECT_KEY || ''}
+});
+
+// 市场求购:账本 data/market-buyorders.json 只记本工具挂出的求购;item_nameid 先查缓存 data/market-nameids.json,
+// 再查随程序打包的社区库 app/services/nameid-db/
+const market = createMarketService({
+	findAttempt: findAttemptByKey,
+	cookiesFor: resolveInventoryCookies,
+	ledgerFile: path.join(DATA_DIR, 'market-buyorders.json'),
+	nameIdCacheFile: path.join(DATA_DIR, 'market-nameids.json'),
+	nameIdDbDir: path.join(CODE_DIR, 'services', 'nameid-db'),
+	readJson: readJsonFile,
+	writeJson: writeJsonAtomic,
+	writeText: (file, text) => writeFileAtomic(file, text, 'utf8')
 });
 
 app.disable('x-powered-by');
@@ -1317,124 +1321,9 @@ app.post('/api/buygame/tasks', (req, res) => {
 	res.json({success: true, task: publicBuyGameTask(task)});
 });
 
-// ===== Steam 社区市场:求购单(createbuyorder / cancelbuyorder)=====
-
-function loadMarketBuyOrders() {
-	const data = readJsonFile(MARKET_BUYORDERS_FILE);
-	return Array.isArray(data) ? data : [];
-}
-
-function saveMarketBuyOrders(list) {
-	try {
-		writeJsonAtomic(MARKET_BUYORDERS_FILE, list);
-	} catch (err) {
-		console.log('[market-buyorder] 账本保存失败: ' + (err && err.message ? err.message : err));
-	}
-}
-
-// ---- item_nameid 缓存(行情盘口用)----
-function marketNameIdKey(appid, marketHashName) {
-	return `${Number(appid)}|${String(marketHashName || '')}`;
-}
-function loadMarketNameIds() {
-	const data = readJsonFile(MARKET_NAMEIDS_FILE);
-	return (data && typeof data === 'object' && !Array.isArray(data)) ? data : {};
-}
-function getCachedMarketNameId(appid, marketHashName) {
-	const v = loadMarketNameIds()[marketNameIdKey(appid, marketHashName)];
-	return v ? String(v) : '';
-}
-function saveMarketNameId(appid, marketHashName, nameId) {
-	const id = String(nameId || '').replace(/\D/g, '');
-	if (!id) {
-		return;
-	}
-	const map = loadMarketNameIds();
-	const key = marketNameIdKey(appid, marketHashName);
-	if (map[key] === id) {
-		return;
-	}
-	map[key] = id;
-	try {
-		writeJsonAtomic(MARKET_NAMEIDS_FILE, map);
-	} catch (err) {
-		console.log('[market-buyorder] nameid 缓存保存失败: ' + (err && err.message ? err.message : err));
-	}
-}
-
-// 社区 nameid 数据库({market_hash_name: nameid},按游戏分文件,覆盖 CS2/TF2)。
-// 数据已随程序打包在本地 app/services/nameid-db/{CS2,TF2}.json —— 正常运行只读本地,不联网。
-// (来源:github.com/somespecialone/steam-item-name-ids;nameid 对已存在物品永不变,新物品才需更新。)
-const NAMEID_DB_GAME_BY_APPID = {730: 'CS2', 440: 'TF2'};
-const NAMEID_DB_DIR = path.join(CODE_DIR, 'services', 'nameid-db');
-const nameIdDbCache = new Map(); // game -> {map}
-
-function loadLocalNameIdDb(game) {
-	try {
-		const map = JSON.parse(fs.readFileSync(path.join(NAMEID_DB_DIR, game + '.json'), 'utf8'));
-		return (map && typeof map === 'object' && !Array.isArray(map)) ? map : null;
-	} catch (_) {
-		return null;
-	}
-}
-
-// 自愈:本地 nameid 库文件缺失(如部分部署)时,从社区仓库拉一次并落盘;此后纯本地读取。
-async function downloadNameIdDb(game) {
-	const url = `https://raw.githubusercontent.com/somespecialone/steam-item-name-ids/main/data/${game}/item_names.json`;
-	const res = await fetch(url, {headers: {'User-Agent': 'steam-tools'}, signal: AbortSignal.timeout(15000)});
-	if (!res.ok) {
-		throw new Error('HTTP ' + res.status);
-	}
-	const text = await res.text();
-	const map = JSON.parse(text);
-	if (!map || typeof map !== 'object' || Array.isArray(map)) {
-		throw new Error('数据格式异常');
-	}
-	try {
-		fs.mkdirSync(NAMEID_DB_DIR, {recursive: true});
-		writeFileAtomic(path.join(NAMEID_DB_DIR, game + '.json'), text, 'utf8');
-	} catch (err) {
-		console.log('[market-buyorder] nameid 库落盘失败(' + game + '): ' + (err && err.message ? err.message : err));
-	}
-	return map;
-}
-
-async function resolveNameIdFromDb(appid, marketHashName) {
-	const game = NAMEID_DB_GAME_BY_APPID[Number(appid)];
-	if (!game) {
-		return '';
-	}
-	let entry = nameIdDbCache.get(game);
-	if (!entry) {
-		let map = loadLocalNameIdDb(game);   // 先读本地打包好的库
-		if (!map) {
-			try {
-				map = await downloadNameIdDb(game);   // 本地缺失才补全一次
-				console.log(`[market-buyorder] 本地 nameid 库缺失,已从社区仓库补全(${game})`);
-			} catch (err) {
-				console.log('[market-buyorder] nameid 库加载失败(' + game + '): ' + (err && err.message ? err.message : err));
-				map = {};
-			}
-		}
-		entry = {map};
-		nameIdDbCache.set(game, entry);
-		console.log(`[market-buyorder] nameid 库就绪(${game}): ${Object.keys(entry.map).length} 条`);
-	}
-	const v = entry.map[marketHashName];
-	return v ? String(v).replace(/\D/g, '') : '';
-}
-
-// 解析前端传来的商品定位:优先 url,其次 appid + marketHashName。
-function resolveMarketTarget(body) {
-	if (body && body.url) {
-		return steamMarketBuyOrder.parseListingUrl(body.url);
-	}
-	const appid = Number(body && body.appid);
-	const marketHashName = String((body && body.marketHashName) || '').trim();
-	if (Number.isInteger(appid) && appid > 0 && marketHashName) {
-		return {appid, marketHashName};
-	}
-	throw new Error('请提供商品链接(url)或 appid + marketHashName');
+// ===== Steam 社区市场:求购单(src/market/)=====
+function sendMarketError(res, err, fallback) {
+	res.status(err && err.statusCode || 500).json({success: false, error: err && err.message || fallback});
 }
 
 // 可挂求购的在线账户(同「买游戏」:已登录 + 有 WebSession cookie)。
@@ -1442,386 +1331,53 @@ app.get('/api/market/online-accounts', (req, res) => {
 	res.json({success: true, accounts: listBuyGameOnlineAccounts()});
 });
 
-// 行情参考:用某账号的 cookie/币种/地区抓盘口(最高求购/最低在售)与概览价(成交均价/销量)。
-// query: { accountId|account, url } 或 { accountId, appid, marketHashName }
+// 行情参考。query: { accountId|account, url | (appid, marketHashName), itemNameId? }
 app.get('/api/market/context', async (req, res) => {
-	const attempt = findAttemptByKey(String(req.query.accountId || req.query.account || '').trim());
-	if (!attempt) {
-		return res.status(404).json({success: false, error: '账号不存在或未登录(用 id 或账号名指定)'});
-	}
-	let target;
 	try {
-		target = resolveMarketTarget({url: req.query.url, appid: req.query.appid, marketHashName: req.query.marketHashName});
+		res.json({success: true, context: await market.context(req.query)});
 	} catch (err) {
-		return res.status(400).json({success: false, error: err.message});
-	}
-	// item_nameid:优先用请求里手填的,其次本地缓存。Steam 改版后商品页已抓不到 nameid,
-	// 靠这两条恢复盘口(最高求购/最低在售);成交均价/最低在售-priceoverview 不需要 nameid,照常返回。
-	const manualNameId = String(req.query.itemNameId || req.query.nameId || '').replace(/\D/g, '');
-	let knownNameId = manualNameId || getCachedMarketNameId(target.appid, target.marketHashName);
-	if (!knownNameId) {
-		// 本地没有就查社区 nameid 数据库(CS2/TF2),命中即自动用,无需用户手填。
-		knownNameId = await resolveNameIdFromDb(target.appid, target.marketHashName);
-	}
-	const cookies = resolveInventoryCookies(attempt);
-	try {
-		const context = await steamMarketBuyOrder.fetchMarketContext({
-			appid: target.appid,
-			marketHashName: target.marketHashName,
-			itemNameId: knownNameId,
-			cookies,
-			userAgent: attempt.userAgent,
-			currency: attempt.currency,
-			country: attempt.country || attempt.loginGeoCountry || 'US'
-		});
-		context.currencyISO = String(attempt.currencyISO || currencyIdToIso(attempt.currency) || '').toUpperCase();
-		// 拿到 nameid(手填或回退抓到)就缓存,下次自动用、无需再填。
-		if (context.itemNameId) {
-			saveMarketNameId(target.appid, target.marketHashName, context.itemNameId);
-		}
-		res.json({success: true, context});
-	} catch (err) {
-		res.status(502).json({success: false, error: err && err.message ? err.message : '行情获取失败'});
+		sendMarketError(res, err, '行情获取失败');
 	}
 });
 
-// 以并发上限 limit 跑 items,worker(item,i) 返回结果;结果与 items 同序。
-// Node 单线程,这里的"多线程"是并发 I/O(同时进行多账号的 Steam 请求/等待),unshift 等同步操作天然安全。
-async function runWithConcurrency(items, limit, worker) {
-	const results = new Array(items.length);
-	const lim = Math.max(1, Math.min(Number(limit) || 1, items.length || 1));
-	let cursor = 0;
-	async function runner() {
-		while (true) {
-			const i = cursor++;
-			if (i >= items.length) {
-				return;
-			}
-			results[i] = await worker(items[i], i);
-		}
-	}
-	await Promise.all(Array.from({length: lim}, () => runner()));
-	return results;
-}
-
-// 挂求购单(可多账号批量,但要求所选账号钱包币种一致 —— 因为求购价是按单一币种填的)。
-// body: { accountIds:[id|name...], url|(appid,marketHashName), pricePerItem(钱包币种主单位小数), quantity, itemName?, concurrency?, perAccountMax? }
-//   perAccountMax=true 时忽略 quantity,每个账号数量各自 = floor(该账号钱包余额 / pricePerItem)。
+// 挂求购单(可多账号,钱包币种须一致)。
+// body: { accountIds:[id|name...], url|(appid,marketHashName), pricePerItem(钱包币种主单位), quantity, itemName?, concurrency?, perAccountMax? }
 app.post('/api/market/buyorder', async (req, res) => {
-	const body = req.body || {};
-	let target;
 	try {
-		target = resolveMarketTarget(body);
+		res.json({success: true, ...await market.place(req.body || {})});
 	} catch (err) {
-		return res.status(400).json({success: false, error: err.message});
+		sendMarketError(res, err, '挂求购失败');
 	}
-
-	const rawIds = Array.isArray(body.accountIds) ? body.accountIds
-		: (Array.isArray(body.accounts) ? body.accounts : []);
-	const attemptList = [];
-	const seen = new Set();
-	for (const raw of rawIds) {
-		const attempt = findAttemptByKey(String(raw || '').trim());
-		if (attempt && !seen.has(attempt.id)) {
-			seen.add(attempt.id);
-			attemptList.push(attempt);
-		}
-	}
-	if (!attemptList.length) {
-		return res.status(400).json({success: false, error: '没有有效的在线账号(用 id 或账号名指定)'});
-	}
-
-	// 挂满模式:每个账号数量按各自钱包余额单独算(见 processAttempt);此时不需要统一的 quantity。
-	const perAccountMax = !!body.perAccountMax;
-	const pricePerItem = Number(body.pricePerItem);
-	if (!Number.isFinite(pricePerItem) || pricePerItem <= 0) {
-		return res.status(400).json({success: false, error: '每件求购价无效'});
-	}
-	const pricePerItemCents = Math.round(pricePerItem * 100);
-	if (pricePerItemCents <= 0) {
-		return res.status(400).json({success: false, error: '每件求购价过低'});
-	}
-	let quantity = 0;
-	let priceTotalCents = 0;
-	if (!perAccountMax) {
-		quantity = Math.round(Number(body.quantity));
-		if (!Number.isInteger(quantity) || quantity <= 0) {
-			return res.status(400).json({success: false, error: '求购数量必须为正整数'});
-		}
-		priceTotalCents = pricePerItemCents * quantity;
-	}
-
-	// 校验所选账号币种已知且一致(前端也会拦,这里兜底)。
-	const currencyIds = attemptList.map(a => Number(a.currency));
-	if (currencyIds.some(c => !Number.isInteger(c) || c <= 0)) {
-		return res.status(409).json({success: false, error: '有账号钱包币种未知,无法挂求购(请确认账号有钱包)'});
-	}
-	if (new Set(currencyIds).size > 1) {
-		return res.status(409).json({success: false, error: '所选账号钱包币种不一致,请只选择同一币种的账号下单'});
-	}
-
-	// 多线程(并发)上限:默认 2,限 1~8,避免对 Steam 过度并发触发风控。
-	const concurrency = Math.max(1, Math.min(8, Math.round(Number(body.concurrency)) || 2));
-
-	const ledger = loadMarketBuyOrders();
-
-	async function processAttempt(attempt) {
-		const cookies = resolveInventoryCookies(attempt);
-		if (!cookies.length) {
-			return {account: attempt.accountName, attemptId: attempt.id, ok: false, error: '没有可用的 WebSession cookies,请重新登录'};
-		}
-		// 挂满模式:该账号数量 = floor(该账号钱包余额 / 单价),各账号互不影响。
-		let acctQty = quantity;
-		let acctPriceTotalCents = priceTotalCents;
-		if (perAccountMax) {
-			const bal = Number(attempt.balance);
-			if (!attempt.hasWallet || !Number.isFinite(bal)) {
-				return {account: attempt.accountName, attemptId: attempt.id, ok: false, error: '钱包余额未知,无法按余额挂满(请刷新账户/确认账号有钱包)'};
-			}
-			acctQty = Math.floor(Math.round(bal * 100) / pricePerItemCents);
-			if (acctQty <= 0) {
-				return {account: attempt.accountName, attemptId: attempt.id, ok: false, error: `钱包余额 ${bal.toFixed(2)} 不足以按当前单价求购 1 件`};
-			}
-			acctPriceTotalCents = pricePerItemCents * acctQty;
-		}
-		try {
-			// 挂单「前」快照已有确认项:返回的 confirmation_id 实测对不上 conf.id(多半是 creator_id),
-			// 故用快照差分作主力定位——挂单后新冒出的那条就是本单,字段映射无关。仅对有 maFile 的账号做。
-			let priorConfIds = null;
-			if (attempt.identitySecret) {
-				try {
-					priorConfIds = await steamMarketBuyOrder.listConfirmationIds({cookies, identitySecret: attempt.identitySecret});
-				} catch (e) {
-					priorConfIds = null;
-				}
-			}
-
-			const createParams = {
-				cookies,
-				sessionid: attempt.webSessionID,
-				userAgent: attempt.userAgent,
-				appid: target.appid,
-				marketHashName: target.marketHashName,
-				currency: attempt.currency,
-				priceTotalCents: acctPriceTotalCents,
-				quantity: acctQty
-			};
-			// 第 1 步:首次提交(不带 confirmation)。
-			const r = await steamMarketBuyOrder.createBuyOrder(createParams);
-
-			// 求购单需要手机令牌确认时(success=22 / need_confirmation):
-			//   第 2 步 allow 该确认项;第 3 步带 confirmation=<id> 重发 createbuyorder,Steam 才真正落单并返回 buy_orderid。
-			//   ⚠️ 只 allow 不重发 → 订单被丢弃(网页端查不到)。对照 aiosteampy place_buy_order。
-			let effectiveBuyOrderId = r.buyOrderId;
-			let confirmed = !r.needsConfirmation;
-			let confirmError = '';
-			if (r.needsConfirmation) {
-				if (!attempt.identitySecret) {
-					confirmError = '已提交求购但需手机确认,该账号未导入 maFile(identity_secret)。请导入 maFile 后重试,或在 Steam 手机 App 手动确认';
-				} else if (!r.confirmationId && !r.buyOrderId && priorConfIds === null) {
-					confirmError = '已提交求购但需手机确认,且无法定位确认项(无 confirmation_id/buy_orderid 且确认列表读取失败),请在 Steam 手机 App 手动确认';
-				} else {
-					try {
-						// 第 2 步:手机令牌 allow 确认项。
-						await steamMarketBuyOrder.confirmBuyOrder({
-							cookies,
-							identitySecret: attempt.identitySecret,
-							confirmationId: r.confirmationId,
-							buyOrderId: r.buyOrderId,
-							priorConfIds
-						});
-						// 第 3 步:带 confirmation 重发,拿真正的 buy_orderid;确认可能稍有延迟才生效,故重试。
-						for (let k = 0; k < 4 && !confirmed; k++) {
-							const r2 = await steamMarketBuyOrder.createBuyOrder(Object.assign({}, createParams, {confirmation: r.confirmationId}));
-							if (r2.buyOrderId) {
-								effectiveBuyOrderId = r2.buyOrderId;
-								confirmed = true;
-								break;
-							}
-							if (!r2.needsConfirmation) {
-								break; // 既无 buy_orderid 又不再要求确认 → 异常状态,停止
-							}
-							await new Promise(res => setTimeout(res, 1500));
-						}
-						if (!confirmed) {
-							confirmError = '已手机确认,但带 confirmation 重发仍未拿到 buy_orderid(确认可能尚未生效),请稍后在网页端「我的求购单」核对';
-						}
-					} catch (e) {
-						confirmError = '已提交求购但自动确认/最终下单失败:' + (e && e.message ? e.message : '未知错误') + '(可在 Steam 手机 App 手动确认)';
-					}
-				}
-			}
-
-			// recordId 回传给前端，用来把「我的求购单」面板限定为本次挂出的这一批。
-			let recordId = '';
-			if (effectiveBuyOrderId) {
-				const record = {
-					id: crypto.randomUUID(),
-					createdAt: new Date().toISOString(),
-					account: attempt.accountName,
-					attemptId: attempt.id,
-					steamID: attempt.steamID || '',
-					appid: target.appid,
-					marketHashName: target.marketHashName,
-					itemName: String(body.itemName || '').trim() || target.marketHashName,
-					currency: Number(attempt.currency),
-					currencyISO: String(attempt.currencyISO || currencyIdToIso(attempt.currency) || '').toUpperCase(),
-					pricePerItemCents,
-					quantity: acctQty,
-					priceTotalCents: acctPriceTotalCents,
-					buyOrderId: effectiveBuyOrderId,
-					status: confirmed ? 'active' : 'pending_confirm'
-				};
-				ledger.unshift(record);
-				recordId = record.id;
-			}
-
-			if (confirmed) {
-				return {account: attempt.accountName, attemptId: attempt.id, ok: true, buyOrderId: effectiveBuyOrderId, recordId};
-			}
-			return {account: attempt.accountName, attemptId: attempt.id, ok: false, buyOrderId: effectiveBuyOrderId, recordId, needsConfirmation: true, error: confirmError || '求购单待手机确认'};
-		} catch (err) {
-			return {account: attempt.accountName, attemptId: attempt.id, ok: false, error: err && err.message ? err.message : '挂求购失败'};
-		}
-	}
-
-	const results = await runWithConcurrency(attemptList, concurrency, processAttempt);
-	saveMarketBuyOrders(ledger);
-
-	const placed = results.filter(r => r.ok).length;
-	res.json({success: true, placed, failed: results.length - placed, results});
 });
 
 // 我的求购单(仅本工具挂出的,存于 data/market-buyorders.json)。
 app.get('/api/market/buyorders', (req, res) => {
-	res.json({success: true, orders: loadMarketBuyOrders()});
+	res.json({success: true, orders: market.orders()});
 });
 
-// 撤求购单。body: { id }(本地账本记录 id)或 { accountId, buyOrderId } 直接撤。
+// 撤求购单。body: { id }(账本记录 id)或 { accountId, buyOrderId }
 app.post('/api/market/buyorder/cancel', async (req, res) => {
-	const body = req.body || {};
-	const ledger = loadMarketBuyOrders();
-	let record = null;
-	let attempt = null;
-	let buyOrderId = '';
-
-	if (body.id) {
-		record = ledger.find(o => o.id === body.id) || null;
-		if (!record) {
-			return res.status(404).json({success: false, error: '账本中找不到该求购记录'});
-		}
-		buyOrderId = record.buyOrderId;
-		attempt = findAttemptByKey(record.account) || findAttemptByKey(record.attemptId);
-	} else {
-		buyOrderId = String(body.buyOrderId || '').trim();
-		attempt = findAttemptByKey(String(body.accountId || body.account || '').trim());
-	}
-
-	if (!buyOrderId) {
-		return res.status(400).json({success: false, error: '该记录没有 buy_orderid,无法撤单'});
-	}
-	if (!attempt) {
-		return res.status(409).json({success: false, error: '对应账号未在线,无法撤单(请登录该账号后重试)'});
-	}
-	const cookies = resolveInventoryCookies(attempt);
-	if (!cookies.length) {
-		return res.status(409).json({success: false, error: '账号没有可用的 WebSession cookies,请重新登录'});
-	}
-
 	try {
-		await steamMarketBuyOrder.cancelBuyOrder({cookies, sessionid: attempt.webSessionID, userAgent: attempt.userAgent, buyOrderId});
+		await market.cancel(req.body || {});
+		res.json({success: true});
 	} catch (err) {
-		return res.status(502).json({success: false, error: err && err.message ? err.message : '撤销失败'});
+		sendMarketError(res, err, '撤销失败');
 	}
-
-	// 撤成功:从账本移除匹配 buyOrderId 的记录。
-	saveMarketBuyOrders(ledger.filter(o => o.buyOrderId !== buyOrderId));
-	res.json({success: true});
 });
 
-// 刷新「我的求购单」:逐账号从 Steam 实拉真实求购单(market/mylistings),与本地账本对账:
-// 已成交/已撤/已过期(Steam 上不存在了)的本地记录移除;仍在的更新剩余数量。离线账号的记录保持不动。
-//
-// body.accounts:要对账的账号名/attemptId 列表,一般是用户在左侧选中的在线账号。
-// 不传才退回「账本里出现过的所有账号」——那条老路会把历史账本里早已登出的账号全捞一遍,
-// 刷一次就报一堆「未在线」,所以前端总是显式传。
+// 刷新「我的求购单」:逐账号从 Steam 实拉,和账本对账。body: { accounts:[账号名|attemptId...], concurrency? }
 app.post('/api/market/buyorders/sync', async (req, res) => {
-	const body = req.body || {};
-	const concurrency = Math.max(1, Math.min(8, Math.round(Number(body.concurrency)) || 2));
-	const ledger = loadMarketBuyOrders();
-	const requested = Array.isArray(body.accounts)
-		? body.accounts.map(v => String(v || '').trim()).filter(Boolean)
-		: [];
-	let names;
-	if (requested.length) {
-		// 传进来的可能是 attemptId,统一解析成账号名,好和账本里的 rec.account 对上
-		const resolved = requested.map(key => {
-			const attempt = findAttemptByKey(key);
-			return attempt && attempt.accountName ? attempt.accountName : key;
+	try {
+		const result = await market.sync(req.body || {});
+		res.json({
+			success: true,
+			orders: result.orders,
+			syncedAccounts: result.syncedAccounts,
+			summary: {removed: result.removed, updated: result.updated, accounts: result.accounts}
 		});
-		names = [...new Set(resolved)];
-	} else {
-		names = [...new Set(ledger.map(o => o.account).filter(Boolean))];
+	} catch (err) {
+		sendMarketError(res, err, '刷新失败');
 	}
-	const accounts = [];
-	const liveByName = {}; // account name -> Map(buyOrderId -> liveOrder)
-
-	// 多线程(并发)逐账号实拉,加速刷新。
-	const syncResults = await runWithConcurrency(names, concurrency, async (name) => {
-		const attempt = findAttemptByKey(name);
-		if (!attempt) {
-			return {name, ok: false, error: '未在线'};
-		}
-		const cookies = resolveInventoryCookies(attempt);
-		if (!cookies.length) {
-			return {name, ok: false, error: '无可用 cookie(请重新登录)'};
-		}
-		try {
-			const orders = await steamMarketBuyOrder.fetchMyBuyOrders({
-				cookies,
-				sessionid: attempt.webSessionID,
-				userAgent: attempt.userAgent
-			});
-			return {name, ok: true, count: orders.length, map: new Map(orders.map(o => [String(o.buyOrderId), o]))};
-		} catch (e) {
-			return {name, ok: false, error: e && e.message ? e.message : '读取失败'};
-		}
-	});
-	for (const r of syncResults) {
-		if (r.ok) {
-			liveByName[r.name] = r.map;
-			accounts.push({account: r.name, ok: true, count: r.count});
-		} else {
-			accounts.push({account: r.name, ok: false, error: r.error});
-		}
-	}
-
-	let removed = 0;
-	let updated = 0;
-	const next = [];
-	for (const rec of ledger) {
-		const live = liveByName[rec.account];
-		if (!live) {
-			next.push(rec); // 该账号没同步成功(离线/失败)→ 保持原样
-			continue;
-		}
-		const lo = rec.buyOrderId ? live.get(String(rec.buyOrderId)) : null;
-		if (!lo) {
-			removed++; // Steam 上已不存在(成交/撤销/过期)→ 移除
-			continue;
-		}
-		const newRemaining = lo.quantityRemaining != null ? lo.quantityRemaining : rec.quantityRemaining;
-		if (rec.status !== 'active' || rec.quantityRemaining !== newRemaining) {
-			updated++;
-		}
-		next.push(Object.assign({}, rec, {status: 'active', quantityRemaining: newRemaining}));
-	}
-
-	saveMarketBuyOrders(next);
-	// syncedAccounts:实拉成功的账号。前端据此把面板限定为「刚对过账的这些账号的求购单」,
-	// 其余历史记录仍留在账本里(撤单/下次对账要用),只是不显示。
-	const syncedAccounts = accounts.filter(a => a.ok).map(a => a.account);
-	res.json({success: true, orders: next, syncedAccounts, summary: {removed, updated, accounts}});
 });
 
 // ===== UU(悠悠有品)发货 =====
@@ -2719,7 +2275,7 @@ function publicInventorySnapshot(snapshot) {
 purchase.catalog.preload();
 uu.start();
 
-// 「买游戏」「市场求购」都是纯 cookie 的 HTTP 重放(steamStorePurchase / steamMarketBuyOrder),
+// 「买游戏」「市场求购」都是纯 cookie 的 HTTP 重放(services/steamStorePurchase.js / src/market/),
 // 不需要活的 steam-user 连接,只要账号有有效 WebSession cookie 且未被手动登出即可用。
 // 这里特意不用 isAttemptOnline(src/steam/attempts.ts)—— 那个要求 status 仍是 logged_on/web_session,
 // 会把「登录后 steam 客户端断线(status=disconnected)」的账号误判为离线,导致挂求购/买游戏页选不到。
