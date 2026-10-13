@@ -1,4 +1,4 @@
-// GC:连接/断开 CS2 GC、通过 GC 拉 CS2 商店价目表生成内购目录(价目表用真实样本,与解析快照对比)、库存。
+// GC:连接/断开 CS2 GC、通过 GC 拉 CS2 商店价目表生成内购目录(价目表用真实样本,与解析快照对比)、库存、终端机接口。
 // GC 由 support/offline-preload.cjs 模拟;外部网络被拦截(汇率返回固定数据)。
 
 import {after, before, describe, test} from 'node:test';
@@ -134,9 +134,29 @@ describe('GC', () => {
 		assert.equal((await client.get('/api/inventory/no-such-id')).status, 404);
 	});
 
+	test('终端机:抓包已挂上;没有终端机时状态为空、解封被拒;拉报价的消息发到了 GC;找不到账号 404', async () => {
+		const state = await client.get(`/api/terminal/state?accountId=${attemptId}`);
+		assert.equal(state.status, 200, state.text.slice(0, 300));
+		assert.deepEqual([state.json.state.attached, state.json.state.terminals], [true, []]);
+
+		const unseal = await client.post('/api/terminal/unseal', {accountId: attemptId, gcItemId: '', assetid: '123'});
+		assert.equal(unseal.status, 400);
+		assert.match(unseal.json.error, /GC 库存里没有 id\/original_id=123 的终端机/);
+
+		const before = server.steamEvents().filter(e => e.event === 'sendToGC').length;
+		const request = await client.post('/api/terminal/request-offers', {account: 'alpha', defidx: 5176});
+		assert.equal(request.status, 200, request.text);
+		assert.deepEqual(request.json.result, {sent: true, defidx: 5176, itemId: null});
+		const sent = server.steamEvents().filter(e => e.event === 'sendToGC').slice(before).map(e => [e.appid, e.msgType]);
+		assert.deepEqual(sent, [[730, 9195], [730, 9228]]);
+
+		assert.equal((await client.get('/api/terminal/state?accountId=nobody')).status, 404);
+	});
+
 	test('外部网络全部被拦截,只有预期内的请求', () => {
 		const blocked = server.steamEvents().filter(e => e.event === 'blockedFetch').map(e => e.url);
-		// 登录成功后会去 Steam 商店账户页查国家;除此之外不应有任何外部请求
-		assert.deepEqual([...new Set(blocked)].filter(url => !String(url).startsWith('https://store.steampowered.com/')), []);
+		// 登录成功后会去 Steam 商店账户页查国家;终端机皮肤库用随包副本,后台联网刷新被拦;除此之外不应有任何外部请求
+		const expected = (url: string) => url.startsWith('https://store.steampowered.com/') || url === 'https://raw.githubusercontent.com/ByMykel/CSGO-API/main/public/api/zh-CN/skins.json';
+		assert.deepEqual([...new Set(blocked)].filter(url => !expected(String(url))), []);
 	});
 });

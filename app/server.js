@@ -44,7 +44,6 @@ const SteamUser = require('steam-user');
 const {describeGcItem, loadItemsGameSchema} = require('./items-game-schema');
 const {createAuth} = require('./lib/auth');
 const {createFingerprintStore} = require('./services/fingerprint');
-const {createCs2Terminal} = require('./lib/cs2-terminal');
 const {writeFileAtomic, writeJsonAtomic, readJsonFileSafe} = require('./lib/atomic-file');
 // 凭据数据层(TypeScript,由 Node 24 直接运行):SQLite + 字段加密,见 src/store/。
 const {openStore, normalizeStoredAccount} = require('../src/store/index.ts');
@@ -78,6 +77,8 @@ const {createProfiles, createAccountService, resolveAccountCountry} = require('.
 // 库存(TypeScript):社区库存为准、GC 库存兜底;CS2/TF2 GC 模块的挂载,见 src/inventory/、src/steam/gc-modules.ts。
 const {createInventoryService} = require('../src/inventory/index.ts');
 const {createGcModuleAttacher} = require('../src/steam/gc-modules.ts');
+// CS2 终端机(TypeScript):GC 抓包、解封、读/推进报价、皮肤中文名库、报价历史,见 src/terminal/。
+const {createTerminalService} = require('../src/terminal/index.ts');
 const {LOCAL_CM_FALLBACKS} = require('../src/steam/cm-fallback.ts');
 
 const PORT = Number(process.env.PORT || 53110);
@@ -92,14 +93,6 @@ const STEAM_USER_DIR = path.join(DATA_DIR, 'steam-user');
 const fingerprintStore = createFingerprintStore({
 	dataDir: DATA_DIR,
 	logger: (level, message) => console.log(`[fingerprint:${level}] ${message}`)
-});
-
-// CS2「创世终端机」开启(P0/P1/P2:抓包 + 拉报价 + 解封,不含花钱兑换),见 lib/cs2-terminal.js。
-const cs2Terminal = createCs2Terminal({
-	logger: {
-		info: (m) => console.log(`[terminal:info] ${m}`),
-		warn: (m) => console.log(`[terminal:warn] ${m}`)
-	}
 });
 
 // 登录重试:连接卡住(超时未拿到 WebSession)时自动重试,避免永久卡在"登录中"。
@@ -279,13 +272,26 @@ const inventory = createInventoryService({
 	cookiesFor: profiles.cookiesFor,
 	emit: attempt => sessions.emit(attempt)
 });
+// CS2 终端机:报价皮肤中文名用 ByMykel 皮肤库(data/cs2-skin-db.json 缓存,app/data/ 随包副本),揭示过的报价记在 data/terminal-offers.json
+const terminal = createTerminalService({
+	findAttempt: findAttemptByKey,
+	addLog,
+	inventory,
+	describeGcItem: item => describeGcItem(ITEMS_GAME_SCHEMA, item),
+	historyFile: path.join(DATA_DIR, 'terminal-offers.json'),
+	skinCacheFile: path.join(DATA_DIR, 'cs2-skin-db.json'),
+	skinBundledFile: path.join(CODE_DIR, 'data', 'cs2-skin-db.json'),
+	readJson: readJsonFile,
+	writeJson: writeJsonAtomic,
+	writeCompactJson: (file, value) => writeJsonAtomic(file, value, 0)
+});
 // 新建 Steam 客户端时挂 CS2/TF2 GC 模块;终端机在 CS2 模块上挂抓包监听
 const gcModules = createGcModuleAttacher({
 	GlobalOffensive,
 	TeamFortress2,
 	events: {addLog: (attempt, level, message) => sessions.addLog(attempt, level, message), emit: attempt => sessions.emit(attempt)},
 	inventory,
-	onCs2Module: attempt => cs2Terminal.attach(attempt)
+	onCs2Module: attempt => terminal.attach(attempt)
 });
 
 // Steam 登录会话。attempts 是会话表(id -> attempt),内购/库存/UU 等代码直接读它。
@@ -578,286 +584,29 @@ app.get('/api/inventory/:id', async (req, res) => {
 	}
 });
 
-// ===== CS2「创世终端机」开启(P1 拉报价 / P2 解封 / 抓包状态)=====
-// ⚠️ 解封不可逆(启动 72h 倒计时);本组端点【不含】花钱兑换报价(P3)。
-app.post('/api/terminal/unseal', (req, res) => {
-	const body = req.body || {};
-	const attempt = findAttemptByKey(String(body.accountId || body.account || '').trim());
-	if (!attempt) {
-		return res.status(404).json({success: false, error: '账号不存在或未登录(用 id 或账号名指定)'});
-	}
-	const assetid = String(body.assetid || body.itemId || '').trim();
-	const variant = String(body.variant || '').trim();
-	try {
-		const result = cs2Terminal.unseal(attempt, assetid, {variant, volatileLimit: body.volatileLimit, pointsRemaining: body.pointsRemaining, gcItemId: body.gcItemId});
-		addLog(attempt, 'warn', `[终端机] 已发送解封请求 item=${assetid} 方式=${result.msg}(不可逆,72h 倒计时开始)`);
-		res.json({success: true, result});
-	} catch (err) {
-		res.status(400).json({success: false, error: err && err.message ? err.message : '解封失败'});
-	}
-});
-
-// 协议探针:依次发多种候选解封消息,对齐回包 + SO 变动,命中即停。用于定位真正的解封消息。
-app.post('/api/terminal/probe', async (req, res) => {
-	const body = req.body || {};
-	const attempt = findAttemptByKey(String(body.accountId || body.account || '').trim());
-	if (!attempt) {
-		return res.status(404).json({success: false, error: '账号不存在或未登录'});
-	}
-	try {
-		addLog(attempt, 'warn', '[终端机] 协议探针启动(会依次试发多种开箱消息,命中即停;命中=不可逆消耗该终端机)');
-		const result = await cs2Terminal.probe(attempt, {itemId: body.itemId || body.assetid, gcItemId: body.gcItemId});
-		addLog(attempt, 'warn', `[终端机] 协议探针结束:${result.hit ? '★命中 ' + result.hit.label : '无变动(需抓官方客户端实包)'}`);
-		res.json({success: true, result});
-	} catch (err) {
-		res.status(400).json({success: false, error: err && err.message ? err.message : '探针失败'});
-	}
-});
-
-// ★ 推进到下一个报价:不可逆、消耗 1 次挑选(2534 UseToolWithIntArg)。仅在前端强确认后调用。
-app.post('/api/terminal/advance-offer', async (req, res) => {
-	const body = req.body || {};
-	const attempt = findAttemptByKey(String(body.accountId || body.account || '').trim());
-	if (!attempt) {
-		return res.status(404).json({success: false, error: '账号不存在或未登录'});
-	}
-	const terminalId = String(body.gcItemId || body.itemId || body.assetid || '').trim();
-	try {
-		addLog(attempt, 'warn', `[终端机] 推进到下一个报价(不可逆·消耗1次)终端机 ${terminalId}`);
-		const result = await cs2Terminal.advanceOffer(attempt, terminalId, {pointsRemaining: body.pointsRemaining});
-		try { await ensureCs2SkinImages(); } catch (_) {}
-		if (result && Array.isArray(result.skins)) result.skins = result.skins.map(enrichTerminalOffer);
-		// 揭示出的新报价追加进该终端机的历史(持久缓存,页面刷新/重启后仍可查看之前开过的结果)。
-		const revealed = result && Array.isArray(result.skins) ? result.skins[0] : null;
-		if (revealed) result.history = appendTerminalOffer(terminalId, revealed.defindex, revealed);
-		addLog(attempt, 'warn', `[终端机] 已推进:当前 ${result.count || 0} 个报价(新 ${result.fresh ? result.fresh.length : 0})`);
-		res.json({success: true, result});
-	} catch (err) {
-		res.status(400).json({success: false, error: err && err.message ? err.message : '推进报价失败'});
-	}
-});
-
-app.post('/api/terminal/request-offers', (req, res) => {
-	const body = req.body || {};
-	const attempt = findAttemptByKey(String(body.accountId || body.account || '').trim());
-	if (!attempt) {
-		return res.status(404).json({success: false, error: '账号不存在或未登录'});
-	}
-	try {
-		const result = cs2Terminal.requestOffers(attempt, {defidx: body.defidx, itemId: body.itemId || body.assetid, volatileLimit: body.volatileLimit});
-		addLog(attempt, 'info', '[终端机] 已请求报价(volatile shop)');
-		res.json({success: true, result});
-	} catch (err) {
-		res.status(400).json({success: false, error: err && err.message ? err.message : '请求报价失败'});
-	}
-});
-
-// GC 通路自检:查自己 profile,验证本会话 GC 请求能否收到回包(判断「开箱被拦」还是「整条不通」)。
-app.post('/api/terminal/selftest', (req, res) => {
-	const body = req.body || {};
-	const attempt = findAttemptByKey(String(body.accountId || body.account || '').trim());
-	if (!attempt) {
-		return res.status(404).json({success: false, error: '账号不存在或未登录'});
-	}
-	try {
-		const result = cs2Terminal.selfTest(attempt);
-		addLog(attempt, 'info', '[终端机] GC 通路自检已发起(看后台日志 8s 内是否有回包)');
-		res.json({success: true, result});
-	} catch (err) {
-		res.status(400).json({success: false, error: err && err.message ? err.message : '自检失败'});
-	}
-});
-
-// 解析已捕获报价里的 faux_itemid → 真实皮肤(GC 检视)。
-app.post('/api/terminal/resolve-offers', async (req, res) => {
-	const body = req.body || {};
-	const attempt = findAttemptByKey(String(body.accountId || body.account || '').trim());
-	if (!attempt) {
-		return res.status(404).json({success: false, error: '账号不存在或未登录'});
-	}
-	try {
-		const result = await cs2Terminal.resolveOffers(attempt);
-		addLog(attempt, 'info', `[终端机] 报价解析:${result.count || 0}/${result.total || 0} 成功`);
-		res.json({success: true, result});
-	} catch (err) {
-		res.status(400).json({success: false, error: err && err.message ? err.message : '解析报价失败'});
-	}
-});
-
-// ---- CS2 皮肤中文名+图片:def_index + paint_index → {name(中文), image, rarity}。数据源 ByMykel CSGO-API(zh-CN),拉一次缓存到磁盘 ----
-// 注:本地 items_game.txt 对较新 paint 只有英文开发名(如 "P2000 Deep RED"),所以皮肤名用 ByMykel zh-CN;外观档仍用本地 describeGcItem。
-const CS2_SKIN_DB_CACHE = path.join(DATA_DIR, 'cs2-skin-db.json');
-const CS2_SKIN_DB_URL = 'https://raw.githubusercontent.com/ByMykel/CSGO-API/main/public/api/zh-CN/skins.json';
-let cs2SkinDbMap = null;
-let cs2SkinDbLoading = null;
-function buildCs2SkinDbMap(list) {
-	const map = {};
-	for (const s of (Array.isArray(list) ? list : [])) {
-		const def = Number(s && s.weapon && s.weapon.weapon_id);
-		const paint = s && s.paint_index != null ? Number(s.paint_index) : NaN;
-		if (def && Number.isFinite(paint)) {
-			map[`${def}_${paint}`] = {name: s.name || '', image: s.image || '', rarity: (s.rarity && s.rarity.name) || ''};
+// ===== CS2「创世终端机」(src/terminal/)=====
+// ⚠️ 解封、推进报价不可逆(解封启动 72h 倒计时);这组端点不含花钱兑换报价。
+function terminalRoute(key, run, fallback) {
+	return async (req, res) => {
+		try {
+			res.json({success: true, [key]: await run(req)});
+		} catch (err) {
+			res.status(err && err.statusCode || 500).json({success: false, error: err && err.message || fallback});
 		}
-	}
-	return map;
-}
-// 随发布包一起的内置副本(app/data/,layer②会更新;raw.githubusercontent 在国内常被墙,靠这个离线也能用)。
-const CS2_SKIN_DB_BUNDLED = path.join(CODE_DIR, 'data', 'cs2-skin-db.json');
-function loadCs2SkinDbFile(file) {
-	try {
-		if (fs.existsSync(file)) {
-			const j = JSON.parse(fs.readFileSync(file, 'utf8'));
-			if (j && j.map && Object.keys(j.map).length) return j.map;
-		}
-	} catch (_) {}
-	return null;
-}
-async function fetchCs2SkinDb() {
-	try {
-		const res = await fetch(CS2_SKIN_DB_URL, {headers: {'User-Agent': 'steam-tools'}, signal: AbortSignal.timeout(30000)});
-		if (res.ok) {
-			const map = buildCs2SkinDbMap(await res.json());
-			if (Object.keys(map).length) {
-				try { writeJsonAtomic(CS2_SKIN_DB_CACHE, {fetchedAt: new Date().toISOString(), map}, 0); } catch (_) {}
-				return map;
-			}
-		}
-	} catch (e) { console.warn('[terminal] 拉 CS2 皮肤库(ByMykel zh-CN)失败:', e && e.message); }
-	return null;
-}
-let cs2SkinDbRefreshed = false;
-function refreshCs2SkinDbInBackground() {
-	if (cs2SkinDbRefreshed) return;
-	cs2SkinDbRefreshed = true;
-	fetchCs2SkinDb().then(map => { if (map) cs2SkinDbMap = map; }).catch(() => {});
-}
-async function ensureCs2SkinImages() {
-	if (cs2SkinDbMap) return cs2SkinDbMap;
-	if (cs2SkinDbLoading) return cs2SkinDbLoading;
-	cs2SkinDbLoading = (async () => {
-		// 优先:运行时缓存(上次联网刷新的最新) → 内置随包副本(离线/被墙也能用);两者任一命中就用,并后台尝试联网刷新。
-		const m = loadCs2SkinDbFile(CS2_SKIN_DB_CACHE) || loadCs2SkinDbFile(CS2_SKIN_DB_BUNDLED);
-		if (m) { cs2SkinDbMap = m; refreshCs2SkinDbInBackground(); return cs2SkinDbMap; }
-		// 都没有(极少见)→ 直接联网拉
-		return (cs2SkinDbMap = (await fetchCs2SkinDb()) || {});
-	})();
-	try { return await cs2SkinDbLoading; } finally { cs2SkinDbLoading = null; }
-}
-function resolveCs2Skin(defIndex, paintIndex) {
-	if (!cs2SkinDbMap) return null;
-	return cs2SkinDbMap[`${Number(defIndex)}_${Number(paintIndex)}`] || null;
-}
-// 给一个终端机报价(raw {defindex,paintindex,paintwear,paintseed,rarity,priceCents})补:中文名/图片/外观档/品质。
-function enrichTerminalOffer(offer) {
-	if (!offer) return offer;
-	const def = Number(offer.defindex || 0);
-	const paint = Number(offer.paintindex || 0);
-	const wear = offer.paintwear != null ? Number(offer.paintwear) : null;
-	// 本地 schema:主要取外观档(中文)+ 兜底名/品质
-	let localName = '', exterior = '', localRarity = '';
-	try {
-		const d = describeGcItem(ITEMS_GAME_SCHEMA, {def_index: def, paint_index: paint, paint_wear: wear != null ? wear : undefined, paint_seed: offer.paintseed});
-		if (d) {
-			localName = d.name || '';
-			localRarity = d.rarity || '';
-			exterior = String(d.exterior || '').replace(/\s*[\d.]+\s*$/, '').trim(); // 去尾部 float,只留档位名
-		}
-	} catch (_) {}
-	// ByMykel zh-CN:皮肤中文名 + 图片 + 品质(优先)
-	const db = resolveCs2Skin(def, paint);
-	return {
-		...offer,
-		name: (db && db.name) || localName || `def${def} · paint${paint}`,
-		exterior,
-		rarity: (db && db.rarity) || localRarity || '',
-		wear,
-		priceText: offer.priceCents != null ? '$' + (offer.priceCents / 100).toFixed(2) : '',
-		image: (db && db.image) || ''
 	};
 }
 
-// 终端机自身的中文名兜底(本地 schema 只有英文 "Crate Community 36";社区库存拿不到时用这个)。
-const TERMINAL_DEF_NAMES = {
-	5176: {sealed: '封装的创世终端机', open: '创世终端机'},
-	5181: {sealed: '封装的毁灭之手终端机', open: '毁灭之手终端机'}
-};
-function defaultTerminalName(t) {
-	const n = TERMINAL_DEF_NAMES[Number(t && t.defIndex)];
-	if (n) return t && t.sealed ? n.sealed : n.open;
-	return t && t.sealed ? '封装的终端机' : '终端机';
-}
-
-// ── 终端机报价历史:每次「换下一个」揭示出的报价都追加缓存到 data/terminal-offers.json(按终端机 GC id)。
-//    刷新页面/重启后仍能查看该终端机之前开出过哪些报价。GC id 是持久 assetid,解封后跨会话稳定。
-const TERMINAL_OFFERS_FILE = path.join(DATA_DIR, 'terminal-offers.json');
-const TERMINAL_OFFERS_MAX = 30;   // 每个终端机最多存这么多条(挑选上限 5,留足余量)
-function loadTerminalOfferHistoryMap() {
-	const data = readJsonFile(TERMINAL_OFFERS_FILE);
-	return (data && typeof data === 'object') ? data : {};
-}
-function getTerminalOfferHistory(terminalId) {
-	const rec = loadTerminalOfferHistoryMap()[String(terminalId)];
-	return rec && Array.isArray(rec.offers) ? rec.offers : [];
-}
-// 追加一条揭示出的报价(已富化:带中文名/图/价)。与上一条同 itemid 则跳过(避免重复揭示同一条时重复记)。
-function appendTerminalOffer(terminalId, defIndex, offer) {
-	const key = String(terminalId || '').trim();
-	if (!key || !offer) return getTerminalOfferHistory(key);
-	const map = loadTerminalOfferHistoryMap();
-	const rec = map[key] && typeof map[key] === 'object' ? map[key] : {defIndex: Number(defIndex) || 0, offers: []};
-	if (!Array.isArray(rec.offers)) rec.offers = [];
-	const last = rec.offers[rec.offers.length - 1];
-	const sameAsLast = last && offer.itemid != null && String(last.itemid) === String(offer.itemid);
-	if (!sameAsLast) {
-		rec.offers.push({...offer, revealedAt: new Date().toISOString()});
-		if (rec.offers.length > TERMINAL_OFFERS_MAX) rec.offers = rec.offers.slice(-TERMINAL_OFFERS_MAX);
-	}
-	rec.defIndex = Number(defIndex) || rec.defIndex || 0;
-	rec.updatedAt = new Date().toISOString();
-	map[key] = rec;
-	try { writeJsonAtomic(TERMINAL_OFFERS_FILE, map); } catch (_) {}
-	return rec.offers;
-}
-
-app.get('/api/terminal/state', async (req, res) => {
-	const attempt = findAttemptByKey(String(req.query.accountId || req.query.account || '').trim());
-	if (!attempt) {
-		return res.status(404).json({success: false, error: '账号不存在或未登录'});
-	}
-	try { await ensureCs2SkinImages(); } catch (_) {}
-	const state = cs2Terminal.getState(attempt);
-	// 用库存快照(社区源:带真实中文名+图标)给终端机补 name/image:按 assetid 精确匹配(状态图标对得上),
-	// 匹配不到再按 def 兜底(同 def 名字/图一样),都拿不到就用本地中文名兜底、无图。
-	const metaByAsset = new Map(), metaByDef = new Map();
-	try {
-		const snap = await inventory.get(attempt, {});
-		// 只信社区源(带 schinese 中文名 + 图标);GC 源是英文名且无图,不如本地兜底,跳过。
-		if (snap && snap.source === 'community') {
-			for (const it of snap.items || []) {
-				const meta = {name: it.name || '', image: it.iconUrl || ''};
-				if (it.assetid) metaByAsset.set(String(it.assetid), meta);
-				const def = it.raw && it.raw.gcItem ? Number(it.raw.gcItem.def_index) : null;
-				if (def && meta.image && !metaByDef.has(def)) metaByDef.set(def, meta);
-			}
-		}
-	} catch (_) {}
-	if (Array.isArray(state.terminals)) {
-		const historyMap = loadTerminalOfferHistoryMap();   // 一次读盘,给所有终端机查历史
-		state.terminals = state.terminals.map(t => {
-			if (!t) return t;
-			const meta = metaByAsset.get(String(t.id)) || metaByDef.get(Number(t.defIndex)) || null;
-			const hrec = historyMap[String(t.id)];
-			return {
-				...t,
-				name: (meta && meta.name) || defaultTerminalName(t),
-				image: (meta && meta.image) || '',
-				offer: t.offer ? enrichTerminalOffer(t.offer) : t.offer,
-				history: hrec && Array.isArray(hrec.offers) ? hrec.offers : []   // 之前每次「换下一个」开出的报价(持久缓存)
-			};
-		});
-	}
-	res.json({success: true, state});
-});
+app.post('/api/terminal/unseal', terminalRoute('result', req => terminal.unseal(req.body || {}), '解封失败'));
+// 协议探针:依次发多种候选解封消息,对齐回包 + SO 变动,命中即停。
+app.post('/api/terminal/probe', terminalRoute('result', req => terminal.probe(req.body || {}), '探针失败'));
+// 推进到下一个报价:不可逆、消耗 1 次挑选。仅在前端强确认后调用。
+app.post('/api/terminal/advance-offer', terminalRoute('result', req => terminal.advanceOffer(req.body || {}), '推进报价失败'));
+app.post('/api/terminal/request-offers', terminalRoute('result', req => terminal.requestOffers(req.body || {}), '请求报价失败'));
+// GC 通路自检:查自己 profile,验证本会话 GC 请求能否收到回包。
+app.post('/api/terminal/selftest', terminalRoute('result', req => terminal.selfTest(req.body || {}), '自检失败'));
+// 解析已捕获报价里的 faux_itemid → 真实皮肤(GC 检视)。
+app.post('/api/terminal/resolve-offers', terminalRoute('result', req => terminal.resolveOffers(req.body || {}), '解析报价失败'));
+app.get('/api/terminal/state', terminalRoute('state', req => terminal.state(req.query), '读取终端机状态失败'));
 
 // ===== 游戏内购(CS2/TF2 GC 商店)=====
 // 前端用 /api/purchase/*(?game=cs2|tf2);/api/cs2/*、/api/tf2/*、/api/task/*-purchase 是旧别名,保留兼容。
