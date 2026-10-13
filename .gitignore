@@ -1,0 +1,35 @@
+# ===== 运行数据与凭据(绝不入库) =====
+# 账号密码、maFile、session/refreshToken、UU token、指纹缓存等全部在 data/ 下。
+/data/
+/logs/
+.env
+inspect_key.txt
+
+# 发布签名/加密密钥。私钥已移到 ~/.steam-tools-keys/,这里兜底再拦一次。
+/tools/keys/
+*.pem
+!/public-key.pem
+update-key.bin
+
+# ===== 旧 launcher 自更新产生的安装态 =====
+/app.prev/
+/app.next/
+/app.broken/
+/app/.ready
+/version.json
+/.cache/
+/release/
+
+# app/ 内的 package 文件是发布包副本,依赖以根目录 package.json 为准
+/app/package.json
+/app/package-lock.json
+
+# app/data 只保留随代码分发的 cs2-skin-db.json,其余(一次性脚本写的 session/token)不入库
+/app/data/*
+!/app/data/cs2-skin-db.json
+
+# ===== 依赖与工具 =====
+node_modules/
+npm-debug.log*
+.DS_Store
+Thumbs.db

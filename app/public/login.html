@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>登录 · Steam 工具台</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --accent: #4c9fff;
+      --accent-strong: #74b4ff;
+      --accent-ring: rgba(76, 159, 255, 0.38);
+      --ease: cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      background:
+        radial-gradient(800px 480px at 50% -10%, rgba(76, 159, 255, 0.1), transparent 65%),
+        #0d0f13;
+      color: #eef2f6;
+      font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    .card {
+      width: 340px;
+      max-width: calc(100vw - 32px);
+      background: linear-gradient(180deg, #1a212a, #161c23);
+      border: 1px solid #2a3340;
+      border-radius: 14px;
+      padding: 30px 26px;
+      box-shadow: 0 22px 60px rgba(0, 0, 0, 0.5);
+      animation: card-in 0.32s var(--ease) both;
+    }
+    @keyframes card-in {
+      from { transform: translateY(14px); opacity: 0; }
+      to { transform: translateY(0); opacity: 1; }
+    }
+    .brand-mark {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 16px;
+      color: var(--accent);
+      font-weight: 600;
+      font-size: 13px;
+      letter-spacing: 0.3px;
+    }
+    .brand-mark .dot {
+      width: 9px; height: 9px;
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 0 4px rgba(76, 159, 255, 0.16);
+    }
+    h1 { font-size: 19px; margin: 0 0 4px; font-weight: 650; }
+    p.sub { margin: 0 0 22px; color: #93a1ae; font-size: 13px; }
+    label { display: block; font-size: 13px; color: #b8c2cf; margin-bottom: 6px; }
+    input {
+      width: 100%;
+      padding: 10px 12px;
+      border-radius: 8px;
+      border: 1px solid #2a3444;
+      background: #0f141b;
+      color: #eef2f6;
+      font-size: 14px;
+      transition: border-color 0.16s var(--ease), box-shadow 0.16s var(--ease);
+    }
+    input:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-ring);
+    }
+    button {
+      width: 100%;
+      margin-top: 18px;
+      padding: 11px 12px;
+      border: 1px solid var(--accent);
+      border-radius: 8px;
+      background: linear-gradient(180deg, var(--accent-strong), var(--accent));
+      color: #07121f;
+      font-size: 14px;
+      font-weight: 650;
+      cursor: pointer;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.2), 0 6px 18px rgba(76, 159, 255, 0.22);
+      transition: filter 0.16s var(--ease), transform 0.16s var(--ease), box-shadow 0.16s var(--ease);
+    }
+    button:hover:not(:disabled) { filter: brightness(1.06); box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.24), 0 8px 24px rgba(76, 159, 255, 0.32); }
+    button:active:not(:disabled) { transform: translateY(1px); }
+    button:disabled { opacity: .55; cursor: default; }
+    .err { margin-top: 12px; color: #ff6b6b; font-size: 13px; min-height: 18px; }
+  </style>
+</head>
+<body>
+  <form class="card" id="login-form">
+    <div class="brand-mark"><span class="dot"></span>本地安全访问</div>
+    <h1>Steam 工具台</h1>
+    <p class="sub" id="sub">请输入访问口令</p>
+    <label for="password" id="password-label">口令</label>
+    <input id="password" type="password" autocomplete="current-password" autofocus>
+    <div id="confirm-wrap" style="display:none">
+      <label for="confirm" style="margin-top:14px">确认口令</label>
+      <input id="confirm" type="password" autocomplete="new-password">
+    </div>
+    <button type="submit" id="submit-btn">登录</button>
+    <div class="err" id="err"></div>
+  </form>
+  <script>
+    const form = document.getElementById('login-form');
+    const pwd = document.getElementById('password');
+    const confirm = document.getElementById('confirm');
+    const confirmWrap = document.getElementById('confirm-wrap');
+    const btn = document.getElementById('submit-btn');
+    const err = document.getElementById('err');
+    const sub = document.getElementById('sub');
+    const pwdLabel = document.getElementById('password-label');
+    let setupMode = false;
+
+    // 检测是否已设置口令。如果未设置(或请求失败/网络错误)，默认进入"首次设置"模式，
+    // 避免用户看到登录页却无处设置口令。
+    (async () => {
+      try {
+        const resp = await fetch('/api/auth/status');
+        const data = await resp.json().catch(() => null);
+        if (data && data.configured === true) {
+          return; // 已有口令，保持登录模式
+        }
+      } catch (ex) {
+        console.warn('auth/status 请求失败:', ex.message);
+      }
+      // 未配置 或 检测失败：进入设置模式
+      setupMode = true;
+      sub.textContent = '首次使用,请设置一个访问口令';
+      pwdLabel.textContent = '新口令';
+      pwd.setAttribute('autocomplete', 'new-password');
+      confirmWrap.style.display = '';
+      btn.textContent = '设置口令并进入';
+    })();
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      err.textContent = '';
+      if (setupMode && pwd.value !== confirm.value) {
+        err.textContent = '两次输入的口令不一致';
+        return;
+      }
+      btn.disabled = true;
+      try {
+        const url = setupMode ? '/api/auth/setup' : '/api/auth/login';
+        const resp = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password: pwd.value })
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (resp.ok && data.success) {
+          window.location.href = '/';
+          return;
+        }
+        err.textContent = data.error || ((setupMode ? '设置失败' : '登录失败') + ' (HTTP ' + resp.status + ')');
+      } catch (ex) {
+        err.textContent = '网络错误: ' + ex.message;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,27 @@
+{
+  "name": "steam-login-replica",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local Steam login prototype",
+  "main": "launcher.js",
+  "scripts": {
+    "start": "node launcher.js",
+    "app": "node app/server.js",
+    "release": "node tools/build-release.js",
+    "keygen": "node tools/keygen.js"
+  },
+  "dependencies": {
+    "binarykvparser": "^2.3.0",
+    "express": "*",
+    "globaloffensive": "^3.3.0",
+    "kvparser": "^1.0.2",
+    "lzma-native": "^8.0.6",
+    "socket.io": "*",
+    "steam-totp": "*",
+    "steam-tradeoffer-manager": "^2.13.0",
+    "steam-user": "*",
+    "steamcommunity": "^3.50.0",
+    "steamstore": "^2.4.0",
+    "tf2": "^4.0.0"
+  }
+}
