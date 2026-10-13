@@ -8,7 +8,9 @@ const vm = require('vm');
 
 const [code, legacyServer, fixture, game, outFile] = process.argv.slice(2);
 const req = name => require(path.join(code, 'node_modules', name));
-const {describeGcItem, loadItemsGameSchema} = require(path.join(code, 'app', 'items-game-schema.js'));
+// 旧代码目录里是 app/items-game-schema.js,迁移后在 src/items/schema.ts
+const legacySchemaModule = path.join(code, 'app', 'items-game-schema.js');
+const {describeGcItem, loadItemsGameSchema} = require(fs.existsSync(legacySchemaModule) ? legacySchemaModule : path.join(code, 'src', 'items', 'schema.ts'));
 const src = fs.readFileSync(legacyServer, 'utf8');
 
 function grab(name, kind = 'function') {

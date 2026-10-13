@@ -40,7 +40,8 @@ try {
 
 const SteamTotp = require('steam-totp');
 const SteamUser = require('steam-user');
-const {describeGcItem, loadItemsGameSchema} = require('./items-game-schema');
+// 物品 schema(TypeScript):解析 items_game.txt 和本地化,描述 GC 物品,见 src/items/schema.ts。
+const {describeGcItem, loadItemsGameSchema} = require('../src/items/schema.ts');
 // 基础设施(TypeScript):原子写盘、口令鉴权、反代/同源设置、启动器更新,见 src/core/;账号指纹见 src/steam/fingerprint.ts。
 const {writeFileAtomic, writeJsonAtomic, readJsonFileSafe} = require('../src/core/atomic-file.ts');
 const {createAuth} = require('../src/core/auth.ts');
@@ -212,7 +213,7 @@ const profiles = createProfiles({
 	readJson: readJsonFile
 });
 
-// 库存:CS2 物品名靠本地 schema(app/items-game-schema.js)描述 GC 物品;库存数量变了推送会话
+// 库存:CS2 物品名靠本地 schema(src/items/schema.ts)描述 GC 物品;库存数量变了推送会话
 const inventory = createInventoryService({
 	describeGcItem: item => describeGcItem(ITEMS_GAME_SCHEMA, item),
 	cookiesFor: profiles.cookiesFor,

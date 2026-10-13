@@ -1,5 +1,5 @@
 // 内购商品目录:价目表条目 → 商品(defIndex、名称、类型、分类、各币种价格)。从 app/server.js 移来,逻辑不变。
-// 名称和分类依赖物品 schema(app/items-game-schema.js 解析 items_game.txt),由调用方注入,
+// 名称和分类依赖物品 schema(../items/schema.ts 解析 items_game.txt),由调用方注入,
 // 这里只做查表和分类规则。回归快照见 test/fixtures/price-sheets/catalog.expected.json。
 
 import {normalizeGame} from '../steam/games.ts';
@@ -22,7 +22,6 @@ export interface ItemDefinition {
 export interface ItemSchema {
 	items?: Record<string, ItemDefinition>;
 	error?: string;
-	[key: string]: unknown;
 }
 
 export interface ItemDescription {

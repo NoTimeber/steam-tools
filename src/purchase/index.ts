@@ -21,7 +21,7 @@ export interface PurchaseServiceOptions {
 	/** 会话管理:写账号日志、推送账号状态、保存会话 */
 	events: AttemptEvents & {saveSession(attempt: Attempt): void};
 	emitTask: PurchaseTaskOptions['emitTask'];
-	/** 物品 schema(CS2/TF2)和 describeGcItem,见 app/items-game-schema.js */
+	/** 物品 schema(CS2/TF2)和 describeGcItem,见 ../items/schema.ts */
 	schemas: CatalogItemBuilderOptions['schemas'];
 	describeGcItem: CatalogItemBuilderOptions['describeGcItem'];
 	cacheDir: string;

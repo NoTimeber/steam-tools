@@ -37,7 +37,7 @@ export function publicInventorySnapshot(snapshot: InventorySnapshot): PublicInve
 }
 
 export interface InventoryServiceOptions {
-	/** 本地物品 schema 描述 GC 物品(app/items-game-schema.js 的 describeGcItem,已绑定 CS2 schema) */
+	/** 本地物品 schema 描述 GC 物品(../items/schema.ts 的 describeGcItem,已绑定 CS2 schema) */
 	describeGcItem: DescribeGcItem;
 	cookiesFor(attempt: Attempt): readonly string[];
 	/** 会话变了(库存数量/来源)推给前端 */

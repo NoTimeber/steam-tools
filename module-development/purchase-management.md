@@ -111,5 +111,5 @@ Last updated: 2026-04-30
 - `public/app.js`
 - `public/styles.css`
 - `server.js`
-- `items-game-schema.js`
+- `src/items/schema.ts`(原 `items-game-schema.js`)
 - `module-development/cs2-gc-purchase-reverse-analysis.md`

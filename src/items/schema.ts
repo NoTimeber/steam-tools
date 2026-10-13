@@ -1,10 +1,20 @@
-'use strict';
+// 物品 schema(从 app/items-game-schema.js 移来):解析 CS2 / TF2 的 items_game.txt 和本地化文件,把 GC 物品描述成
+// 中文名、市场名、类型、分类、品质、稀有度、外观。库存兜底、内购目录、终端机报价的外观档都用它。
+//
+// items_game.txt 很大(7MB+),只抽需要的顶层段(prefabs / items / paint_kits / sticker_kits / rarities / qualities)
+// 交给 kvparser;物品定义按 prefab 链合并,第一次用到时算好缓存在 resolvedItems。
+// 本地化文件只读 "Tokens" 块,兼容 UTF-16LE / UTF-8 BOM。
 
-const fs = require('fs');
-const path = require('path');
-const {parse} = require('kvparser');
+import {createRequire} from 'node:module';
+import {existsSync, readFileSync} from 'node:fs';
+import {dirname, resolve} from 'node:path';
 
-const RARITY_LABELS = {
+const require = createRequire(import.meta.url);
+const {parse} = require('kvparser') as {parse(text: string): any};
+
+type Dict = Record<string, any>;
+
+const RARITY_LABELS: Readonly<Record<string, string>> = {
 	default: '默认',
 	common: '消费级',
 	uncommon: '工业级',
@@ -16,7 +26,7 @@ const RARITY_LABELS = {
 	unusual: '非凡'
 };
 
-const QUALITY_LABELS = {
+const QUALITY_LABELS: Readonly<Record<string, string>> = {
 	normal: '普通',
 	genuine: '纯正',
 	vintage: '复古',
@@ -32,7 +42,7 @@ const QUALITY_LABELS = {
 	tournament: '纪念品'
 };
 
-const WEAPON_NAME_MAP = {
+const WEAPON_NAME_MAP: Readonly<Record<string, string>> = {
 	weapon_ak47: 'AK-47',
 	weapon_aug: 'AUG',
 	weapon_awp: 'AWP',
@@ -95,7 +105,7 @@ const WEAPON_NAME_MAP = {
 	weapon_taser: 'Zeus x27'
 };
 
-const TOKEN_NAME_MAP = {
+const TOKEN_NAME_MAP: Readonly<Record<string, string>> = {
 	ak47: 'AK-47',
 	awp: 'AWP',
 	cz75a: 'CZ75-Auto',
@@ -127,44 +137,82 @@ const TOKEN_NAME_MAP = {
 	cs2: 'CS2'
 };
 
-const PAINT_PREFIXES = [
-	'aa_',
-	'ae_',
-	'am_',
-	'an_',
-	'aq_',
-	'cu_',
-	'gs_',
-	'hy_',
-	'hye_',
-	'op_',
-	'pa_',
-	'pe_',
-	're_',
-	'se_',
-	'so_',
-	'sp_',
-	'spr_',
-	'sv_',
-	'tr_',
-	'wi_'
-];
+/** 皮肤内部名常见的系列前缀,拼兜底名时去掉 */
+const PAINT_PREFIXES = ['aa_', 'ae_', 'am_', 'an_', 'aq_', 'cu_', 'gs_', 'hy_', 'hye_', 'op_', 'pa_', 'pe_', 're_', 'se_', 'so_', 'sp_', 'spr_', 'sv_', 'tr_', 'wi_'];
 
-function loadItemsGameSchema(filePath, options = {}) {
+export interface ItemSchema {
+	filePath: string;
+	loaded: boolean;
+	error: string;
+	items: Dict;
+	prefabs: Dict;
+	paintKits: Dict;
+	stickerKits: Dict;
+	containerMarketNames: Record<string, string>;
+	localizedTokens: Record<string, string>;
+	englishTokens: Record<string, string>;
+	englishValueToToken: Record<string, string>;
+	rarityByValue: Record<string, {key: string; value: Dict}>;
+	qualityByValue: Record<string, {key: string; value: Dict}>;
+	/** 已按 prefab 合并好的物品定义(用到时才算) */
+	resolvedItems: Dict;
+}
+
+export interface LoadOptions {
+	/** 中文本地化(csgo_schinese.txt / tf2_schinese.txt) */
+	localizationFile?: string;
+	/** 英文本地化,用来按英文名反查 token */
+	englishLocalizationFile?: string;
+}
+
+export type ItemKind = 'weapon_skin' | 'graffiti' | 'sticker' | 'weapon_case' | 'base_weapon' | 'tool' | 'item';
+
+export interface AppliedSticker {
+	slot: number | null;
+	stickerId: number | null;
+	internalName: string;
+	displayName: string;
+	rarity: string;
+	wear: number | null;
+	scale: number | null;
+	rotation: number | null;
+	offsetX: number | null;
+	offsetY: number | null;
+}
+
+export interface ItemDescription {
+	name: string;
+	marketHashName: string;
+	type: string;
+	category: string;
+	rarity: string;
+	exterior: string;
+	iconUrl: string;
+	quality: string;
+	kind: ItemKind;
+	definitionIndex: number | null;
+	definitionInternalName: string;
+	definitionDisplayName: string;
+	paintKit: {index: number | null; internalName: string; displayName: string; descriptionTag: string; descriptionString: string; wearMin: number | null; wearMax: number | null} | null;
+	sprayKit: {id: number | null; internalName: string; displayName: string; rarity: string} | null;
+	stickers: AppliedSticker[];
+	tradableAfter: string;
+}
+
+export function loadItemsGameSchema(filePath: string, options: LoadOptions = {}): ItemSchema {
 	const empty = createEmptySchema(filePath);
-	if (!filePath || !fs.existsSync(filePath)) {
+	if (!filePath || !existsSync(filePath)) {
 		return empty;
 	}
-
 	try {
-		const text = fs.readFileSync(filePath, 'utf8');
-		return buildSchema(text, filePath, options);
+		return buildSchema(readFileSync(filePath, 'utf8'), filePath, options);
 	} catch (err) {
-		return createEmptySchema(filePath, err && err.message ? err.message : String(err));
+		return createEmptySchema(filePath, err && typeof err === 'object' && 'message' in err && err.message ? String(err.message) : String(err));
 	}
 }
 
-function describeGcItem(schema, item) {
+/** 描述一个 GC 物品(globaloffensive / tf2 解析出的库存物品,或只带 def_index / paint_index 等字段的对象) */
+export function describeGcItem(schema: ItemSchema | null | undefined, item: Dict | null | undefined): ItemDescription {
 	const safeSchema = schema && schema.loaded ? schema : createEmptySchema('');
 	const defIndex = toFiniteNumber(item && item.def_index);
 	const definition = resolveItemDefinition(safeSchema, defIndex);
@@ -176,51 +224,24 @@ function describeGcItem(schema, item) {
 	const directStickerKit = !definition && defIndex != null ? (safeSchema.stickerKits[String(defIndex)] || null) : null;
 	const stickers = isGraffiti ? [] : resolveAppliedStickers(safeSchema, item && item.stickers);
 	const kind = resolveKind(definition, paintKit, sprayKit, directStickerKit);
-	const kindLabel = kindToLabel(kind, definition);
 	const definitionDisplayName = getDefinitionDisplayName(safeSchema, definition);
 	const containerMarketName = getContainerMarketName(safeSchema, kind, defIndex, definition);
 	const paintDisplayName = getPaintKitDisplayName(safeSchema, paintKit, definition);
 	const sprayDisplayName = getStickerKitDisplayName(safeSchema, sprayKit);
 	const directStickerDisplayName = getStickerKitDisplayName(safeSchema, directStickerKit);
 	const baseDisplayName = buildBaseDisplayName({
-		defIndex,
-		definition,
-		containerMarketName,
-		definitionDisplayName,
-		paintKit,
-		paintDisplayName,
-		sprayKit,
-		sprayDisplayName,
-		directStickerKit,
-		directStickerDisplayName
+		defIndex, definition, containerMarketName, definitionDisplayName, paintKit, paintDisplayName, sprayKit, sprayDisplayName, directStickerKit, directStickerDisplayName
 	});
 	const customName = cleanString(item && item.custom_name);
-	const name = customName || baseDisplayName || `DefIndex ${defIndex == null ? '-' : defIndex}`;
 	const category = resolveCategory(safeSchema, definition, kind);
 	const quality = resolveQualityLabel(safeSchema, item, definition);
-	const rarity = resolveRarityLabel(safeSchema, item, definition, sprayKit);
-	const exterior = formatExterior(item && item.paint_wear);
-	const tradableAfter = toIsoDate(item && item.tradable_after);
-	const marketHashName = buildSubtitle({
-		customName,
-		baseDisplayName,
-		category,
-		kind,
-		definition,
-		item,
-		quality,
-		sprayKit,
-		directStickerKit,
-		stickers
-	});
-
 	return {
-		name,
-		marketHashName,
-		type: kindLabel,
+		name: customName || baseDisplayName || `DefIndex ${defIndex == null ? '-' : defIndex}`,
+		marketHashName: buildSubtitle({customName, baseDisplayName, category, kind, definition, item, quality, sprayKit, directStickerKit, stickers}),
+		type: kindToLabel(kind, definition),
 		category,
-		rarity,
-		exterior,
+		rarity: resolveRarityLabel(safeSchema, item, definition, sprayKit),
+		exterior: formatExterior(item && item.paint_wear),
 		iconUrl: '',
 		quality,
 		kind,
@@ -243,16 +264,11 @@ function describeGcItem(schema, item) {
 			rarity: rarityLabelFromKey(cleanString(sprayKit.item_rarity))
 		} : null,
 		stickers,
-		tradableAfter
+		tradableAfter: toIsoDate(item && item.tradable_after)
 	};
 }
 
-module.exports = {
-	describeGcItem,
-	loadItemsGameSchema
-};
-
-function createEmptySchema(filePath, error = '') {
+function createEmptySchema(filePath: string, error = ''): ItemSchema {
 	return {
 		filePath: filePath || '',
 		loaded: false,
@@ -271,10 +287,10 @@ function createEmptySchema(filePath, error = '') {
 	};
 }
 
-function buildSchema(text, filePath, options = {}) {
+function buildSchema(text: string, filePath: string, options: LoadOptions): ItemSchema {
 	const localizedTokens = loadLocalizationTokens(options.localizationFile);
 	const englishTokens = loadLocalizationTokens(options.englishLocalizationFile);
-	const schema = {
+	return {
 		filePath,
 		loaded: true,
 		error: '',
@@ -290,17 +306,14 @@ function buildSchema(text, filePath, options = {}) {
 		qualityByValue: buildValueIndex(mergeNamedSections(text, 'qualities')),
 		resolvedItems: Object.create(null)
 	};
-
-	return schema;
 }
 
-function mergeNamedSections(text, sectionName) {
-	const output = Object.create(null);
+/** 同名顶层段可能出现多次(items_game 里 items 分好几段),全部合并 */
+function mergeNamedSections(text: string, sectionName: string): Dict {
+	const output: Dict = Object.create(null);
 	for (const block of extractTopLevelSectionBlocks(text, sectionName)) {
 		const parsed = parse(block);
-		const section = parsed && parsed[sectionName] && typeof parsed[sectionName] === 'object'
-			? parsed[sectionName]
-			: null;
+		const section = parsed && parsed[sectionName] && typeof parsed[sectionName] === 'object' ? parsed[sectionName] : null;
 		if (section) {
 			Object.assign(output, section);
 		}
@@ -308,31 +321,27 @@ function mergeNamedSections(text, sectionName) {
 	return output;
 }
 
-function extractTopLevelSectionBlocks(text, sectionName) {
+/** 找到 `\n\t"<段名>"\n\t{` 开头的顶层段,按大括号配对切出来(跳过字符串里的括号) */
+function extractTopLevelSectionBlocks(text: string, sectionName: string): string[] {
 	const marker = `\n\t"${sectionName}"\n\t{`;
-	const blocks = [];
+	const blocks: string[] = [];
 	let startFrom = 0;
-
 	while (true) {
 		const markerIndex = text.indexOf(marker, startFrom);
 		if (markerIndex < 0) {
 			break;
 		}
-
 		const keyStart = markerIndex + 1;
 		const braceStart = text.indexOf('{', keyStart);
 		if (braceStart < 0) {
 			break;
 		}
-
 		let depth = 0;
 		let inString = false;
 		let escaped = false;
 		let endIndex = -1;
-
 		for (let index = braceStart; index < text.length; index++) {
 			const char = text[index];
-
 			if (inString) {
 				if (escaped) {
 					escaped = false;
@@ -343,17 +352,14 @@ function extractTopLevelSectionBlocks(text, sectionName) {
 				}
 				continue;
 			}
-
 			if (char === '"') {
 				inString = true;
 				continue;
 			}
-
 			if (char === '{') {
 				depth++;
 				continue;
 			}
-
 			if (char === '}') {
 				depth--;
 				if (depth === 0) {
@@ -362,75 +368,64 @@ function extractTopLevelSectionBlocks(text, sectionName) {
 				}
 			}
 		}
-
 		if (endIndex < 0) {
 			break;
 		}
-
 		blocks.push(text.slice(keyStart, endIndex));
 		startFrom = endIndex;
 	}
-
 	return blocks;
 }
 
-function buildValueIndex(entries) {
-	const output = Object.create(null);
+/** rarities / qualities 段按 value 建索引:GC 物品上给的是数字 */
+function buildValueIndex(entries: Dict): Record<string, {key: string; value: Dict}> {
+	const output: Record<string, {key: string; value: Dict}> = Object.create(null);
 	for (const [key, value] of Object.entries(entries || {})) {
 		if (!value || typeof value !== 'object' || value.value == null) {
 			continue;
 		}
-		output[String(value.value)] = {
-			key,
-			value
-		};
+		output[String(value.value)] = {key, value};
 	}
 	return output;
 }
 
-function resolveItemDefinition(schema, defIndex) {
+function resolveItemDefinition(schema: ItemSchema, defIndex: number | null): Dict | null {
 	if (defIndex == null) {
 		return null;
 	}
-
 	const key = String(defIndex);
 	if (schema.resolvedItems[key]) {
 		return schema.resolvedItems[key];
 	}
-
 	const item = schema.items[key];
 	if (!item || typeof item !== 'object') {
 		return null;
 	}
-
 	const merged = deepMerge(resolvePrefabs(schema.prefabs, item.prefab), item);
 	schema.resolvedItems[key] = merged;
 	return merged;
 }
 
-function resolvePrefabs(prefabs, prefabValue, seen = new Set()) {
+/** prefab 可以是空格分隔的多个,还能继续引用别的 prefab;seen 防循环 */
+function resolvePrefabs(prefabs: Dict, prefabValue: unknown, seen: Set<string> = new Set()): Dict {
 	const names = cleanString(prefabValue).split(/\s+/).filter(Boolean);
-	let merged = Object.create(null);
-
+	let merged: Dict = Object.create(null);
 	for (const name of names) {
 		if (!name || seen.has(name) || !prefabs[name]) {
 			continue;
 		}
-
 		seen.add(name);
 		const prefab = prefabs[name];
 		merged = deepMerge(merged, resolvePrefabs(prefabs, prefab.prefab, seen));
 		merged = deepMerge(merged, prefab);
 	}
-
 	return merged;
 }
 
-function deepMerge(base, extra) {
-	const left = isPlainObject(base) ? base : Object.create(null);
-	const right = isPlainObject(extra) ? extra : Object.create(null);
-	const output = {...left};
-
+function deepMerge(base: unknown, extra: unknown): Dict {
+	const left: Dict = isPlainObject(base) ? base : Object.create(null);
+	const right: Dict = isPlainObject(extra) ? extra : Object.create(null);
+	const output: Dict = {...left};
 	for (const [key, value] of Object.entries(right)) {
 		if (isPlainObject(value) && isPlainObject(output[key])) {
 			output[key] = deepMerge(output[key], value);
@@ -440,15 +435,14 @@ function deepMerge(base, extra) {
 			output[key] = value;
 		}
 	}
-
 	return output;
 }
 
-function isPlainObject(value) {
+function isPlainObject(value: unknown): value is Dict {
 	return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
-function resolveKind(definition, paintKit, sprayKit, directStickerKit) {
+function resolveKind(definition: Dict | null, paintKit: Dict | null, sprayKit: Dict | null, directStickerKit: Dict | null): ItemKind {
 	if (paintKit && isWeaponDefinition(definition)) {
 		return 'weapon_skin';
 	}
@@ -470,38 +464,33 @@ function resolveKind(definition, paintKit, sprayKit, directStickerKit) {
 	return 'item';
 }
 
-function kindToLabel(kind, definition) {
-	if (kind === 'weapon_skin') {
-		return '武器皮肤';
+function kindToLabel(kind: ItemKind, definition: Dict | null): string {
+	switch (kind) {
+		case 'weapon_skin':
+			return '武器皮肤';
+		case 'weapon_case':
+			return isStickerCapsule(definition) ? '印花胶囊' : '武器箱';
+		case 'graffiti':
+			return '涂鸦';
+		case 'sticker':
+			return '印花';
+		case 'base_weapon':
+			return '基础武器';
+		case 'tool':
+			return '工具';
+		default:
+			return '物品';
 	}
-	if (kind === 'weapon_case') {
-		return isStickerCapsule(definition) ? '印花胶囊' : '武器箱';
-	}
-	if (kind === 'graffiti') {
-		return '涂鸦';
-	}
-	if (kind === 'sticker') {
-		return '印花';
-	}
-	if (kind === 'base_weapon') {
-		return '基础武器';
-	}
-	if (kind === 'tool') {
-		return '工具';
-	}
-	return '物品';
 }
 
-function resolveCategory(schema, definition, kind) {
+function resolveCategory(schema: ItemSchema, definition: Dict | null, kind: ItemKind): string {
 	if (!definition) {
 		return '';
 	}
-
 	const weaponType = cleanString(definition.visuals && definition.visuals.weapon_type);
 	if (weaponType) {
 		return weaponType;
 	}
-
 	if (kind === 'weapon_case') {
 		const itemSetText = localizeToken(schema, definition.tags && definition.tags.ItemSet && definition.tags.ItemSet.tag_text);
 		if (itemSetText) {
@@ -516,15 +505,26 @@ function resolveCategory(schema, definition, kind) {
 			return `系列 ${supplySeries}`;
 		}
 	}
-
 	if (kind === 'tool' && definition.tool && definition.tool.type) {
 		return humanizeText(definition.tool.type);
 	}
-
 	return '';
 }
 
-function buildBaseDisplayName(context) {
+interface NameContext {
+	defIndex: number | null;
+	definition: Dict | null;
+	containerMarketName: string;
+	definitionDisplayName: string;
+	paintKit: Dict | null;
+	paintDisplayName: string;
+	sprayKit: Dict | null;
+	sprayDisplayName: string;
+	directStickerKit: Dict | null;
+	directStickerDisplayName: string;
+}
+
+function buildBaseDisplayName(context: NameContext): string {
 	if (context.paintKit && context.definitionDisplayName) {
 		return `${context.definitionDisplayName} | ${context.paintDisplayName || `Paint ${context.paintKit.index}`}`;
 	}
@@ -535,88 +535,65 @@ function buildBaseDisplayName(context) {
 		const label = isSprayKit(context.directStickerKit) ? '封印涂鸦' : '印花';
 		return `${label} | ${context.directStickerDisplayName || `Kit ${context.defIndex}`}`;
 	}
-	if (context.containerMarketName) {
-		return context.containerMarketName;
-	}
-	if (context.definitionDisplayName) {
-		return context.definitionDisplayName;
-	}
-	return '';
+	return context.containerMarketName || context.definitionDisplayName || '';
 }
 
-function getContainerMarketName(schema, kind, defIndex, definition) {
+function getContainerMarketName(schema: ItemSchema, kind: ItemKind, defIndex: number | null, definition: Dict | null): string {
 	if (kind !== 'weapon_case' || defIndex == null) {
 		return '';
 	}
-
 	const localizedDefinitionName = localizeToken(schema, definition && definition.item_name);
 	if (localizedDefinitionName) {
 		return localizedDefinitionName;
 	}
-
 	const englishName = cleanString(schema && schema.containerMarketNames && schema.containerMarketNames[String(defIndex)]);
 	return localizeEnglishValue(schema, englishName) || englishName;
 }
 
-function getDefinitionDisplayName(schema, definition) {
+function getDefinitionDisplayName(schema: ItemSchema, definition: Dict | null): string {
 	if (!definition || typeof definition !== 'object') {
 		return '';
 	}
-
 	const weaponName = resolveWeaponName(definition.item_class) || resolveWeaponName(definition.name);
 	if (weaponName) {
 		return weaponName;
 	}
-
-	if (isGraffitiDefinition(definition)) {
+	if (isGraffitiDefinition(definition) || cleanString(definition.name) === 'spray') {
 		return '封印涂鸦';
 	}
-
-	if (cleanString(definition.name) === 'spray') {
-		return '封印涂鸦';
-	}
-
 	const localizedItemName = localizeToken(schema, definition.item_name);
 	if (localizedItemName) {
 		return localizedItemName;
 	}
-
 	return humanizeText(cleanString(definition.name) || cleanString(definition.item_class) || cleanString(definition.item_name));
 }
 
-function getPaintKitDisplayName(schema, paintKit, definition) {
+function getPaintKitDisplayName(schema: ItemSchema, paintKit: Dict | null, definition: Dict | null): string {
 	if (!paintKit) {
 		return '';
 	}
-
 	const localizedTagName = localizeToken(schema, paintKit.description_tag);
 	if (localizedTagName) {
 		return localizedTagName;
 	}
-
 	const localizedStringName = localizeToken(schema, paintKit.description_string);
 	if (localizedStringName) {
 		return localizedStringName;
 	}
-
-	let code = cleanString(paintKit.description_tag)
-		.replace(/^#PaintKit_/i, '')
-		.replace(/_Tag$/i, '');
-
+	// 没有本地化:从内部名拼一个(去掉 #PaintKit_ / _Tag、系列前缀、武器名前后缀)
+	let code = cleanString(paintKit.description_tag).replace(/^#PaintKit_/i, '').replace(/_Tag$/i, '');
 	if (!code) {
 		code = cleanString(paintKit.description_string).replace(/^#PaintKit_/i, '');
 	}
 	if (!code) {
 		code = cleanString(paintKit.name);
 	}
-
 	for (const prefix of PAINT_PREFIXES) {
 		if (code.startsWith(prefix)) {
 			code = code.slice(prefix.length);
 			break;
 		}
 	}
-
 	for (const token of collectDefinitionTokens(definition)) {
 		if (code.startsWith(token + '_')) {
 			code = code.slice(token.length + 1);
@@ -625,40 +602,29 @@ function getPaintKitDisplayName(schema, paintKit, definition) {
 			code = code.slice(0, -(token.length + 1));
 		}
 	}
-
 	return humanizeText(code || cleanString(paintKit.name));
 }
 
-function getStickerKitDisplayName(schema, stickerKit) {
+function getStickerKitDisplayName(schema: ItemSchema, stickerKit: Dict | null): string {
 	if (!stickerKit) {
 		return '';
 	}
-
 	const localizedItemName = localizeToken(schema, stickerKit.item_name);
 	if (localizedItemName) {
 		return localizedItemName;
 	}
-
-	let code = cleanString(stickerKit.item_name)
-		.replace(/^#StickerKit_/i, '')
-		.replace(/^#SprayKit_/i, '')
-		.replace(/^#PatchKit_/i, '');
-
+	let code = cleanString(stickerKit.item_name).replace(/^#StickerKit_/i, '').replace(/^#SprayKit_/i, '').replace(/^#PatchKit_/i, '');
 	if (!code) {
 		code = cleanString(stickerKit.name);
 	}
-
-	code = code.replace(/^spray_/i, '');
-	code = code.replace(/^std_/i, '');
-
+	code = code.replace(/^spray_/i, '').replace(/^std_/i, '');
 	return humanizeText(code || cleanString(stickerKit.name));
 }
 
-function resolveAppliedStickers(schema, stickers) {
+function resolveAppliedStickers(schema: ItemSchema, stickers: unknown): AppliedSticker[] {
 	if (!Array.isArray(stickers)) {
 		return [];
 	}
-
 	return stickers
 		.filter(entry => entry && toFiniteNumber(entry.sticker_id) != null)
 		.map(entry => {
@@ -679,7 +645,7 @@ function resolveAppliedStickers(schema, stickers) {
 		});
 }
 
-function resolveWeaponName(value) {
+function resolveWeaponName(value: unknown): string {
 	const key = cleanString(value);
 	if (!key) {
 		return '';
@@ -687,13 +653,10 @@ function resolveWeaponName(value) {
 	if (WEAPON_NAME_MAP[key]) {
 		return WEAPON_NAME_MAP[key];
 	}
-	if (key.startsWith('weapon_')) {
-		return humanizeText(key.slice(7));
-	}
-	return '';
+	return key.startsWith('weapon_') ? humanizeText(key.slice(7)) : '';
 }
 
-function resolveRarityLabel(schema, item, definition, stickerKit) {
+function resolveRarityLabel(schema: ItemSchema, item: Dict | null | undefined, definition: Dict | null, stickerKit: Dict | null): string {
 	const numericRarity = toFiniteNumber(item && item.rarity);
 	if (numericRarity != null) {
 		const entry = schema.rarityByValue[String(numericRarity)];
@@ -701,23 +664,16 @@ function resolveRarityLabel(schema, item, definition, stickerKit) {
 			return rarityLabelFromKey(entry.key);
 		}
 	}
-
-	const keys = [
-		cleanString(definition && definition.item_rarity),
-		cleanString(stickerKit && stickerKit.item_rarity)
-	].filter(Boolean);
-
-	for (const key of keys) {
+	for (const key of [cleanString(definition && definition.item_rarity), cleanString(stickerKit && stickerKit.item_rarity)].filter(Boolean)) {
 		const label = rarityLabelFromKey(key);
 		if (label) {
 			return label;
 		}
 	}
-
 	return '';
 }
 
-function resolveQualityLabel(schema, item, definition) {
+function resolveQualityLabel(schema: ItemSchema, item: Dict | null | undefined, definition: Dict | null): string {
 	const numericQuality = toFiniteNumber(item && item.quality);
 	if (numericQuality != null) {
 		const entry = schema.qualityByValue[String(numericQuality)];
@@ -725,20 +681,31 @@ function resolveQualityLabel(schema, item, definition) {
 			return qualityLabelFromKey(entry.key);
 		}
 	}
-
 	return qualityLabelFromKey(cleanString(definition && definition.item_quality));
 }
 
-function buildSubtitle(context) {
-	const parts = [];
+interface SubtitleContext {
+	customName: string;
+	baseDisplayName: string;
+	category: string;
+	kind: ItemKind;
+	definition: Dict | null;
+	item: Dict | null | undefined;
+	quality: string;
+	sprayKit: Dict | null;
+	directStickerKit: Dict | null;
+	stickers: AppliedSticker[];
+}
 
+/** marketHashName 字段其实是副标题:原名(改过名时)/ 分类 / 模板 / 贴纸数 / 喷漆或印花代号 / 系列 / 品质 */
+function buildSubtitle(context: SubtitleContext): string {
+	const parts: string[] = [];
 	if (context.customName && context.baseDisplayName && context.customName !== context.baseDisplayName) {
 		parts.push(context.baseDisplayName);
 	}
 	if (context.category) {
 		parts.push(context.category);
 	}
-
 	if (context.kind === 'weapon_skin') {
 		const seed = toFiniteNumber(context.item && context.item.paint_seed);
 		if (seed != null) {
@@ -748,44 +715,39 @@ function buildSubtitle(context) {
 			parts.push(`贴纸 ${context.stickers.length}`);
 		}
 	}
-
 	if (context.kind === 'graffiti' && context.sprayKit && context.sprayKit.name) {
 		parts.push(`喷漆代号 ${context.sprayKit.name}`);
 	}
-
 	if (context.kind === 'sticker' && context.directStickerKit && context.directStickerKit.name) {
 		parts.push(`印花代号 ${context.directStickerKit.name}`);
 	}
-
 	if (context.kind === 'weapon_case') {
-		const supplySeries = cleanString(context.definition && context.definition.attributes && context.definition.attributes['set supply crate series'] && context.definition.attributes['set supply crate series'].value);
+		const definition = context.definition;
+		const supplySeries = cleanString(definition && definition.attributes && definition.attributes['set supply crate series'] && definition.attributes['set supply crate series'].value);
 		if (supplySeries && !parts.includes(`系列 ${supplySeries}`)) {
 			parts.push(`系列 ${supplySeries}`);
 		}
 	}
-
 	if (!parts.length && context.quality) {
 		parts.push(`品质 ${context.quality}`);
 	}
-
 	return parts.join(' / ');
 }
 
-function loadContainerMarketNames(itemsGamePath) {
-	const output = Object.create(null);
-	const schemaFile = path.resolve(path.dirname(itemsGamePath || ''), 'node_modules', '@protobufjs', 'locale', 'schema.json');
-	if (!schemaFile || !fs.existsSync(schemaFile)) {
+/** 武器箱的英文市场名(旧版从 schema 同目录下的 node_modules/@protobufjs/locale/schema.json 读,一般没有) */
+function loadContainerMarketNames(itemsGamePath: string): Record<string, string> {
+	const output: Record<string, string> = Object.create(null);
+	const schemaFile = resolve(dirname(itemsGamePath || ''), 'node_modules', '@protobufjs', 'locale', 'schema.json');
+	if (!schemaFile || !existsSync(schemaFile)) {
 		return output;
 	}
-
 	try {
-		const payload = JSON.parse(fs.readFileSync(schemaFile, 'utf8'));
+		const payload = JSON.parse(readFileSync(schemaFile, 'utf8'));
 		const containers = payload && typeof payload === 'object' ? payload.containers : null;
 		if (!containers || typeof containers !== 'object') {
 			return output;
 		}
-
-		for (const [key, value] of Object.entries(containers)) {
+		for (const [key, value] of Object.entries(containers as Dict)) {
 			if (!/^\d+$/.test(key) || !value || typeof value !== 'object') {
 				continue;
 			}
@@ -797,23 +759,20 @@ function loadContainerMarketNames(itemsGamePath) {
 	} catch {
 		return output;
 	}
-
 	return output;
 }
 
-function loadLocalizationTokens(filePath) {
-	const output = Object.create(null);
-	if (!filePath || !fs.existsSync(filePath)) {
+/** 本地化文件里 "Tokens" 块第一层的 "键" "值" */
+function loadLocalizationTokens(filePath: string | undefined): Record<string, string> {
+	const output: Record<string, string> = Object.create(null);
+	if (!filePath || !existsSync(filePath)) {
 		return output;
 	}
-
 	try {
-		const text = decodeTextFile(filePath);
-		const lines = text.split(/\r?\n/);
+		const lines = decodeTextFile(filePath).split(/\r?\n/);
 		let pendingTokensBlock = false;
 		let inTokensBlock = false;
 		let depth = 0;
-
 		for (const line of lines) {
 			const withoutComments = stripLineComments(line);
 			if (!inTokensBlock) {
@@ -830,14 +789,12 @@ function loadLocalizationTokens(filePath) {
 				}
 				continue;
 			}
-
 			if (depth === 1) {
 				const strings = extractQuotedStrings(withoutComments);
 				if (strings.length >= 2) {
-					output[strings[0]] = strings[1];
+					output[strings[0] as string] = strings[1] as string;
 				}
 			}
-
 			depth += countBraceDelta(withoutComments);
 			if (depth <= 0) {
 				break;
@@ -846,23 +803,22 @@ function loadLocalizationTokens(filePath) {
 	} catch {
 		return output;
 	}
-
 	return output;
 }
 
-function buildEnglishValueIndex(tokens) {
-	const output = Object.create(null);
+/** 英文值 → token(按英文名反查中文用);同一个值只记第一个 token */
+function buildEnglishValueIndex(tokens: Record<string, string>): Record<string, string> {
+	const output: Record<string, string> = Object.create(null);
 	for (const [key, value] of Object.entries(tokens || {})) {
 		const normalized = normalizeLookupValue(value);
-		if (!normalized || output[normalized]) {
-			continue;
+		if (normalized && !output[normalized]) {
+			output[normalized] = key;
 		}
-		output[normalized] = key;
 	}
 	return output;
 }
 
-function localizeToken(schema, token) {
+function localizeToken(schema: ItemSchema, token: unknown): string {
 	const key = cleanString(token).replace(/^#/, '');
 	if (!key) {
 		return '';
@@ -870,39 +826,36 @@ function localizeToken(schema, token) {
 	return cleanString(schema && schema.localizedTokens && schema.localizedTokens[key]);
 }
 
-function localizeEnglishValue(schema, value) {
+function localizeEnglishValue(schema: ItemSchema, value: unknown): string {
 	const normalized = normalizeLookupValue(value);
 	if (!normalized) {
 		return '';
 	}
-
 	const token = schema && schema.englishValueToToken ? schema.englishValueToToken[normalized] : '';
 	return token ? localizeToken(schema, token) : '';
 }
 
-function normalizeLookupValue(value) {
+function normalizeLookupValue(value: unknown): string {
 	return cleanString(value).replace(/\s+/g, ' ').toLowerCase();
 }
 
-function decodeTextFile(filePath) {
-	const buffer = fs.readFileSync(filePath);
+function decodeTextFile(filePath: string): string {
+	const buffer = readFileSync(filePath);
 	if (buffer.length >= 2 && buffer[0] === 0xFF && buffer[1] === 0xFE) {
-		return buffer.toString('utf16le').replace(/^\uFEFF/, '');
+		return buffer.toString('utf16le').replace(/^﻿/, '');
 	}
 	if (buffer.length >= 3 && buffer[0] === 0xEF && buffer[1] === 0xBB && buffer[2] === 0xBF) {
-		return buffer.toString('utf8').replace(/^\uFEFF/, '');
+		return buffer.toString('utf8').replace(/^﻿/, '');
 	}
 	return buffer.toString('utf8');
 }
 
-function stripLineComments(line) {
+/** 去掉行尾 // 注释(字符串里的 // 不算) */
+function stripLineComments(line: string): string {
 	let inString = false;
 	let escaped = false;
-
 	for (let index = 0; index < line.length; index++) {
 		const char = line[index];
-		const next = line[index + 1];
-
 		if (inString) {
 			if (escaped) {
 				escaped = false;
@@ -913,25 +866,22 @@ function stripLineComments(line) {
 			}
 			continue;
 		}
-
 		if (char === '"') {
 			inString = true;
 			continue;
 		}
-
-		if (char === '/' && next === '/') {
+		if (char === '/' && line[index + 1] === '/') {
 			return line.slice(0, index);
 		}
 	}
-
 	return line;
 }
 
-function countBraceDelta(line) {
+/** 一行里 { 和 } 的净数量(字符串里的不算) */
+function countBraceDelta(line: string): number {
 	let delta = 0;
 	let inString = false;
 	let escaped = false;
-
 	for (const char of line) {
 		if (inString) {
 			if (escaped) {
@@ -943,7 +893,6 @@ function countBraceDelta(line) {
 			}
 			continue;
 		}
-
 		if (char === '"') {
 			inString = true;
 			continue;
@@ -954,16 +903,15 @@ function countBraceDelta(line) {
 			delta--;
 		}
 	}
-
 	return delta;
 }
 
-function extractQuotedStrings(line) {
-	const strings = [];
+/** 一行里所有双引号字符串(处理 \\n 和转义) */
+function extractQuotedStrings(line: string): string[] {
+	const strings: string[] = [];
 	let current = '';
 	let inString = false;
 	let escaped = false;
-
 	for (const char of line) {
 		if (!inString) {
 			if (char === '"') {
@@ -972,105 +920,83 @@ function extractQuotedStrings(line) {
 			}
 			continue;
 		}
-
 		if (escaped) {
 			current += char === 'n' ? '\n' : char;
 			escaped = false;
 			continue;
 		}
-
 		if (char === '\\') {
 			escaped = true;
 			continue;
 		}
-
 		if (char === '"') {
 			strings.push(current);
 			inString = false;
 			current = '';
 			continue;
 		}
-
 		current += char;
 	}
-
 	return strings;
 }
 
-function isWeaponDefinition(definition) {
-	return !!definition && (
-		cleanString(definition.item_class).startsWith('weapon_')
-		|| cleanString(definition.name).startsWith('weapon_')
-	);
+function isWeaponDefinition(definition: Dict | null): boolean {
+	return !!definition && (cleanString(definition.item_class).startsWith('weapon_') || cleanString(definition.name).startsWith('weapon_'));
 }
 
-function isCaseDefinition(definition) {
+function isCaseDefinition(definition: Dict | null): boolean {
 	if (!definition) {
 		return false;
 	}
-	const prefab = cleanString(definition.prefab);
-	return (
-		prefab.includes('weapon_case')
+	return cleanString(definition.prefab).includes('weapon_case')
 		|| cleanString(definition.inv_container_and_tools).includes('case')
-		|| cleanString(definition.name).startsWith('crate_')
-	);
+		|| cleanString(definition.name).startsWith('crate_');
 }
 
-function isStickerCapsule(definition) {
-	if (!definition) {
-		return false;
-	}
-	return cleanString(definition.inv_container_and_tools).includes('sticker_capsule');
+function isStickerCapsule(definition: Dict | null): boolean {
+	return !!definition && cleanString(definition.inv_container_and_tools).includes('sticker_capsule');
 }
 
-function isGraffitiDefinition(definition) {
-	return !!definition && (
-		cleanString(definition.name) === 'spray'
-		|| cleanString(definition.tool && definition.tool.type) === 'spray'
-	);
+function isGraffitiDefinition(definition: Dict | null): boolean {
+	return !!definition && (cleanString(definition.name) === 'spray' || cleanString(definition.tool && definition.tool.type) === 'spray');
 }
 
-function isToolDefinition(definition) {
-	return !!definition && (
-		cleanString(definition.item_class) === 'tool'
-		|| cleanString(definition.craft_class) === 'tool'
-	);
+function isToolDefinition(definition: Dict | null): boolean {
+	return !!definition && (cleanString(definition.item_class) === 'tool' || cleanString(definition.craft_class) === 'tool');
 }
 
-function isSprayKit(stickerKit) {
+function isSprayKit(stickerKit: Dict | null): boolean {
 	return !!stickerKit && /^spray_/i.test(cleanString(stickerKit.name));
 }
 
-function extractSprayKitId(item) {
+/** 涂鸦的喷漆 id 放在第一个有 sticker_id 的贴纸位上 */
+function extractSprayKitId(item: Dict | null | undefined): number | null {
 	if (!item || !Array.isArray(item.stickers)) {
 		return null;
 	}
-	const first = item.stickers.find(entry => entry && toFiniteNumber(entry.sticker_id) != null);
+	const first = item.stickers.find((entry: Dict) => entry && toFiniteNumber(entry.sticker_id) != null);
 	return first ? toFiniteNumber(first.sticker_id) : null;
 }
 
-function collectDefinitionTokens(definition) {
-	const output = new Set();
+/** 武器内部名的几种写法(去 weapon_、去下划线),长的先比 */
+function collectDefinitionTokens(definition: Dict | null): string[] {
+	const output = new Set<string>();
 	for (const raw of [definition && definition.name, definition && definition.item_class]) {
 		const value = cleanString(raw).replace(/^weapon_/, '');
-		if (!value) {
-			continue;
+		if (value) {
+			output.add(value);
+			output.add(value.replace(/_/g, ''));
 		}
-		output.add(value);
-		output.add(value.replace(/_/g, ''));
 	}
 	return Array.from(output).filter(Boolean).sort((left, right) => right.length - left.length);
 }
 
-function formatExterior(value) {
+function formatExterior(value: unknown): string {
 	const wear = toFiniteNumber(value);
-	if (wear == null) {
-		return '';
-	}
-	return `${exteriorLabel(wear)} ${wear.toFixed(5)}`;
+	return wear == null ? '' : `${exteriorLabel(wear)} ${wear.toFixed(5)}`;
 }
 
-function exteriorLabel(value) {
+function exteriorLabel(value: number): string {
 	if (value < 0.07) {
 		return '崭新出厂';
 	}
@@ -1086,15 +1012,16 @@ function exteriorLabel(value) {
 	return '战痕累累';
 }
 
-function rarityLabelFromKey(key) {
+function rarityLabelFromKey(key: string): string {
 	return key && RARITY_LABELS[key] ? RARITY_LABELS[key] : humanizeText(key);
 }
 
-function qualityLabelFromKey(key) {
+function qualityLabelFromKey(key: string): string {
 	return key && QUALITY_LABELS[key] ? QUALITY_LABELS[key] : humanizeText(key);
 }
 
-function humanizeText(value) {
+/** 内部名转可读文字:去 # 和常见前缀,下划线分词,短词大写,长词首字母大写;常见武器缩写查表 */
+function humanizeText(value: unknown): string {
 	const source = cleanString(value)
 		.replace(/^#/, '')
 		.replace(/^SFUI_WPNHUD_/i, '')
@@ -1103,17 +1030,14 @@ function humanizeText(value) {
 		.replace(/^StickerKit_/i, '')
 		.replace(/^SprayKit_/i, '')
 		.replace(/^PatchKit_/i, '');
-
 	if (!source) {
 		return '';
 	}
-
 	const normalized = source.replace(/[-]+/g, '_').replace(/__+/g, '_');
 	const direct = TOKEN_NAME_MAP[normalized];
 	if (direct) {
 		return direct;
 	}
-
 	return normalized
 		.split('_')
 		.filter(Boolean)
@@ -1133,7 +1057,8 @@ function humanizeText(value) {
 		.join(' ');
 }
 
-function toFiniteNumber(value) {
+/** 数字、数字字符串、Long 等有 toString 的对象 → 有限数;其它 null */
+function toFiniteNumber(value: unknown): number | null {
 	if (value == null || value === '') {
 		return null;
 	}
@@ -1151,14 +1076,14 @@ function toFiniteNumber(value) {
 	return null;
 }
 
-function toIsoDate(value) {
+function toIsoDate(value: unknown): string {
 	if (!value) {
 		return '';
 	}
-	const date = value instanceof Date ? value : new Date(value);
+	const date = value instanceof Date ? value : new Date(value as string | number);
 	return Number.isNaN(date.getTime()) ? '' : date.toISOString();
 }
 
-function cleanString(value) {
+function cleanString(value: unknown): string {
 	return String(value == null ? '' : value).trim();
 }

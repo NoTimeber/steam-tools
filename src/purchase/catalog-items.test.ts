@@ -2,15 +2,14 @@ import {before, test} from 'node:test';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {existsSync, readFileSync} from 'node:fs';
-import {createRequire} from 'node:module';
 import {dirname, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {describeGcItem, loadItemsGameSchema} from '../items/schema.ts';
 import {decodePriceSheet} from '../steam/price-sheet.ts';
 import type {PriceMap} from '../steam/price-sheet.ts';
 import {classifyCatalogItem, compareCatalogItems, createCatalogItemBuilder, keepTf2KeyOnly, TF2_KEY_DEF_INDEX, TF2_KEY_FALLBACK_PRICES} from './catalog-items.ts';
 import type {CatalogItemBuilder, DescribeGcItem, ItemSchema} from './catalog-items.ts';
 
-const require = createRequire(import.meta.url);
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const FIXTURES = join(ROOT, 'test', 'fixtures', 'price-sheets');
 const SCHEMA_DIR = join(ROOT, 'app', 'schema');
@@ -35,10 +34,6 @@ let builder: CatalogItemBuilder;
 let schemas: Record<'cs2' | 'tf2', ItemSchema>;
 
 before(() => {
-	const {loadItemsGameSchema, describeGcItem} = require(join(ROOT, 'app', 'items-game-schema.js')) as {
-		loadItemsGameSchema(file: string, options: Record<string, string>): ItemSchema;
-		describeGcItem: DescribeGcItem;
-	};
 	const tf2Loc = existsSync(join(SCHEMA_DIR, 'tf2_schinese.txt')) ? 'tf2_schinese.txt' : 'tf2_english.txt';
 	schemas = {
 		cs2: loadItemsGameSchema(join(SCHEMA_DIR, 'items_game.txt'), {
@@ -50,7 +45,7 @@ before(() => {
 			englishLocalizationFile: join(SCHEMA_DIR, 'tf2_english.txt')
 		})
 	};
-	builder = createCatalogItemBuilder({schemas, describeGcItem, logger: {log() {}}});
+	builder = createCatalogItemBuilder({schemas, describeGcItem: describeGcItem as unknown as DescribeGcItem, logger: {log() {}}});
 });
 
 for (const game of ['cs2', 'tf2'] as const) {

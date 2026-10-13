@@ -12,7 +12,9 @@ const vm = require('vm');
 
 const [codeArg, legacyServer, outFile] = process.argv.slice(2);
 const code = path.resolve(codeArg);
-const {describeGcItem, loadItemsGameSchema} = require(path.join(code, 'app', 'items-game-schema.js'));
+// 旧代码目录里是 app/items-game-schema.js,迁移后在 src/items/schema.ts
+const legacySchemaModule = path.join(code, 'app', 'items-game-schema.js');
+const {describeGcItem, loadItemsGameSchema} = require(fs.existsSync(legacySchemaModule) ? legacySchemaModule : path.join(code, 'src', 'items', 'schema.ts'));
 const {decodePriceSheet, extractStorePrices, normalizePriceMap} = require(path.join(code, 'src', 'steam', 'price-sheet.ts'));
 const {normalizeGame, gameConfig} = require(path.join(code, 'src', 'steam', 'games.ts'));
 const src = fs.readFileSync(legacyServer, 'utf8');

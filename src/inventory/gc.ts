@@ -4,7 +4,7 @@
 import {serializeForJson} from '../core/serialize.ts';
 import type {InventoryItem, InventorySnapshot} from './community.ts';
 
-/** describeGcItem(app/items-game-schema.js)的返回里用到的字段 */
+/** describeGcItem(../items/schema.ts)的返回里用到的字段 */
 export interface GcItemDetails {
 	name: string;
 	marketHashName: string;
