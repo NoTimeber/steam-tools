@@ -1,15 +1,18 @@
 {
-  "name": "steam-login-replica",
+  "name": "steam-tools",
   "version": "0.1.0",
   "private": true,
-  "description": "Local Steam login prototype",
-  "main": "launcher.js",
+  "description": "Steam 多账号工具台(服务端)",
+  "main": "app/server.js",
   "engines": {
-    "node": ">=20.12"
+    "node": ">=24"
   },
   "scripts": {
-    "start": "node launcher.js",
-    "app": "node app/server.js",
+    "start": "node app/server.js",
+    "dev": "node --watch app/server.js",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --test \"src/**/*.test.ts\"",
+    "legacy:launcher": "node launcher.js",
     "release": "node tools/build-release.js",
     "keygen": "node tools/keygen.js"
   },
@@ -27,5 +30,9 @@
     "steamcommunity": "^3.50.0",
     "steamstore": "^2.4.0",
     "tf2": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "typescript": "7.0.2"
   }
 }

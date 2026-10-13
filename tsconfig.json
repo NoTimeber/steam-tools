@@ -1,0 +1,22 @@
+{
+	// 新代码在 src/ 下,用 TypeScript 写、由 Node 24 直接运行(类型擦除,不需要构建)。
+	// tsc 只做类型检查;因此只允许可被直接擦除的语法(不能用 enum / namespace / 参数属性)。
+	"compilerOptions": {
+		"target": "es2024",
+		"lib": ["es2024"],
+		"module": "nodenext",
+		"moduleResolution": "nodenext",
+		"types": ["node"],
+		"noEmit": true,
+		"allowImportingTsExtensions": true,
+		"erasableSyntaxOnly": true,
+		"verbatimModuleSyntax": true,
+		"isolatedModules": true,
+		"strict": true,
+		"noUncheckedIndexedAccess": true,
+		"noImplicitOverride": true,
+		"noFallthroughCasesInSwitch": true,
+		"skipLibCheck": true
+	},
+	"include": ["src/**/*.ts"]
+}
