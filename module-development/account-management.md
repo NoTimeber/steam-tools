@@ -155,10 +155,16 @@ Current behavior:
 - first-time missing `machineAuthToken.<account>.txt` debug noise is filtered
 - when Steam directory lookup fails, the server falls back to `cm0.steampowered.com:443`
 - duplicate login is blocked in `loginAccount`: an account holding an `attemptId` whose
-  normalized status is `登录成功` or `登录中` is skipped with a warning log. Each
-  `POST /api/login` creates a new attempt id and a new `SteamUser` client, and
-  `mergeAttempt` overwrites `account.attemptId`, so without this guard the previous
-  session is orphaned. To reconnect, log the account out first.
+  normalized status is `登录成功` or `登录中` is skipped with a warning log.
+- since 2026-10 the server enforces one session per account as well
+  (`src/steam/session-manager.ts`): `POST /api/login` returns the existing attempt
+  (`reused: true`) while the account is connecting/online, and creating a new attempt
+  logs off and removes the account's previous one. `force: true` forces a fresh login
+  (the UU row's `登录账户` button sends it).
+- the server remembers which accounts should stay online (`steam_login_intents` table)
+  and restores them after a restart, refreshToken first, then password + maFile code.
+  Manual logout, account deletion and fatal errors (LoggedInElsewhere, InvalidPassword…)
+  clear the intent.
 
 Current logout behavior:
 

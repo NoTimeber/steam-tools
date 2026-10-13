@@ -61,6 +61,8 @@ const {createCs2Terminal} = require('./lib/cs2-terminal');
 const {writeFileAtomic, writeJsonAtomic, readJsonFileSafe} = require('./lib/atomic-file');
 // 凭据数据层(TypeScript,由 Node 24 直接运行):SQLite + 字段加密,见 src/store/。
 const {openStore, normalizeStoredAccount, uuTokenId} = require('../src/store/index.ts');
+// Steam 登录会话管理(TypeScript):每账号一个会话、登录/重连看门狗、重启自动恢复,见 src/steam/。
+const {createSessionManager} = require('../src/steam/session-manager.ts');
 
 const PORT = Number(process.env.PORT || 53110);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -97,6 +99,13 @@ const cs2Terminal = createCs2Terminal({
 // 登录重试:连接卡住(超时未拿到 WebSession)时自动重试,避免永久卡在"登录中"。
 const LOGIN_TIMEOUT_MS = Math.max(10000, Number(process.env.LOGIN_TIMEOUT_MS || 45000));
 const LOGIN_RETRY_MAX = Math.max(0, Number(process.env.LOGIN_RETRY_MAX || 2));
+// 掉线重连看门狗(steam-user autoRelogin 的兜底):扫描间隔 / 先给 autoRelogin 的宽限期 / 最多重连次数。
+const RECONNECT_WATCHDOG_INTERVAL_MS = Math.max(15000, Number(process.env.RECONNECT_WATCHDOG_INTERVAL_MS || 30000));
+const RECONNECT_GRACE_MS = Math.max(30000, Number(process.env.RECONNECT_GRACE_MS || 90000));
+const RECONNECT_MAX_ATTEMPTS = Math.max(1, Number(process.env.RECONNECT_MAX_ATTEMPTS || 6));
+// 服务重启后自动恢复登录:SESSION_RESTORE=0 关闭;账号之间间隔(防 Steam 限频)。
+const SESSION_RESTORE_ENABLED = String(process.env.SESSION_RESTORE || '1') !== '0';
+const SESSION_RESTORE_INTERVAL_MS = Math.max(1000, Number(process.env.SESSION_RESTORE_INTERVAL_MS || 3000));
 
 // launcher 在检测到新版本时写这个文件;前端据此提示"重启生效"。
 const UPDATE_STATUS_FILE = path.join(DATA_DIR, 'update-status.json');
@@ -287,7 +296,6 @@ const auth = createAuth({
 });
 io.use(auth.socketAuth);
 
-const attempts = new Map();
 const purchaseTasks = [];
 const purchaseTaskIndex = new Map();
 const PURCHASE_TASK_LIMIT = 60;
@@ -437,6 +445,56 @@ try {
 	process.exit(1);
 }
 
+// Steam 登录会话。attempts 是会话表(id -> attempt),内购/库存/UU 等代码直接读它。
+const sessions = createSessionManager({
+	createClient(fingerprint) {
+		const clientOptions = {
+			dataDirectory: STEAM_USER_DIR,
+			// 长连接因空闲/CM 轮换/网络抖动断开后,让 steam-user 用已存的 refreshToken 自动重连重登
+			// (会重新触发 loggedOn→webSession,状态与 cookie 自动恢复)。会话管理里的重连看门狗再做兜底。
+			autoRelogin: true,
+			renewRefreshTokens: true,
+			webCompatibilityMode: true,
+			protocol: SteamUser.EConnectionProtocol.WebSocket
+		};
+		// 覆盖 machineID 格式(去掉库默认特征、每账号稳定随机);UA 注入 steam-user 的 web 请求。
+		if (Array.isArray(fingerprint.machineIdFormat) && fingerprint.machineIdFormat.length === 3) {
+			clientOptions.machineIdFormat = fingerprint.machineIdFormat;
+		}
+		if (fingerprint.userAgent) {
+			clientOptions.additionalHeaders = {'User-Agent': fingerprint.userAgent};
+		}
+		return new SteamUser(clientOptions);
+	},
+	getFingerprint: accountName => fingerprintStore.getAccountFingerprint(accountName),
+	generateAuthCode: sharedSecret => SteamTotp.generateAuthCode(sharedSecret),
+	// 被顶号/会话被替换/封禁/密码错:不自动重连(避免与你在别处的登录抢号/无效硬冲)
+	fatalEResults: new Set(['LoggedInElsewhere', 'LogonSessionReplaced', 'AccountDisabled', 'Banned', 'InvalidPassword']
+		.map(name => (SteamUser.EResult || {})[name])
+		.filter(value => typeof value === 'number')),
+	cmFallbackServers: LOCAL_CM_FALLBACKS,
+	sessions: store.sessions,
+	intents: store.loginIntents,
+	onChange: attempt => io.emit('attempt:update', sessions.publicAttempt(attempt)),
+	onClientCreated: attachGameCoordinators,
+	onWebSession: attempt => refreshAttemptStoreCountry(attempt),   // 后台查真实账户国家(USD 等无法从货币推断)
+	currencyIdToIso,
+	resolveWalletCountry: attempt => resolveAccountCountry({
+		country: attempt.country,
+		currency: attempt.currency,
+		currencyISO: attempt.currencyISO
+	}),
+	timing: {
+		loginTimeoutMs: LOGIN_TIMEOUT_MS,
+		loginRetryMax: LOGIN_RETRY_MAX,
+		reconnectIntervalMs: RECONNECT_WATCHDOG_INTERVAL_MS,
+		reconnectGraceMs: RECONNECT_GRACE_MS,
+		reconnectMaxAttempts: RECONNECT_MAX_ATTEMPTS,
+		restoreIntervalMs: SESSION_RESTORE_INTERVAL_MS
+	}
+});
+const attempts = sessions.attempts;
+
 installSteamMicroTxnHooks();
 
 app.disable('x-powered-by');
@@ -495,9 +553,7 @@ app.get('/api/health', (req, res) => {
 });
 
 app.get('/api/attempts', (req, res) => {
-	const items = Array.from(attempts.values())
-		.sort((left, right) => left.createdAt - right.createdAt)
-		.map(publicAttempt);
+	const items = sessions.list().map(publicAttempt);
 	res.json({success: true, attempts: items});
 });
 
@@ -686,14 +742,23 @@ app.post('/api/login', (req, res) => {
 	const sharedSecret = String(body.sharedSecret || localProfile.sharedSecret || (storedAccount && storedAccount.sharedSecret) || '').trim();
 	const identitySecret = String(body.identitySecret || localProfile.identitySecret || '').trim();
 	let twoFactorCode = String(body.twoFactorCode || '').trim();
+	// 没传 remember 时按名单里的设置(默认记住):记住才会保存 refreshToken,重启后才能免密恢复
+	const remember = body.remember !== undefined ? !!body.remember : !(storedAccount && storedAccount.remember === false);
 
 	if (!accountName || !password) {
 		return res.status(400).json({success: false, error: '账号和密码不能为空'});
 	}
 
-	const attempt = createAttempt({
+	// 同一账号已在登录中或在线:直接返回现有会话,不再新建客户端互相顶号。force=true 时强制重登。
+	const existing = body.force ? null : sessions.activeAttemptFor(accountName);
+	if (existing) {
+		return res.json({success: true, attempt: publicAttempt(existing), reused: true});
+	}
+
+	// 新建会话时会先拆掉该账号的旧会话(已登出/掉线/失败的)
+	const attempt = sessions.createAttempt({
 		accountName,
-		remember: !!body.remember,
+		remember,
 		sharedSecret,
 		identitySecret,
 		hasMaFile: localProfile.hasMaFile,
@@ -721,7 +786,7 @@ app.post('/api/login', (req, res) => {
 		}
 	}
 
-	startLogon(attempt, {
+	sessions.startLogon(attempt, {
 		accountName,
 		password,
 		twoFactorCode: twoFactorCode || undefined
@@ -740,7 +805,7 @@ app.post('/api/login-refresh', (req, res) => {
 	}
 
 	const localProfile = readLocalAccountProfile(accountName);
-	const attempt = createAttempt({
+	const attempt = sessions.createAttempt({
 		accountName,
 		remember: !!body.remember,
 		sharedSecret: localProfile.sharedSecret,
@@ -753,7 +818,7 @@ app.post('/api/login-refresh', (req, res) => {
 		balance: localProfile.balance
 	});
 
-	startLogon(attempt, {refreshToken});
+	sessions.startLogon(attempt, {refreshToken});
 	res.json({success: true, attempt: publicAttempt(attempt)});
 });
 
@@ -772,14 +837,7 @@ app.post('/api/guard/:id', (req, res) => {
 		return res.status(409).json({success: false, error: '当前任务不需要 Steam Guard 验证码'});
 	}
 
-	const callback = attempt.guardCallback;
-	attempt.guardCallback = null;
-	attempt.guard = null;
-	attempt.status = 'connecting';
-	addLog(attempt, 'info', '已提交 Steam Guard 验证码');
-	emitAttempt(attempt);
-	armLoginWatchdog(attempt);   // 提交验证码后重新计时,防止之后又卡住
-	callback(code);
+	sessions.submitGuardCode(attempt, code);
 
 	res.json({success: true, attempt: publicAttempt(attempt)});
 });
@@ -813,26 +871,8 @@ app.post('/api/logout/:id', (req, res) => {
 		return;
 	}
 
-	clearLoginWatchdog(attempt);   // 手动登出:取消待执行的登录重试
-	if (attempt.client) {
-		try {
-			attempt.client.logOff();
-		} catch (err) {
-			addLog(attempt, 'warn', '退出 Steam 时出错: ' + err.message);
-		}
-	}
-
-	attempt.status = 'logged_out';
-	attempt.gcConnected = false;
-	attempt.cs2GcConnected = false;
-	attempt.tf2GcConnected = false;
-	attempt.inventoryCount = 0;
-	attempt.inventorySource = '';
-	attempt.inventoryCache = null;
-	attempt.communityInvTriedAt = 0;
-	attempt.inventoryInflight = null;
-	addLog(attempt, 'info', '已请求退出 Steam');
-	emitAttempt(attempt);
+	// 手动登出:取消待执行的登录重试,并清掉"重启后自动恢复"的意图
+	sessions.logout(attempt);
 	res.json({success: true, attempt: publicAttempt(attempt)});
 });
 
@@ -843,45 +883,24 @@ app.post('/api/accounts/cleanup', (req, res) => {
 	const body = req.body || {};
 	const list = Array.isArray(body.accounts) ? body.accounts : [];
 
-	const names = new Set();
-	const ids = new Set();
-	const fileKeys = new Set();
+	const names = [];
+	const ids = [];
 	for (const item of list) {
 		const accountName = item && item.accountName ? String(item.accountName).trim() : '';
 		const attemptId = item && item.attemptId ? String(item.attemptId).trim() : '';
 		if (accountName) {
-			names.add(accountName.toLowerCase());
-			fileKeys.add(safeName(accountName));
+			names.push(accountName);
 		}
 		if (attemptId) {
-			ids.add(attemptId);
-			fileKeys.add(safeName(attemptId));
+			ids.push(attemptId);
 		}
 	}
 
-	let removedAttempts = 0;
-	for (const [id, attempt] of attempts) {
-		const matchById = ids.has(id);
-		const matchByName = attempt.accountName && names.has(String(attempt.accountName).trim().toLowerCase());
-		if (!matchById && !matchByName) {
-			continue;
-		}
-		if (attempt.client) {
-			try {
-				attempt.client.logOff();
-			} catch (err) {
-				console.warn('[cleanup] logOff 失败', id, err && err.message);
-			}
-		}
-		// session 按 accountName / steamID / id 任一作 key 保存，逐一登记以确保删除。
-		fileKeys.add(safeName(attempt.accountName || attempt.steamID || attempt.id));
-		attempts.delete(id);
-		removedAttempts++;
-	}
-
+	// 登出并移出会话表、清掉登录意图;session 按 accountName / steamID / id 任一作 key 保存过,一并删掉。
+	const {removedAttempts, sessionKeys} = sessions.removeAccounts(names, ids);
 	let removedFiles = 0;
 	try {
-		removedFiles = store.sessions.remove(Array.from(fileKeys));
+		removedFiles = store.sessions.remove(sessionKeys);
 	} catch (err) {
 		console.warn('[cleanup] 删除 session 失败', err && err.message);
 	}
@@ -889,7 +908,7 @@ app.post('/api/accounts/cleanup', (req, res) => {
 	// 同步从持久化名单中移除,确保即使前端防抖推送未及时发出,服务端名单也保持一致。
 	let removedFromList = false;
 	try {
-		removedFromList = removeAccountsFromList(Array.from(names));
+		removedFromList = removeAccountsFromList(names);
 	} catch (err) {
 		console.warn('[cleanup] 更新账户名单失败', err && err.message);
 	}
@@ -2448,12 +2467,7 @@ function shutdown(signal) {
 	}
 	shuttingDown = true;
 	console.log(`[shutdown] 收到 ${signal},登出 ${attempts.size} 个会话并关闭服务`);
-	for (const attempt of attempts.values()) {
-		clearLoginWatchdog(attempt);
-		try {
-			if (attempt.client) attempt.client.logOff();
-		} catch (_) {}
-	}
+	sessions.shutdown();   // 不改登录意图:下次启动照常自动恢复
 	io.close();
 	server.close(() => process.exit(0));
 	if (typeof server.closeAllConnections === 'function') {
@@ -2464,98 +2478,42 @@ function shutdown(signal) {
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 
-function createAttempt(options) {
-	const attempt = {
-		id: Date.now().toString(36) + '-' + crypto.randomBytes(3).toString('hex'),
-		createdAt: Date.now(),
-		accountName: options.accountName || '',
-		status: 'created',
-		steamID: '',
-		personaName: '',
-		country: options.country || '',
-		loginGeoCountry: '',
-		hasWallet: !!options.hasWallet,
-		currency: options.currency == null ? null : Number(options.currency),
-		currencyISO: String(options.currencyISO || '').trim().toUpperCase(),
-		balance: options.balance == null ? null : Number(options.balance),
-		publicIP: '',
-		cellID: '',
-		cookieCount: 0,
-		hasCookies: false,
-		hasRefreshToken: false,
-		refreshToken: '',
-		cookies: [],
-		guard: null,
-		guardCallback: null,
-		remember: !!options.remember,
-		sharedSecret: options.sharedSecret || '',
-		identitySecret: options.identitySecret || '',
-		hasMaFile: !!options.hasMaFile,
-		gcConnected: false,
-		cs2GcConnected: false,
-		tf2GcConnected: false,
-		activeGame: 'cs2',
-		inventoryCount: 0,
-		inventoryCache: null,
-		inventorySource: '',
-		communityInvTriedAt: 0,   // 上次社区库存拉取【失败】时间戳(0=无失败);用于失败后短暂冷却
-		inventoryInflight: null,  // 进行中的社区库存拉取 Promise,用于并发去重
-		logs: [],
-		client: null,
-		csgo: null,
-		tf2: null,
-		cmFallbackApplied: false
-	};
-
-	attempts.set(attempt.id, attempt);
-	addLog(attempt, 'info', '已创建登录任务');
-	return attempt;
+sessions.start();
+if (SESSION_RESTORE_ENABLED) {
+	// 按登录意图恢复上次在线的账号:优先用保存的 refreshToken,失效再用名单里的密码 + maFile 令牌
+	sessions.restoreAll(accountName => {
+		const stored = findStoredAccount(accountName);
+		if (!stored) {
+			return null;   // 账号已从名单删除
+		}
+		const profile = readLocalAccountProfile(stored.accountName);
+		const saved = store.sessions.get(safeName(stored.accountName));
+		return {
+			profile: {
+				accountName: stored.accountName,
+				remember: stored.remember !== false,
+				sharedSecret: profile.sharedSecret || stored.sharedSecret || '',
+				identitySecret: profile.identitySecret || '',
+				hasMaFile: profile.hasMaFile,
+				country: profile.country || stored.country || '',
+				hasWallet: profile.hasWallet || stored.hasWallet,
+				currency: profile.currency != null ? profile.currency : stored.currency,
+				currencyISO: profile.currencyISO || '',
+				balance: profile.balance != null ? profile.balance : stored.balance
+			},
+			refreshToken: saved && saved.refreshToken ? String(saved.refreshToken) : '',
+			password: stored.password || ''
+		};
+	});
 }
 
-function getAccountFingerprintSafe(accountName) {
-	try {
-		return fingerprintStore.getAccountFingerprint(accountName);
-	} catch (_) {
-		return {machineName: '', machineIdFormat: null, userAgent: ''};
-	}
-}
-
-function startLogon(attempt, details) {
-	attempt.loginDetails = details;            // 记下凭据,供超时重试复用
-	if (attempt.loginRetries == null) {
-		attempt.loginRetries = 0;
-	}
-
-	const fp = getAccountFingerprintSafe(attempt.accountName);
-	attempt.userAgent = fp.userAgent || '';    // 供自有 web 请求(取库存等)复用同一 UA
-
-	const clientOptions = {
-		dataDirectory: STEAM_USER_DIR,
-		// 长连接因空闲/CM 轮换/网络抖动断开后,让 steam-user 用已存的 refreshToken 自动重连重登
-		// (会重新触发 loggedOn→webSession,状态与 cookie 自动恢复)。reconnectWatchdogTick 再做兜底。
-		autoRelogin: true,
-		renewRefreshTokens: true,
-		webCompatibilityMode: true,
-		protocol: SteamUser.EConnectionProtocol.WebSocket
-	};
-	// 覆盖 machineID 格式(去掉库默认特征、每账号稳定随机);UA 注入 steam-user 的 web 请求。
-	if (Array.isArray(fp.machineIdFormat) && fp.machineIdFormat.length === 3) {
-		clientOptions.machineIdFormat = fp.machineIdFormat;
-	}
-	if (fp.userAgent) {
-		clientOptions.additionalHeaders = {'User-Agent': fp.userAgent};
-	}
-	const client = new SteamUser(clientOptions);
-
-	withCmFallback(attempt, client);
-	attempt.client = client;
-	attempt.status = 'connecting';
-	attachSteamEvents(attempt, client);
+// 给新建的 Steam 客户端挂 CS2/TF2 GC 模块(会话本身由 src/steam/session-manager.ts 管理)。
+// 尽早挂 GC 抓包(在 GC 欢迎消息到达前),这样连接时内嵌的初始 SO 缓存(含报价)也能被捕获。
+function attachGameCoordinators(attempt, client) {
 	try {
 		const csgo = new GlobalOffensive(client);
 		attempt.csgo = csgo;
 		attachCs2GcEvents(attempt, csgo);
-		// 尽早挂 GC 抓包(在 GC 欢迎消息到达前),这样连接时内嵌的初始 SO 缓存(含报价)也能被捕获。
 		cs2Terminal.attach(attempt);
 	} catch (err) {
 		addLog(attempt, 'warn', 'CS2 GC 初始化失败: ' + err.message);
@@ -2567,167 +2525,6 @@ function startLogon(attempt, details) {
 	} catch (err) {
 		addLog(attempt, 'warn', 'TF2 GC 初始化失败: ' + err.message);
 	}
-	addLog(attempt, 'info', '正在连接 Steam');
-	emitAttempt(attempt);
-
-	armLoginWatchdog(attempt);
-	try {
-		client.logOn(buildLogOnDetails(attempt, details, fp));
-	} catch (err) {
-		clearLoginWatchdog(attempt);
-		attempt.status = 'failed';
-		addLog(attempt, 'error', '登录启动失败: ' + err.message);
-		emitAttempt(attempt);
-	}
-}
-
-// 把伪装机器名拼进 logOn 详情(machineName 会显示在 Steam 社区游戏列表里)。
-function buildLogOnDetails(attempt, details, fp) {
-	const merged = Object.assign({}, details);
-	if (fp && fp.machineName) {
-		merged.machineName = fp.machineName;
-	}
-	return merged;
-}
-
-// 登录看门狗:启动后若在 LOGIN_TIMEOUT_MS 内没拿到 WebSession(也没在等验证码),判定卡住并重试。
-function armLoginWatchdog(attempt) {
-	clearLoginWatchdog(attempt);
-	attempt.loginWatchdog = setTimeout(() => {
-		attempt.loginWatchdog = null;
-		// 已完成 / 已登出 / 正在等验证码 —— 都不算"卡住",不重试。
-		if (attempt.status === 'web_session' || attempt.status === 'logged_out' || attempt.guardCallback) {
-			return;
-		}
-		if (attempt.loginRetries < LOGIN_RETRY_MAX) {
-			attempt.loginRetries += 1;
-			addLog(attempt, 'warn', `登录超时(${Math.round(LOGIN_TIMEOUT_MS / 1000)}s),正在第 ${attempt.loginRetries}/${LOGIN_RETRY_MAX} 次重试`);
-			emitAttempt(attempt);
-			retryLogon(attempt);
-		} else {
-			attempt.status = 'failed';
-			addLog(attempt, 'error', `登录重试 ${LOGIN_RETRY_MAX} 次仍未成功,已停止`);
-			emitAttempt(attempt);
-		}
-	}, LOGIN_TIMEOUT_MS);
-}
-
-function clearLoginWatchdog(attempt) {
-	if (attempt && attempt.loginWatchdog) {
-		clearTimeout(attempt.loginWatchdog);
-		attempt.loginWatchdog = null;
-	}
-}
-
-// 复用同一个 client 重新 logOn(避免重建客户端/重复挂事件)。一次性验证码会过期,重试时去掉,
-// 由 sharedSecret 自动重生成;若无 sharedSecret 则会再次进入"需要验证码"等待用户输入。
-function retryLogon(attempt) {
-	const details = attempt.loginDetails;
-	if (!details || !attempt.client) {
-		attempt.status = 'failed';
-		emitAttempt(attempt);
-		return;
-	}
-	try {
-		attempt.client.logOff();
-	} catch (_) {}
-	attempt.status = 'connecting';
-	emitAttempt(attempt);
-	setTimeout(() => {
-		if (!attempt.client || attempt.status === 'logged_out') {
-			return;   // 期间被手动登出/删除
-		}
-		const fp = getAccountFingerprintSafe(attempt.accountName);
-		const retryDetails = Object.assign({}, details);
-		delete retryDetails.twoFactorCode;   // 一次性验证码已过期,丢弃
-		armLoginWatchdog(attempt);
-		try {
-			attempt.client.logOn(buildLogOnDetails(attempt, retryDetails, fp));
-		} catch (err) {
-			clearLoginWatchdog(attempt);
-			attempt.status = 'failed';
-			addLog(attempt, 'error', '重试登录启动失败: ' + err.message);
-			emitAttempt(attempt);
-		}
-	}, 1500);
-}
-
-// ===== 掉线重连看门狗(autoRelogin 的兜底)=====
-// autoRelogin 负责第一时间自动重连;这个看门狗兜住 autoRelogin 放弃、或以 error 形式断开的情况:
-// 定时扫描「曾经在线、现在卡在 disconnected/failed、非主动登出、非致命错误」的账号,用存好的凭据
-// 复用同一 client 重登(retryLogon)。对应 Steamauto 后台线程「主动巡检 + 分级复活」,只是这里针对持久连接。
-const RECONNECT_WATCHDOG_INTERVAL_MS = Math.max(15000, Number(process.env.RECONNECT_WATCHDOG_INTERVAL_MS || 30000));
-const RECONNECT_GRACE_MS = Math.max(30000, Number(process.env.RECONNECT_GRACE_MS || 90000));   // 先给 autoRelogin 一点时间
-const RECONNECT_MAX_ATTEMPTS = Math.max(1, Number(process.env.RECONNECT_MAX_ATTEMPTS || 6));
-const RECONNECT_BACKOFF_BASE_MS = 60000;
-const RECONNECT_BACKOFF_CAP_MS = 10 * 60000;
-
-function isFatalReconnectEResult(eresult) {
-	if (typeof eresult !== 'number') {
-		return false;
-	}
-	const E = SteamUser.EResult || {};
-	return [E.LoggedInElsewhere, E.LogonSessionReplaced, E.AccountDisabled, E.Banned, E.InvalidPassword]
-		.some(value => typeof value === 'number' && value === eresult);
-}
-
-function markAttemptDisconnected(attempt, fatal) {
-	if (!attempt) {
-		return;
-	}
-	if (!attempt.disconnectedSince) {
-		attempt.disconnectedSince = Date.now();
-	}
-	if (fatal) {
-		attempt.reconnectBlocked = true;
-	}
-}
-
-function reconnectWatchdogTick() {
-	const now = Date.now();
-	for (const attempt of attempts.values()) {
-		if (!attempt || !attempt.client) {
-			continue;
-		}
-		// 只救「曾经在线」的账号;从没建立过会话的失败(密码/验证码错)交给初始登录流程,不在这里硬重试。
-		if (!attempt.hadSession) {
-			continue;
-		}
-		if (attempt.status !== 'disconnected' && attempt.status !== 'failed') {
-			continue;   // 在线/连接中/等验证码/主动登出:跳过
-		}
-		if (attempt.guardCallback || attempt.reconnectBlocked || !attempt.loginDetails) {
-			continue;
-		}
-		// 掉线不足 grace:先让 autoRelogin 自己恢复,不插手。
-		if (!attempt.disconnectedSince || (now - attempt.disconnectedSince) < RECONNECT_GRACE_MS) {
-			continue;
-		}
-		if (attempt.nextReconnectAt && now < attempt.nextReconnectAt) {
-			continue;   // 退避中
-		}
-		const tries = Number(attempt.reconnectAttempts || 0);
-		if (tries >= RECONNECT_MAX_ATTEMPTS) {
-			if (!attempt.reconnectGaveUp) {
-				attempt.reconnectGaveUp = true;
-				attempt.reconnectBlocked = true;
-				addLog(attempt, 'error', `掉线重连 ${RECONNECT_MAX_ATTEMPTS} 次仍未恢复,已停止自动重连(请手动重新登录)`);
-				emitAttempt(attempt);
-			}
-			continue;
-		}
-		attempt.reconnectAttempts = tries + 1;
-		attempt.nextReconnectAt = now + Math.min(RECONNECT_BACKOFF_CAP_MS, RECONNECT_BACKOFF_BASE_MS * Math.pow(2, tries));
-		attempt.loginRetries = 0;   // 每个重连周期给内层登录看门狗一份新的快速重试额度
-		addLog(attempt, 'warn', `检测到掉线,正在第 ${attempt.reconnectAttempts}/${RECONNECT_MAX_ATTEMPTS} 次自动重连`);
-		emitAttempt(attempt);
-		retryLogon(attempt);
-	}
-}
-
-const reconnectWatchdogTimer = setInterval(reconnectWatchdogTick, RECONNECT_WATCHDOG_INTERVAL_MS);
-if (reconnectWatchdogTimer && typeof reconnectWatchdogTimer.unref === 'function') {
-	reconnectWatchdogTimer.unref();
 }
 
 function installSteamMicroTxnHooks() {
@@ -3008,158 +2805,6 @@ function sendSteamMicroTxnAuthorization(client, transId, timeoutMs = PURCHASE_GC
 	});
 }
 
-function attachSteamEvents(attempt, client) {
-	client.on('debug', message => {
-		message = String(message);
-		if (shouldIgnoreDebugMessage(message)) {
-			return;
-		}
-		addLog(attempt, 'debug', message);
-		emitAttempt(attempt);
-	});
-
-	client.on('microTxnAuthRequest', request => {
-		const summary = [
-			'Steam MicroTxnAuthRequest',
-			`appid=${request && request.appId ? request.appId : 0}`,
-			`orderid=${request && request.orderId ? request.orderId : '-'}`,
-			`transid=${request && request.transId ? request.transId : '-'}`,
-			request && request.parseError ? `parseError=${request.parseError}` : ''
-		].filter(Boolean).join(' ');
-		addLog(attempt, 'info', summary);
-		emitAttempt(attempt);
-	});
-
-	client.on('steamGuard', (domain, callback, lastCodeWrong) => {
-		if (!domain && attempt.sharedSecret) {
-			try {
-				const code = SteamTotp.generateAuthCode(attempt.sharedSecret);
-				addLog(attempt, 'info', '已自动提交移动令牌验证码');
-				emitAttempt(attempt);
-				callback(code);
-				return;
-			} catch (err) {
-				addLog(attempt, 'warn', '自动生成移动令牌验证码失败: ' + err.message);
-			}
-		}
-
-		clearLoginWatchdog(attempt);   // 等待用户输入验证码期间暂停看门狗(提交后会重新计时)
-		attempt.status = 'guard_required';
-		attempt.guard = {
-			type: domain ? 'email' : 'mobile',
-			domain: domain || '',
-			lastCodeWrong: !!lastCodeWrong
-		};
-		attempt.guardCallback = callback;
-		addLog(attempt, 'warn', domain ? '需要邮箱 Steam Guard 验证码' : '需要移动令牌验证码');
-		emitAttempt(attempt);
-	});
-
-	client.on('loggedOn', body => {
-		attempt.status = 'logged_on';
-		attempt.steamID = client.steamID ? client.steamID.getSteamID64() : '';
-		attempt.publicIP = client.publicIP || '';
-		attempt.cellID = client.cellID || (body && body.cell_id) || '';
-		addLog(attempt, 'success', 'Steam 登录成功');
-		try {
-			client.webLogOn();
-		} catch (err) {
-			addLog(attempt, 'warn', '获取 WebSession 失败: ' + err.message);
-		}
-		emitAttempt(attempt);
-	});
-
-	client.on('accountInfo', (name, country) => {
-		attempt.personaName = name || attempt.personaName || '';
-		attempt.loginGeoCountry = normalizeCountryCode(country);
-		addLog(attempt, 'info', '已读取账号资料'
-			+ (attempt.personaName ? ': ' + attempt.personaName : '')
-			+ (attempt.loginGeoCountry ? ' / 登录地区 ' + attempt.loginGeoCountry : ''));
-		emitAttempt(attempt);
-	});
-
-	client.on('wallet', (hasWallet, currency, balance) => {
-		attempt.hasWallet = !!hasWallet;
-		attempt.currency = currency;
-		attempt.currencyISO = currencyIdToIso(currency);
-		attempt.balance = balance;
-		if (attempt.hasWallet) {
-			const resolvedCountry = resolveAccountCountry({
-				country: attempt.country,
-				currency: attempt.currency,
-				currencyISO: attempt.currencyISO
-			});
-			if (resolvedCountry) {
-				attempt.country = resolvedCountry;
-			}
-		}
-		addLog(attempt, 'info', hasWallet ? '钱包余额: ' + balance + ' / currency ' + currency : '账号没有钱包');
-		saveSession(attempt);
-		emitAttempt(attempt);
-	});
-
-	client.on('refreshToken', token => {
-		attempt.refreshToken = token || '';
-		attempt.hasRefreshToken = !!attempt.refreshToken;
-		addLog(attempt, 'success', '已获取 refreshToken');
-		saveSession(attempt);
-		emitAttempt(attempt);
-	});
-
-	client.on('webSession', (sessionID, cookies) => {
-		clearLoginWatchdog(attempt);   // 拿到 WebSession = 登录完成
-		attempt.loginRetries = 0;
-		// (重)连成功:标记曾经在线,并清空掉线重连计数/退避/阻断,供重连看门狗判定。
-		attempt.hadSession = true;
-		attempt.disconnectedSince = 0;
-		attempt.reconnectAttempts = 0;
-		attempt.nextReconnectAt = 0;
-		attempt.reconnectBlocked = false;
-		attempt.reconnectGaveUp = false;
-		attempt.status = 'web_session';
-		attempt.webSessionID = sessionID || '';   // 商店结算需要的 sessionid(CSRF)
-		attempt.cookies = Array.isArray(cookies) ? cookies : [];
-		attempt.cookieCount = attempt.cookies.length;
-		attempt.hasCookies = attempt.cookieCount > 0;
-		attempt.inventoryCache = null;
-		attempt.communityInvTriedAt = 0;
-		attempt.inventoryInflight = null;
-		addLog(attempt, 'success', '已获取 WebSession cookies: ' + attempt.cookieCount);
-		saveSession(attempt);
-		emitAttempt(attempt);
-		refreshAttemptStoreCountry(attempt);   // 后台查真实账户国家(USD 等无法从货币推断)
-	});
-
-	client.on('machineAuthToken', () => {
-		addLog(attempt, 'info', '已更新 machineAuthToken');
-		emitAttempt(attempt);
-	});
-
-	client.on('disconnected', (eresult, msg) => {
-		attempt.gcConnected = false;
-		attempt.cs2GcConnected = false;
-		attempt.tf2GcConnected = false;
-		if (attempt.status !== 'logged_out') {
-			attempt.status = 'disconnected';
-			markAttemptDisconnected(attempt, isFatalReconnectEResult(eresult));
-			addLog(attempt, 'warn', 'Steam 连接已断开' + (msg ? ': ' + msg : ''));
-			emitAttempt(attempt);
-		}
-	});
-
-	client.on('error', err => {
-		clearLoginWatchdog(attempt);   // 明确错误(如密码错误/限频):不再走超时重试
-		attempt.gcConnected = false;
-		attempt.cs2GcConnected = false;
-		attempt.tf2GcConnected = false;
-		attempt.status = 'failed';
-		// LoggedInElsewhere/被顶号/封禁/密码错等致命错误标记为不自动重连(避免与你的其它登录抢号/无效硬冲)。
-		markAttemptDisconnected(attempt, isFatalReconnectEResult(err && err.eresult));
-		addLog(attempt, 'error', formatSteamError(attempt, err));
-		emitAttempt(attempt);
-	});
-}
-
 function attachCs2GcEvents(attempt, csgo) {
 	csgo.on('connectedToGC', () => {
 		attempt.cs2GcConnected = true;
@@ -3334,66 +2979,8 @@ function waitForAttemptGcConnection(attempt, game, timeoutMs = PURCHASE_GC_TIMEO
 	});
 }
 
-function withCmFallback(attempt, client) {
-	const originalApiRequest = client._apiRequest.bind(client);
-	client._apiRequest = async function patchedApiRequest(httpMethod, iface, method, version, data, cacheSeconds) {
-		try {
-			return await originalApiRequest(httpMethod, iface, method, version, data, cacheSeconds);
-		} catch (err) {
-			if (iface === 'ISteamDirectory' && method === 'GetCMListForConnect') {
-				if (!attempt.cmFallbackApplied) {
-					attempt.cmFallbackApplied = true;
-					addLog(attempt, 'warn', 'Steam 目录服务不可达，改用本地 WebSocket CM');
-					emitAttempt(attempt);
-				}
-				return {
-					response: {
-						serverlist: LOCAL_CM_FALLBACKS
-					}
-				};
-			}
-			throw err;
-		}
-	};
-}
-
-function shouldIgnoreDebugMessage(message) {
-	return /^Error reading file machineAuthToken\..+ENOENT:/i.test(message);
-}
-
-function formatSteamError(attempt, err) {
-	const message = err && err.message ? err.message : String(err || '未知错误');
-	if (attempt.cmFallbackApplied && /timed out|ECONNREFUSED|socket hang up|connect/i.test(message)) {
-		return '连接 Steam CM 失败，请检查当前网络是否允许访问 cm0.steampowered.com:443';
-	}
-	if (/GetCMListForConnect|Request timed out/i.test(message)) {
-		return '无法连接 Steam 目录服务，请检查当前网络或代理设置';
-	}
-	return message;
-}
-
 function saveSession(attempt) {
-	if (!attempt.remember) {
-		return;
-	}
-
-	const key = safeName(attempt.accountName || attempt.steamID || attempt.id);
-	const payload = {
-		accountName: attempt.accountName,
-		steamID: attempt.steamID,
-		personaName: attempt.personaName,
-		country: attempt.country,
-		hasWallet: attempt.hasWallet,
-		currency: attempt.currency,
-		balance: attempt.balance,
-		refreshToken: attempt.refreshToken,
-		cookies: attempt.cookies,
-		cookieHeader: attempt.cookies.join('; '),
-		updatedAt: new Date().toISOString()
-	};
-
-	store.sessions.put(key, payload);
-	addLog(attempt, 'info', '已保存 session(加密): ' + key);
+	sessions.saveSession(attempt);
 }
 
 function getAttempt(id, res) {
@@ -3407,50 +2994,15 @@ function getAttempt(id, res) {
 }
 
 function addLog(attempt, level, message) {
-	attempt.logs.push({
-		level,
-		time: new Date().toLocaleTimeString('zh-CN', {hour12: false}),
-		message
-	});
-
-	if (attempt.logs.length > 300) {
-		attempt.logs.shift();
-	}
+	sessions.addLog(attempt, level, message);
 }
 
 function emitAttempt(attempt) {
-	io.emit('attempt:update', publicAttempt(attempt));
+	sessions.emit(attempt);
 }
 
 function publicAttempt(attempt) {
-	return {
-		id: attempt.id,
-		accountName: attempt.accountName,
-		status: attempt.status,
-		hasMaFile: !!attempt.hasMaFile,
-		hasIdentitySecret: !!attempt.identitySecret,
-		steamID: attempt.steamID,
-		personaName: attempt.personaName,
-		country: attempt.country,
-		loginGeoCountry: attempt.loginGeoCountry,
-		hasWallet: attempt.hasWallet,
-		currency: attempt.currency,
-		currencyISO: attempt.currencyISO,
-		balance: attempt.balance,
-		publicIP: attempt.publicIP,
-		cellID: attempt.cellID,
-		cookieCount: attempt.cookieCount,
-		hasCookies: attempt.hasCookies,
-		hasRefreshToken: attempt.hasRefreshToken,
-		gcConnected: !!attempt.gcConnected,
-		cs2GcConnected: !!attempt.cs2GcConnected,
-		tf2GcConnected: !!attempt.tf2GcConnected,
-		activeGame: normalizePurchaseGame(attempt.activeGame),
-		inventoryCount: Number(attempt.inventoryCount || 0),
-		inventorySource: attempt.inventorySource || '',
-		guard: attempt.guard,
-		logs: attempt.logs
-	};
+	return sessions.publicAttempt(attempt);
 }
 
 function safeName(value) {

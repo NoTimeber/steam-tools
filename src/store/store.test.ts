@@ -149,3 +149,18 @@ test('同一把密钥重新打开,数据都在', () => {
 	assert.equal(again.accounts.get('a')?.password, 'p');
 	again.close();
 });
+
+test('登录意图:设在线/离线、按账号名不区分大小写、删除', () => {
+	const {store} = freshStore();
+	assert.deepEqual(store.loginIntents.listOnline(), []);
+	store.loginIntents.setOnline('Alice', true);
+	store.loginIntents.setOnline('bob', true);
+	store.loginIntents.setOnline('carol', false);
+	assert.deepEqual(store.loginIntents.listOnline().sort(), ['Alice', 'bob']);
+	assert.equal(store.loginIntents.isOnline('ALICE'), true);
+	store.loginIntents.setOnline('alice', false);
+	assert.equal(store.loginIntents.isOnline('Alice'), false);
+	store.loginIntents.remove(['BOB', 'nobody']);
+	assert.deepEqual(store.loginIntents.listOnline(), []);
+	store.close();
+});

@@ -71,5 +71,18 @@ export const MIGRATIONS: readonly Migration[] = [
 				updated_at   TEXT NOT NULL
 			);
 		`
+	},
+	{
+		version: 2,
+		name: 'steam-login-intents',
+		sql: `
+			-- 哪些账号应当保持在线(重启后自动恢复登录用)
+			CREATE TABLE steam_login_intents (
+				account_key  TEXT PRIMARY KEY,
+				account_name TEXT NOT NULL,
+				want_online  INTEGER NOT NULL,
+				updated_at   TEXT NOT NULL
+			);
+		`
 	}
 ];

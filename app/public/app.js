@@ -962,7 +962,9 @@ async function loginAccount(account, options = {}) {
 			password: account.password,
 			twoFactorCode: account.twoFactorCode || '',
 			sharedSecret: account.sharedSecret || '',
-			remember: account.remember !== false
+			remember: account.remember !== false,
+			// 服务端同账号已在登录中/在线时会直接返回现有会话;force 时强制重登
+			force: !!options.force
 		});
 		mergeAttempt(data.attempt, account.id);
 	} catch (err) {

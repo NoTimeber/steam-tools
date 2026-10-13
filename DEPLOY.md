@@ -109,7 +109,12 @@ git pull
 docker compose up -d --build
 ```
 
-容器停止时会先登出所有 Steam 会话。重启后需要在「账户管理」里重新登录账号（与以前本地重启一样）。
+容器停止时会先登出所有 Steam 会话。重启后会自动恢复上次在线的账号：
+
+- 优先用保存的 refreshToken 免密登录；refreshToken 失效时改用名单里的密码，加 maFile 生成的令牌。
+- 账号之间间隔 3 秒逐个登录（`SESSION_RESTORE_INTERVAL_MS`），避免触发 Steam 限频。
+- 手动登出、删除账号，或者遇到被顶号、密码错误这类错误的账号，不会被自动恢复。
+- 不想自动恢复可在 `.env` 里设 `SESSION_RESTORE=0`。
 
 ## 8. 备份
 
