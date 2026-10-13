@@ -1,6 +1,5 @@
 'use strict';
 
-const crypto = require('crypto');
 const fs = require('fs');
 const http = require('http');
 const path = require('path');
@@ -42,26 +41,21 @@ try {
 const SteamTotp = require('steam-totp');
 const SteamUser = require('steam-user');
 const {describeGcItem, loadItemsGameSchema} = require('./items-game-schema');
-const {createAuth} = require('./lib/auth');
-const {createFingerprintStore} = require('./services/fingerprint');
-const {writeFileAtomic, writeJsonAtomic, readJsonFileSafe} = require('./lib/atomic-file');
+// 基础设施(TypeScript):原子写盘、口令鉴权、反代/同源设置、启动器更新,见 src/core/;账号指纹见 src/steam/fingerprint.ts。
+const {writeFileAtomic, writeJsonAtomic, readJsonFileSafe} = require('../src/core/atomic-file.ts');
+const {createAuth} = require('../src/core/auth.ts');
+const {createOriginCheck, parseCookieSecure, parseTrustProxy} = require('../src/core/http.ts');
+const {createLauncherBridge} = require('../src/core/launcher.ts');
+const {createFingerprintStore} = require('../src/steam/fingerprint.ts');
 // 凭据数据层(TypeScript,由 Node 24 直接运行):SQLite + 字段加密,见 src/store/。
-const {openStore, normalizeStoredAccount} = require('../src/store/index.ts');
+const {openStore} = require('../src/store/index.ts');
 // Steam 登录会话管理(TypeScript):每账号一个会话、登录/重连看门狗、重启自动恢复,见 src/steam/。
 const {createSessionManager} = require('../src/steam/session-manager.ts');
 // GC 相关(TypeScript):币种表、游戏配置、GC 请求收发、钱包扣款授权、在线会话查询,见 src/steam/。
 const {currencyIdToIso} = require('../src/steam/currencies.ts');
-const {
-	GAME_CONFIGS: PURCHASE_GAME_CONFIGS,
-	normalizeGame: normalizePurchaseGame,
-	gameConfig: getPurchaseGameConfig
-} = require('../src/steam/games.ts');
-const {
-	ensureGameSession: ensureAttemptGameSession,
-	disconnectGameSession: disconnectAttemptGameSession
-} = require('../src/steam/gc-client.ts');
+const {normalizeGame: normalizePurchaseGame, gameConfig: getPurchaseGameConfig} = require('../src/steam/games.ts');
 const {installMicroTxnHooks} = require('../src/steam/microtxn.ts');
-const {findOnlineAttempt, findAttemptByKey: findAttemptInMap, listCookieFlowAccounts} = require('../src/steam/attempts.ts');
+const {findAttemptByKey: findAttemptInMap, listCookieFlowAccounts} = require('../src/steam/attempts.ts');
 // CS2/TF2 游戏内购(TypeScript):商品目录、GC 下单、内购任务,见 src/purchase/。
 const {createPurchaseService, normalizeCartData, publicTask: publicPurchaseTask} = require('../src/purchase/index.ts');
 // UU(悠悠有品)发货/自动上架/token 管理(TypeScript),见 src/uu/。
@@ -89,10 +83,10 @@ const DATA_DIR = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : pat
 const SESSION_DIR = path.join(DATA_DIR, 'sessions');
 const STEAM_USER_DIR = path.join(DATA_DIR, 'steam-user');
 
-// 账户指纹(machineID / machineName / User-Agent),按账号名稳定复用,见 services/fingerprint.js。
+// 账户指纹(machineID / machineName / User-Agent),按账号名稳定复用,见 src/steam/fingerprint.ts。
 const fingerprintStore = createFingerprintStore({
 	dataDir: DATA_DIR,
-	logger: (level, message) => console.log(`[fingerprint:${level}] ${message}`)
+	log: (level, message) => console.log(`[fingerprint:${level}] ${message}`)
 });
 
 // 登录重试:连接卡住(超时未拿到 WebSession)时自动重试,避免永久卡在"登录中"。
@@ -108,8 +102,6 @@ const SESSION_RESTORE_INTERVAL_MS = Math.max(1000, Number(process.env.SESSION_RE
 
 // launcher 在检测到新版本时写这个文件;前端据此提示"重启生效"。
 const UPDATE_STATUS_FILE = path.join(DATA_DIR, 'update-status.json');
-// 子进程以此退出码退出时,launcher 会"应用暂存更新并重启"(见 launcher.js)。
-const RESTART_EXIT_CODE = 75;
 // 静态参考资料(CS2/TF2 物品 schema + 本地化文案)。放在 app/schema/ 内,
 // 随 app.zip 一起打包发布(见 tools/build-release.js),这样 schema 更新能跟着
 // 自动更新一起下发,不必再单独往客户端 data/ 里塞文件。可用 SCHEMA_DIR 覆盖。
@@ -145,55 +137,9 @@ if (TF2_ITEMS_GAME_SCHEMA.error) {
 	console.warn('[tf2 items_game] failed to load schema:', TF2_ITEMS_GAME_SCHEMA.error);
 }
 
-// ===== 部署相关:反代信任 / cookie Secure / 同源校验 =====
-// TRUST_PROXY:未设置=loopback(只信任本机反代)。Docker 里反代经 bridge 网络进来,设 loopback,uniquelocal。
-// 也可填 true / 跳数 / 网段,语义同 Express 的 'trust proxy'。
-function parseTrustProxy(value) {
-	const v = String(value == null ? '' : value).trim();
-	if (!v) return 'loopback';
-	if (v === 'true') return true;
-	if (v === 'false') return false;
-	if (/^\d+$/.test(v)) return Number(v);
-	return v;
-}
-
-// COOKIE_SECURE:1=总是加 Secure;0=从不加;auto(默认)=经 HTTPS(含反代转发)访问时才加。
-function parseCookieSecure(value) {
-	const v = String(value == null ? '' : value).trim().toLowerCase();
-	if (v === '1' || v === 'true') return true;
-	if (v === '0' || v === 'false') return false;
-	return 'auto';
-}
-
-// 额外允许的来源(逗号分隔的完整 origin,如 https://tools.example.com)。默认只允许与请求 Host 同域。
-const ALLOWED_ORIGINS = new Set(String(process.env.ALLOWED_ORIGINS || '')
-	.split(',').map(item => item.trim().replace(/\/+$/, '').toLowerCase()).filter(Boolean));
-
-function headerHostname(value) {
-	const first = String(value || '').split(',')[0].trim();
-	if (!first) return '';
-	try {
-		return new URL('http://' + first).hostname.toLowerCase();
-	} catch (_) {
-		return '';
-	}
-}
-
-// 写操作和 WebSocket 握手的 CSRF 兜底:浏览器带了 Origin 时,其主机名必须等于本次请求的 Host
-// (或反代转发的 X-Forwarded-Host)。没有 Origin(curl 等非浏览器)放行;跨站页面伪造不了这些请求头。
-function isAllowedOrigin(headers) {
-	const origin = String((headers && headers.origin) || '').trim();
-	if (!origin) return true;
-	if (ALLOWED_ORIGINS.has(origin.replace(/\/+$/, '').toLowerCase())) return true;
-	let originHost;
-	try {
-		originHost = new URL(origin).hostname.toLowerCase();
-	} catch (_) {
-		return false; // 含 Origin: null(沙箱 iframe / file://)
-	}
-	const hosts = [headerHostname(headers.host), headerHostname(headers['x-forwarded-host'])].filter(Boolean);
-	return hosts.includes(originHost);
-}
+// ===== 部署相关:反代信任 / cookie Secure / 同源校验(src/core/http.ts)=====
+// 写操作和 WebSocket 握手的 CSRF 兜底:浏览器带的 Origin 必须和请求的 Host 同域,或在 ALLOWED_ORIGINS 里
+const isAllowedOrigin = createOriginCheck(process.env.ALLOWED_ORIGINS);
 
 // 调试端点(会返回 Steam cookies / 可触发真实下单),默认关闭,ENABLE_DEBUG_ENDPOINTS=1 才开。
 const DEBUG_ENDPOINTS_ENABLED = String(process.env.ENABLE_DEBUG_ENDPOINTS || '') === '1';
@@ -460,70 +406,31 @@ app.get('/api/attempts', (req, res) => {
 	res.json({success: true, attempts: accountService.listAttempts()});
 });
 
-function readUpdateStatus() {
-	try {
-		return JSON.parse(fs.readFileSync(UPDATE_STATUS_FILE, 'utf8'));
-	} catch (_) {
-		// 无文件 = 未检测到更新,按"无待更新"处理
-		return {pending: false};
-	}
-}
+// ===== 远程更新(旧版启动器,src/core/launcher.ts)=====
+const launcher = createLauncherBridge({statusFile: UPDATE_STATUS_FILE});
 
-// 远程更新:前端查询是否有已暂存待生效的新版本。
+// 前端查询是否有已暂存待生效的新版本。
 app.get('/api/update/status', (req, res) => {
-	res.json({success: true, status: readUpdateStatus()});
+	res.json({success: true, status: launcher.status()});
 });
 
-// 远程更新:手动触发一次检查。真实的联网拉取/验签/下载/暂存由 launcher 负责,
-// 这里经 IPC 把请求转给 launcher,等它完成后回读 update-status.json 返回。
-// 未经 launcher 启动(如 start-app-only)时无 IPC,退回返回本地已知状态。
-let pendingUpdateCheck = null;
-process.on('message', (msg) => {
-	if (msg && msg.type === 'check-update-done' && pendingUpdateCheck) {
-		const resolve = pendingUpdateCheck;
-		pendingUpdateCheck = null;
-		resolve(msg.status || readUpdateStatus());
-	}
-});
-
-app.post('/api/update/check', (req, res) => {
-	if (typeof process.send !== 'function') {
-		return res.json({
-			success: true, checked: false, status: readUpdateStatus(),
-			message: '当前未通过启动器运行,无法联网检查更新'
-		});
-	}
-	if (pendingUpdateCheck) {
-		return res.status(409).json({success: false, error: '已有检查在进行中,请稍候'});
-	}
-	const timer = setTimeout(() => {
-		if (pendingUpdateCheck) {
-			pendingUpdateCheck = null;
-			res.json({
-				success: true, checked: false, status: readUpdateStatus(),
-				message: '正在后台检查/下载,稍后将自动提示'
-			});
-		}
-	}, 25000);
-	pendingUpdateCheck = (status) => {
-		clearTimeout(timer);
-		res.json({success: true, checked: true, status: status || readUpdateStatus()});
-	};
+// 手动触发一次检查:经 IPC 转给启动器,等它做完回读状态;没经启动器运行时直接返回本地已知状态。
+app.post('/api/update/check', async (req, res) => {
 	try {
-		process.send({type: 'check-update'});
+		const result = await launcher.check();
+		if (result.busy) {
+			return res.status(409).json({success: false, error: '已有检查在进行中,请稍候'});
+		}
+		res.json({success: true, ...result});
 	} catch (err) {
-		clearTimeout(timer);
-		pendingUpdateCheck = null;
-		res.status(500).json({success: false, error: err.message || '无法联系启动器'});
+		res.status(500).json({success: false, error: err && err.message || '无法联系启动器'});
 	}
 });
 
-// 远程更新:一键重启以应用暂存的新版本。
-// 用特殊退出码退出,launcher 收到后会切换 app.next→app 再拉起新版。
+// 一键重启以应用暂存的新版本(启动器收到特殊退出码后切换 app.next → app 再拉起新版)。
 app.post('/api/update/restart', (req, res) => {
 	res.json({success: true, message: '正在重启以应用更新...'});
-	// 稍延迟,确保响应已发出再退出
-	setTimeout(() => process.exit(RESTART_EXIT_CODE), 300);
+	launcher.restart();
 });
 
 // ===== 账号与登录(src/accounts/)=====
@@ -965,7 +872,7 @@ function publicAttempt(attempt) {
 	return sessions.publicAttempt(attempt);
 }
 
-// 不存在返回 null;损坏时先备份坏文件再返回 null(见 lib/atomic-file.js)。
+// 不存在返回 null;损坏时先备份坏文件再返回 null(见 src/core/atomic-file.ts)。
 function readJsonFile(file) {
 	return readJsonFileSafe(file);
 }
