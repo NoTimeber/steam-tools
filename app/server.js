@@ -42,9 +42,6 @@ try {
 const SteamTotp = require('steam-totp');
 const SteamUser = require('steam-user');
 const {describeGcItem, loadItemsGameSchema} = require('./items-game-schema');
-const {UuAccount, SUBSTATUS_WAIT_CONFIRM, generateHeaders, generateRandomString, decodeJwt} = require('./lib/uuyoupin');
-const {UuPriceEngine} = require('./lib/uu-pricing');
-const {acceptVerifiedTradeOffer} = require('./lib/trade-offer');
 const {redeemForAccount} = require('./lib/wallet-code');
 const {createAuth} = require('./lib/auth');
 const {createFingerprintStore} = require('./services/fingerprint');
@@ -53,7 +50,7 @@ const {createSteamMarketBuyOrder} = require('./services/steamMarketBuyOrder');
 const {createCs2Terminal} = require('./lib/cs2-terminal');
 const {writeFileAtomic, writeJsonAtomic, readJsonFileSafe} = require('./lib/atomic-file');
 // 凭据数据层(TypeScript,由 Node 24 直接运行):SQLite + 字段加密,见 src/store/。
-const {openStore, normalizeStoredAccount, uuTokenId} = require('../src/store/index.ts');
+const {openStore, normalizeStoredAccount} = require('../src/store/index.ts');
 // Steam 登录会话管理(TypeScript):每账号一个会话、登录/重连看门狗、重启自动恢复,见 src/steam/。
 const {createSessionManager} = require('../src/steam/session-manager.ts');
 // GC 相关(TypeScript):币种表、游戏配置、GC 请求收发、钱包扣款授权、在线会话查询,见 src/steam/。
@@ -72,6 +69,8 @@ const {installMicroTxnHooks} = require('../src/steam/microtxn.ts');
 const {findOnlineAttempt} = require('../src/steam/attempts.ts');
 // CS2/TF2 游戏内购(TypeScript):商品目录、GC 下单、内购任务,见 src/purchase/。
 const {createPurchaseService, normalizeCartData, publicTask: publicPurchaseTask} = require('../src/purchase/index.ts');
+// UU(悠悠有品)发货/自动上架/token 管理(TypeScript),见 src/uu/。
+const {createUuService} = require('../src/uu/index.ts');
 
 const PORT = Number(process.env.PORT || 53110);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -267,60 +266,10 @@ const PURCHASE_CATALOG_CACHE_DIR = path.join(DATA_DIR, 'purchase-catalogs');
 fs.mkdirSync(PURCHASE_PRICE_SHEET_DIR, {recursive: true});
 fs.mkdirSync(PURCHASE_CATALOG_CACHE_DIR, {recursive: true});
 
-// ===== UU(悠悠有品)发货模块状态 =====
+// UU 旧版明文文件(首次启动导入加密库用,见下面的 openStore)
 const UU_DIR = path.join(DATA_DIR, 'uu');
 const UU_CONFIG_FILE = path.join(UU_DIR, 'delivery-config.json');
 const UU_TOKENS_FILE = path.join(UU_DIR, 'tokens.json');
-const UU_POLL_MIN_MS = 30 * 1000;          // 轮询最短间隔：30 秒
-const UU_POLL_MAX_MS = 120 * 60 * 1000;    // 轮询最长间隔：120 分钟
-const UU_POLL_DEFAULT_MS = 5 * 60 * 1000;  // 默认轮询间隔：5 分钟
-const UU_ORDER_COOLDOWN_MS = 5 * 60 * 1000; // 订单走完发货流程后冷却 5 分钟再重新检测，规避 UU 服务端状态延迟导致的误判失败
-// 防止访问频繁（对齐 Steamauto 的限速）：
-//   UU_DELIVER_GAP_MS        —— 同一轮内逐笔处理订单之间的间隔（Steamauto 每接受一笔等 5s）
-//   UU_CONFIRM_ACCEPT_GAP_MS —— 单笔内 UU confirmOffer 与 Steam 接受报价之间的间隔，给 UU 服务端留处理时间
-const UU_DELIVER_GAP_MS = 5 * 1000;
-const UU_CONFIRM_ACCEPT_GAP_MS = 1.5 * 1000;
-// CS2 自动上架：上架轮询间隔 + 每次市场查价限频（对齐 Steamauto operate_sleep，UU 查价限流较严）
-const UU_LIST_INTERVAL_MS = 30 * 60 * 1000; // 自动上架轮询：30 分钟
-const UU_LIST_QUERY_GAP = {min: 4000, max: 9000}; // 缓存未命中时每次市场查价之间的等待区间(ms)
-// 外部 CS2 检视(磨损)解析服务（自建，见 inspect-service/）。UU 未返回磨损时用它兜底；未配置则跳过该物品。
-const INSPECT_SERVICE_URL = (process.env.INSPECT_SERVICE_URL || '').replace(/\/+$/, '');
-const INSPECT_SERVICE_KEY = process.env.INSPECT_KEY || '';
-
-// 用外部解析服务把检视链接解析成磨损(float)；失败返回 null。
-async function resolveAbradeViaInspect(actionLink) {
-	if (!INSPECT_SERVICE_URL || !actionLink) return null;
-	try {
-		const u = new URL(INSPECT_SERVICE_URL + '/inspect');
-		u.searchParams.set('url', actionLink);
-		const headers = {};
-		if (INSPECT_SERVICE_KEY) headers['x-inspect-key'] = INSPECT_SERVICE_KEY; // 走 header，避免密钥进访问日志
-		const resp = await fetch(u, {headers, signal: AbortSignal.timeout(15000)});
-		const json = await resp.json();
-		if (json && json.success && json.iteminfo && json.iteminfo.floatvalue != null) {
-			const f = parseFloat(json.iteminfo.floatvalue);
-			return Number.isFinite(f) ? f : null;
-		}
-	} catch (err) {
-		// 解析服务不可用不致命，按"无磨损"处理
-	}
-	return null;
-}
-let UU_POLL_INTERVAL_MS = Math.min(UU_POLL_MAX_MS, Math.max(UU_POLL_MIN_MS, Number(process.env.UU_POLL_INTERVAL_MS) || UU_POLL_DEFAULT_MS));
-
-function clampUuPollMs(ms) {
-	const n = Number(ms);
-	if (!Number.isFinite(n) || n <= 0) {
-		return UU_POLL_DEFAULT_MS;
-	}
-	return Math.min(UU_POLL_MAX_MS, Math.max(UU_POLL_MIN_MS, Math.round(n)));
-}
-const UU_WAIT_CONFIRM_SUBSTATUS = SUBSTATUS_WAIT_CONFIRM; // 1103 = 待您确认报价
-// 支持并行发货的游戏（每个游戏独立开关/轮询/统计；token 通用，host 按游戏自动选）
-const DELIVER_GAME_IDS = [String(CS2_APP_ID), String(TF2_APP_ID)];
-const UU_LOGIN_SESSION_TTL_MS = 10 * 60 * 1000;
-const uuDelivery = new Map(); // accountName -> 发货状态
-const uuLoginSessions = new Map(); // loginSessionId -> 短信登录会话
 fs.mkdirSync(UU_DIR, {recursive: true});
 
 // 加密数据库:账户名单、maFile、Steam session、UU token/发货配置都存在这里(敏感字段 AES-256-GCM)。
@@ -410,6 +359,17 @@ const purchase = createPurchaseService({
 	priceSheetDir: PURCHASE_PRICE_SHEET_DIR,
 	readJson: readJsonFile,
 	writeJson: writeJsonAtomic
+});
+
+// UU 发货:token 和发货配置在加密库(store.uu);轮询间隔 UU_POLL_INTERVAL_MS(数据库里改过的优先);
+// 上架时 UU 没给磨损,用外部检视服务(INSPECT_SERVICE_URL / INSPECT_KEY,见 inspect-service/)兜底
+const uu = createUuService({
+	store: store.uu,
+	attempts: () => attempts.values(),
+	emit: (event, payload) => io.emit(event, payload),
+	hasMaFile: accountName => !!readLocalAccountProfile(accountName).hasMaFile,
+	pollIntervalMs: Number(process.env.UU_POLL_INTERVAL_MS) || undefined,
+	inspect: {url: process.env.INSPECT_SERVICE_URL || '', key: process.env.INSPECT_KEY || ''}
 });
 
 app.disable('x-powered-by');
@@ -1865,237 +1825,121 @@ app.post('/api/market/buyorders/sync', async (req, res) => {
 });
 
 // ===== UU(悠悠有品)发货 =====
+function sendUuError(res, err, fallback) {
+	res.status(err && err.statusCode || 500).json({success: false, error: err && err.message || fallback});
+}
+
 app.get('/api/uu/state', (req, res) => {
-	res.json({
-		success: true,
-		pollIntervalMs: UU_POLL_INTERVAL_MS,
-		accounts: listUuAccounts()
-	});
+	res.json({success: true, ...uu.state()});
 });
 
+// 绑定:手动粘贴传 token;自动绑定传 tokenId(浏览器拿不到 token 原文)
 app.post('/api/uu/bind', async (req, res) => {
 	try {
-		const body = req.body || {};
-		// 浏览器拿不到 token 原文:自动绑定时传 tokenId,由服务端查出 token;手动粘贴时仍直接传 token。
-		let token = String(body.token || '').trim();
-		if (!token && body.tokenId) {
-			const entry = store.uu.findToken(String(body.tokenId));
-			if (!entry) {
-				return res.status(404).json({success: false, error: '找不到该 token,请刷新后重试'});
-			}
-			token = entry.token;
-		}
-		const account = await bindUuToken(body.accountName, token, body.gameId);
-		res.json({success: true, account});
+		res.json({success: true, account: await uu.bind(req.body || {})});
 	} catch (err) {
-		res.status(err.statusCode || 500).json({success: false, error: err.message || 'token 绑定失败'});
+		sendUuError(res, err, 'token 绑定失败');
 	}
 });
-
 
 app.post('/api/uu/auto', (req, res) => {
 	try {
 		const body = req.body || {};
-		const account = setUuAuto(body.accountName, body.gameId, !!body.enabled);
-		res.json({success: true, account});
+		res.json({success: true, account: uu.setAuto(body.accountName, body.gameId, !!body.enabled)});
 	} catch (err) {
-		res.status(err.statusCode || 500).json({success: false, error: err.message || '操作失败'});
+		sendUuError(res, err, '操作失败');
 	}
 });
-
 
 app.post('/api/uu/scan', async (req, res) => {
 	try {
 		const body = req.body || {};
-		const account = await runUuDeliveryPass(body.accountName, body.gameId, {source: 'manual'});
-		res.json({success: true, account});
+		res.json({success: true, account: await uu.scan(body.accountName, body.gameId)});
 	} catch (err) {
-		res.status(err.statusCode || 500).json({success: false, error: err.message || '扫描发货失败'});
+		sendUuError(res, err, '扫描发货失败');
 	}
 });
 
 app.get('/api/uu/orders/:account', async (req, res) => {
 	try {
-		const orders = await getUuWaitDeliverOrders(req.params.account);
-		res.json({success: true, orders});
+		res.json({success: true, orders: await uu.waitDeliverOrders(req.params.account)});
 	} catch (err) {
-		res.status(err.statusCode || 500).json({success: false, error: err.message || '读取待发货列表失败'});
+		sendUuError(res, err, '读取待发货列表失败');
 	}
 });
 
-// CS2 自动上架：开关 + 手动触发一次上架扫描
+// CS2 自动上架:开关 + 手动触发一次
 app.post('/api/uu/list/auto', (req, res) => {
 	try {
 		const body = req.body || {};
-		const account = setUuListAuto(body.accountName, !!body.enabled);
-		res.json({success: true, account});
+		res.json({success: true, account: uu.setListAuto(body.accountName, !!body.enabled)});
 	} catch (err) {
-		res.status(err.statusCode || 500).json({success: false, error: err.message || '操作失败'});
+		sendUuError(res, err, '操作失败');
 	}
 });
 
 app.post('/api/uu/list/scan', async (req, res) => {
 	try {
-		const body = req.body || {};
-		const account = await runUuListingPass(body.accountName, {source: 'manual'});
-		res.json({success: true, account});
+		res.json({success: true, account: await uu.listScan((req.body || {}).accountName)});
 	} catch (err) {
-		res.status(err.statusCode || 500).json({success: false, error: err.message || '上架扫描失败'});
+		sendUuError(res, err, '上架扫描失败');
 	}
 });
 
 app.post('/api/uu/poll-interval', (req, res) => {
 	try {
-		const minutes = Number((req.body || {}).minutes);
-		if (!Number.isFinite(minutes) || minutes <= 0) {
-			throw uuError(400, '请输入有效的轮询分钟数');
-		}
-		const pollIntervalMs = setUuPollInterval(minutes * 60 * 1000);
-		res.json({success: true, pollIntervalMs});
+		res.json({success: true, pollIntervalMs: uu.setPollIntervalMinutes((req.body || {}).minutes)});
 	} catch (err) {
-		res.status(err.statusCode || 500).json({success: false, error: err.message || '设置轮询间隔失败'});
+		sendUuError(res, err, '设置轮询间隔失败');
 	}
 });
 
-// 悠悠短信登录获取 token（两步：start 发码 → verify 登录）
+// 悠悠短信登录拿 token(两步:start 发码 → verify 登录);返回给浏览器的只有 tokenId,没有 token 原文
 app.post('/api/uu/login/start', async (req, res) => {
 	try {
-		const data = await startUuSmsLogin((req.body || {}).phone);
-		res.json({success: true, ...data});
+		res.json({success: true, ...await uu.loginStart((req.body || {}).phone)});
 	} catch (err) {
-		res.status(err.statusCode || 500).json({success: false, error: err.message || '发送验证码失败'});
+		sendUuError(res, err, '发送验证码失败');
 	}
 });
 
 app.post('/api/uu/login/verify', async (req, res) => {
 	try {
-		const body = req.body || {};
-		const data = await verifyUuSmsLogin({
-			loginSessionId: body.loginSessionId,
-			code: body.code,
-			accountName: body.accountName,
-			gameId: body.gameId
-		});
-		const {token, ...rest} = data || {};
-		res.json({success: true, ...rest, tokenId: token ? uuTokenId({token, userId: rest.userId}) : ''});
+		res.json({success: true, ...await uu.loginVerify(req.body || {})});
 	} catch (err) {
-		res.status(err.statusCode || 500).json({success: false, error: err.message || '登录失败'});
+		sendUuError(res, err, '登录失败');
 	}
 });
 
 app.post('/api/uu/login/cancel', (req, res) => {
-	const id = String((req.body || {}).loginSessionId || '');
-	if (id) {
-		uuLoginSessions.delete(id);
-	}
+	uu.loginCancel((req.body || {}).loginSessionId);
 	res.json({success: true});
 });
 
-// ===== 独立 token 管理（不依赖账号选择）=====
-// 获取 token 后先存到这里(加密库 uu_tokens 表)，等下再绑到具体 Steam 账号
-
-function loadUuTokens() {
-	return store.uu.listTokens();
-}
-
-function saveUuTokens(tokens) {
-	try {
-		store.uu.replaceTokens(Array.isArray(tokens) ? tokens : []);
-	} catch (err) {
-		console.warn('[uu] 保存 token 列表失败:', err.message);
-	}
-}
-
-// 下发给浏览器的 token 条目:不含 token 原文,只给稳定 id 和掩码;绑定/删除都按 id 进行。
-function publicUuTokenEntry(entry) {
-	const {token, ...rest} = entry || {};
-	return {...rest, id: uuTokenId(entry || {}), tokenMask: maskUuToken(token)};
-}
-
+// ===== 独立 token 管理(先存进加密库,再绑到具体 Steam 账号)=====
 app.post('/api/uu/token/acquire', async (req, res) => {
 	try {
-		const body = req.body || {};
-		const token = String(body.token || '').trim();
-		const gameId = uuDefaultGameId(body.gameId); // 仅用于选查询网关，token 通用
-		if (!token) {
-			return res.status(400).json({success: false, error: 'token 不能为空'});
-		}
-
-		// 解析 JWT 拿身份
-		const jwt = decodeJwt(token);
-		const userId = jwt && jwt.Id ? String(jwt.Id) : '';
-		const nickname = jwt && jwt.Name ? String(jwt.Name) : '';
-		const jwtExp = jwt && jwt.exp ? Number(jwt.exp) : null;
-
-		// 调旧 API 查绑定的 Steam 账号
-		let linkedSteamId = '';
-		try {
-			const uu = new UuAccount(token, {gameId});
-			const pull = await uu.getSteamCookiePull();
-			linkedSteamId = pull.steamId || '';
-		} catch (err) {
-			// cookie/pull 失败不阻断，可能 token 没绑 Steam
-		}
-
-		const entry = {
-			token,
-			userId,
-			nickname,
-			linkedSteamId,
-			jwtExp,
-			acquiredAt: new Date().toISOString()
-		};
-
-		// 持久化：按 userId 去重，不按游戏（与 verifyUuSmsLogin 保持一致）
-		const tokens = loadUuTokens();
-		const idx = tokens.findIndex(t => t.userId === entry.userId);
-		if (idx >= 0) {
-			tokens[idx] = entry;
-		} else {
-			tokens.push(entry);
-		}
-		saveUuTokens(tokens);
-
-		res.json({success: true, token: publicUuTokenEntry(entry)});
+		res.json({success: true, token: await uu.acquireToken(req.body || {})});
 	} catch (err) {
-		res.status(err.statusCode || 500).json({success: false, error: err.message || '保存 token 失败'});
+		sendUuError(res, err, '保存 token 失败');
 	}
 });
 
 app.get('/api/uu/tokens', (req, res) => {
 	try {
-		res.json({success: true, tokens: loadUuTokens().map(publicUuTokenEntry)});
+		res.json({success: true, tokens: uu.listTokens()});
 	} catch (err) {
-		res.status(500).json({success: false, error: err.message || '读取 token 列表失败'});
+		sendUuError(res, err, '读取 token 列表失败');
 	}
 });
 
+// 按账号(解绑并移除)、按 tokenId(未匹配到账号的)、或按 token 原文(兼容)删除
 app.delete('/api/uu/token', (req, res) => {
 	try {
-		const body = req.body || {};
-		// 按账号删除（行内“删除 Token”按钮）：解绑该账号并从 token 列表移除
-		const accountName = String(body.accountName || '').trim();
-		if (accountName) {
-			const account = deleteUuAccountToken(accountName);
-			return res.json({success: true, account});
-		}
-		// 未匹配到账号的 token：按 id 删除(浏览器只有 id)
-		const tokenId = String(body.tokenId || '').trim();
-		if (tokenId) {
-			saveUuTokens(loadUuTokens().filter(t => uuTokenId(t) !== tokenId));
-			return res.json({success: true});
-		}
-		// 兼容：按 token 字符串删除
-		const token = String(body.token || '').trim();
-		if (!token) {
-			return res.status(400).json({success: false, error: 'tokenId、token 或 accountName 不能为空'});
-		}
-		let tokens = loadUuTokens();
-		tokens = tokens.filter(t => t.token !== token);
-		saveUuTokens(tokens);
-		res.json({success: true});
+		const account = uu.deleteToken(req.body || {});
+		res.json(account ? {success: true, account} : {success: true});
 	} catch (err) {
-		res.status(err.statusCode || 500).json({success: false, error: err.message || '删除 token 失败'});
+		sendUuError(res, err, '删除 token 失败');
 	}
 });
 
@@ -2237,6 +2081,7 @@ function shutdown(signal) {
 	shuttingDown = true;
 	console.log(`[shutdown] 收到 ${signal},登出 ${attempts.size} 个会话并关闭服务`);
 	sessions.shutdown();   // 不改登录意图:下次启动照常自动恢复
+	uu.stop();
 	io.close();
 	server.close(() => process.exit(0));
 	if (typeof server.closeAllConnections === 'function') {
@@ -2872,7 +2717,7 @@ function publicInventorySnapshot(snapshot) {
 }
 
 purchase.catalog.preload();
-initUuDelivery();
+uu.start();
 
 // 「买游戏」「市场求购」都是纯 cookie 的 HTTP 重放(steamStorePurchase / steamMarketBuyOrder),
 // 不需要活的 steam-user 连接,只要账号有有效 WebSession cookie 且未被手动登出即可用。
@@ -3106,10 +2951,6 @@ async function runBuyGameTask(task) {
 	task.status = 'completed';
 	task.finishedAt = new Date().toISOString();
 	emitBuyGameTask(task, 'buygame:task-completed');
-}
-
-function sleep(ms) {
-	return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 async function fetchCommunityInventorySnapshot(attempt) {
@@ -3378,1074 +3219,4 @@ function isLongLike(value) {
 		&& typeof value.high === 'number'
 		&& Object.prototype.hasOwnProperty.call(value, 'unsigned')
 	);
-}
-
-// ===================== UU(悠悠有品)发货模块 =====================
-
-function uuError(statusCode, message) {
-	const err = new Error(message);
-	err.statusCode = statusCode;
-	return err;
-}
-
-function normalizeUuGameId(value) {
-	const text = String(value == null ? '' : value).trim().toLowerCase();
-	if (text === '730' || text === 'cs2' || text === 'csgo') {
-		return String(CS2_APP_ID);
-	}
-	return String(TF2_APP_ID); // 默认 TF2=440
-}
-
-// 「没指定游戏」时用的默认游戏 = CS2。
-// normalizeUuGameId 的缺省是 TF2，那是给「明确选了游戏的发货开关」用的；
-// 而 token 获取/绑定本来就与游戏无关，缺省必须跟登录路径一致(登录、cookie-pull 都写死 730)，
-// 否则不传 gameId 会被悄悄判成 TF2，拿 TF2 网关去校验一个通用 token。
-function uuDefaultGameId(gameId) {
-	const text = String(gameId == null ? '' : gameId).trim();
-	return text ? normalizeUuGameId(text) : String(CS2_APP_ID);
-}
-
-function uuGameLabel(gameId) {
-	return String(gameId) === String(CS2_APP_ID) ? 'CS2' : 'TF2';
-}
-
-function maskUuToken(token) {
-	const text = String(token || '');
-	if (!text) {
-		return '';
-	}
-	if (text.length <= 12) {
-		return '****';
-	}
-	return text.slice(0, 4) + '…' + text.slice(-6);
-}
-
-// 取/建某账号某游戏的发货子状态（每游戏独立）
-function gameDelivery(state, gameId) {
-	const gid = String(gameId);
-	if (!state.byGame) state.byGame = {};
-	if (!state.byGame[gid]) {
-		state.byGame[gid] = {
-			auto: false,
-			pollTimer: null,
-			running: false,
-			status: 'idle', // idle | scanning | error
-			lastScanAt: '',
-			lastError: '',
-			stats: {scans: 0, delivered: 0, failed: 0, skipped: 0},
-			delivered: new Set(),     // 本会话已成功发货的 orderNo
-			orderCooldown: new Map()  // orderNo -> 冷却截止(ms)
-		};
-	}
-	return state.byGame[gid];
-}
-
-function ensureUuState(accountName) {
-	const name = String(accountName || '').trim();
-	let state = uuDelivery.get(name);
-	if (state) {
-		return state;
-	}
-	state = {
-		accountName: name,
-		token: '',
-		gameId: String(TF2_APP_ID), // 最近一次绑定的游戏（仅展示提示用）
-		nickname: '',
-		userId: null,
-		jwtExp: null,
-		boundAt: '',
-		recentOrders: [],
-		logs: [],
-		byGame: {}, // 每游戏发货子状态（lazily 创建）见 gameDelivery()
-		// ===== CS2 自动上架（与发货并行的独立子系统） =====
-		listAuto: false,           // 是否开启自动上架
-		listTimer: null,           // 上架轮询定时器
-		listRunning: false,        // 本轮上架进行中（防重入）
-		listStatus: 'idle',        // idle | listing | error
-		lastListAt: '',
-		listLastError: '',
-		listStats: {scans: 0, listed: 0, failed: 0, skipped: 0, noAbrade: 0, repriced: 0},
-		listConfig: null           // {maxPrice, whitelist:[], blacklist:[], dryRun, reprice}
-	};
-	uuDelivery.set(name, state);
-	return state;
-}
-
-function addUuLog(state, level, message) {
-	const entry = {
-		level,
-		time: new Date().toLocaleTimeString('zh-CN', {hour12: false}),
-		message
-	};
-	state.logs.push(entry);
-	if (state.logs.length > 200) {
-		state.logs.shift();
-	}
-	const line = `[uu:${state.accountName}] ${message}`;
-	if (level === 'error') {
-		console.error(line);
-	} else if (level === 'warn') {
-		console.warn(line);
-	}
-	// 推送到前端右侧实时日志（含订单 id 与发货结果）
-	io.emit('uu:log', {accountName: state.accountName, level, message, time: entry.time});
-}
-
-function loadUuConfig() {
-	const raw = store.uu.loadDeliveryConfig();
-	if (!raw || typeof raw !== 'object') {
-		return;
-	}
-	if (raw.__settings__ && raw.__settings__.pollIntervalMs != null) {
-		UU_POLL_INTERVAL_MS = clampUuPollMs(raw.__settings__.pollIntervalMs);
-	}
-	for (const [accountName, cfg] of Object.entries(raw)) {
-		const name = String(accountName || '').trim();
-		if (!name || name.startsWith('__') || !cfg || typeof cfg !== 'object') {
-			continue;
-		}
-		const token = String(cfg.token || '').trim();
-		if (!token) {
-			continue;
-		}
-		const state = ensureUuState(name);
-		state.token = token;
-		state.gameId = normalizeUuGameId(cfg.gameId);
-		state.nickname = String(cfg.nickname || '');
-		state.userId = cfg.userId == null ? null : String(cfg.userId);
-		state.jwtExp = cfg.jwtExp == null ? null : Number(cfg.jwtExp);
-		state.boundAt = String(cfg.boundAt || '');
-		state.listAuto = !!cfg.listAuto;
-		state.listConfig = cfg.listConfig && typeof cfg.listConfig === 'object' ? cfg.listConfig : null;
-		// 每游戏发货开关
-		if (cfg.delivery && typeof cfg.delivery === 'object') {
-			for (const gid of DELIVER_GAME_IDS) {
-				gameDelivery(state, gid).auto = !!(cfg.delivery[gid] && cfg.delivery[gid].auto);
-			}
-		} else {
-			// 迁移旧配置：单游戏 {auto, gameId} → 对应游戏开关
-			gameDelivery(state, normalizeUuGameId(cfg.gameId)).auto = cfg.auto !== false;
-		}
-	}
-}
-
-function saveUuConfig() {
-	const out = {};
-	out.__settings__ = {pollIntervalMs: UU_POLL_INTERVAL_MS};
-	for (const [name, state] of uuDelivery) {
-		if (!state.token) {
-			continue;
-		}
-		const delivery = {};
-		for (const gid of DELIVER_GAME_IDS) {
-			if (state.byGame && state.byGame[gid]) delivery[gid] = {auto: !!state.byGame[gid].auto};
-		}
-		out[name] = {
-			token: state.token,
-			gameId: state.gameId,
-			nickname: state.nickname || '',
-			userId: state.userId == null ? null : String(state.userId),
-			jwtExp: state.jwtExp == null ? null : Number(state.jwtExp),
-			boundAt: state.boundAt || '',
-			delivery,
-			listAuto: !!state.listAuto,
-			listConfig: state.listConfig || null
-		};
-	}
-	try {
-		store.uu.saveDeliveryConfig(out);
-	} catch (err) {
-		console.warn('[uu] 保存发货配置失败:', err.message);
-	}
-}
-
-
-// 按 SteamID 查找已登录的 attempt（用于 UU token 自动匹配绑定）
-function findAttemptBySteamId(steamId) {
-	const sid = String(steamId || '').trim();
-	if (!sid) return null;
-	for (const attempt of attempts.values()) {
-		if (attempt.steamID === sid && attempt.accountName) return attempt;
-	}
-	return null;
-}
-function initUuDelivery() {
-	try {
-		loadUuConfig();
-	} catch (err) {
-		console.warn('[uu] 载入发货配置失败:', err.message);
-	}
-	for (const state of uuDelivery.values()) {
-		if (state.token) {
-			for (const gid of DELIVER_GAME_IDS) {
-				if (gameDelivery(state, gid).auto) startUuPolling(state, gid);
-			}
-			if (state.listAuto) startUuListPolling(state);
-		}
-	}
-}
-
-// 发货需要：steam 账号在线 + WebSession cookies + identity_secret(手机确认)
-function uuAttemptReadiness(accountName) {
-	const attempt = findOnlineAttempt(attempts.values(), accountName);
-	if (!attempt) {
-		return {attempt: null, online: false, hasCookies: false, hasIdentitySecret: false, steamID: ''};
-	}
-	return {
-		attempt,
-		online: true,
-		hasCookies: Array.isArray(attempt.cookies) && attempt.cookies.length > 0,
-		hasIdentitySecret: !!attempt.identitySecret,
-		steamID: attempt.steamID || ''
-	};
-}
-
-function publicUuAccount(accountName) {
-	const name = String(accountName || '').trim();
-	const state = uuDelivery.get(name) || null;
-	const ready = uuAttemptReadiness(name);
-	const profile = state ? null : readLocalAccountProfile(name);
-	// 每游戏发货状态
-	const delivery = {};
-	for (const gid of DELIVER_GAME_IDS) {
-		const g = state && state.byGame && state.byGame[gid] ? state.byGame[gid] : null;
-		delivery[gid] = {
-			gameId: gid,
-			gameLabel: uuGameLabel(gid),
-			auto: !!(g && g.auto),
-			status: g ? g.status : 'idle',
-			lastScanAt: g ? g.lastScanAt : '',
-			lastError: g ? g.lastError : '',
-			stats: g ? {...g.stats} : {scans: 0, delivered: 0, failed: 0, skipped: 0}
-		};
-	}
-	return {
-		accountName: name,
-		bound: !!(state && state.token),
-		gameId: state ? state.gameId : String(TF2_APP_ID),
-		nickname: state ? state.nickname : '',
-		// UU 用户 id：前端用它把已获取的 token 与本行对应起来，
-		// 从而判断哪些 token 还没匹配到「账户管理」里的账号。
-		userId: state && state.userId ? String(state.userId) : '',
-		tokenMask: state ? maskUuToken(state.token) : '',
-		tokenExpiresAt: state && state.jwtExp ? new Date(state.jwtExp * 1000).toISOString() : '',
-		tokenExpired: !!(state && state.jwtExp && state.jwtExp * 1000 < Date.now()),
-		delivery, // 每游戏: {gameId, gameLabel, auto, status, lastScanAt, lastError, stats}
-		recentOrders: state ? state.recentOrders.slice(0, 20) : [],
-		logs: state ? state.logs.slice(-60) : [],
-		online: ready.online,
-		hasCookies: ready.hasCookies,
-		hasIdentitySecret: ready.hasIdentitySecret,
-		hasMaFile: state ? ready.hasIdentitySecret : !!(profile && profile.hasMaFile),
-		steamID: ready.steamID,
-		// CS2 自动上架
-		listAuto: state ? !!state.listAuto : false,
-		listStatus: state ? state.listStatus : 'idle',
-		lastListAt: state ? state.lastListAt : '',
-		listLastError: state ? state.listLastError : '',
-		listStats: state ? {...state.listStats} : {scans: 0, listed: 0, failed: 0, skipped: 0, noAbrade: 0, repriced: 0}
-	};
-}
-
-// 发货列表由「已获取的 UU token」驱动，不再把当前在线的 Steam 账号也塞进来。
-// token 由用户自行获取，再按 UU 绑定的 SteamID 与「账户管理」里的账号比对绑定；
-// 账号是否在线只是行内的提示（离线时前端给出「登录账户」按钮），不决定是否入列。
-function listUuAccounts() {
-	const names = new Set();
-	for (const [name, state] of uuDelivery) {
-		if (state.token) {
-			names.add(name);
-		}
-	}
-	return Array.from(names)
-		.filter(Boolean)
-		.sort((left, right) => left.localeCompare(right, 'zh-CN'))
-		.map(publicUuAccount);
-}
-
-function emitUuAccount(accountName) {
-	io.emit('uu:update', publicUuAccount(accountName));
-}
-
-async function bindUuToken(accountName, token, gameId) {
-	const name = String(accountName || '').trim();
-	const tok = String(token || '').trim();
-	if (!name) {
-		throw uuError(400, '账号不能为空');
-	}
-	if (!tok) {
-		throw uuError(400, 'token 不能为空');
-	}
-	// gid 只用来选校验网关(token 通用)；不传就走 CS2，别落到 TF2 上去校验。
-	const gid = uuDefaultGameId(gameId);
-	const state = ensureUuState(name);
-
-	let account;
-	try {
-		// UuAccount.create 会解 JWT 并打一次 waitDeliverList 验证 token 有效
-		account = await UuAccount.create(tok, {
-			gameId: gid,
-			logger: (level, message) => {
-				if (level !== 'debug') {
-					addUuLog(state, level, message);
-				}
-			}
-		});
-	} catch (err) {
-		throw uuError(400, 'token 校验失败: ' + (err && err.message ? err.message : err));
-	}
-
-	state.token = tok;
-	state.gameId = gid;
-	state.nickname = account.getUserNickname() || '';
-	state.userId = account.userId || null;
-	state.jwtExp = account.jwtExp || null;
-	state.boundAt = new Date().toISOString();
-	addUuLog(
-		state,
-		'info',
-		`已绑定 token：${state.nickname || '(无昵称)'} | 到期 ${state.jwtExp ? new Date(state.jwtExp * 1000).toLocaleString('zh-CN') : '未知'}（在 CS2/TF2 开关里分别开启自动发货）`
-	);
-	saveUuConfig();
-	emitUuAccount(name);
-	return publicUuAccount(name);
-}
-
-
-// 删除某账号已获取/绑定的 token：停轮询 + 清空绑定状态 + 从 token 列表移除
-function deleteUuAccountToken(accountName) {
-	const name = String(accountName || '').trim();
-	if (!name) {
-		throw uuError(400, '账号不能为空');
-	}
-	const state = uuDelivery.get(name);
-	if (!state || !state.token) {
-		throw uuError(409, '该账号尚未绑定 token');
-	}
-	const removedToken = state.token;
-	const removedUserId = state.userId == null ? '' : String(state.userId); // 必须在下面清空 state 之前取
-	for (const gid of DELIVER_GAME_IDS) {
-		stopUuPolling(state, gid);
-		if (state.byGame && state.byGame[gid]) state.byGame[gid].auto = false;
-	}
-	stopUuListPolling(state);
-	state.token = '';
-	state.listAuto = false;
-	state.nickname = '';
-	state.userId = null;
-	state.jwtExp = null;
-	state.boundAt = '';
-	addUuLog(state, 'info', '已删除该账号的 UU token，自动发货已停止');
-	saveUuConfig();
-	// 同步从已获取 token 列表中移除该 token。
-	// 按 userId 删(顺带兼容按 token 字符串)：历史上同一 UU 账号可能因为按游戏分开存
-	// 而留下多条记录，只按 token 字符串过滤会漏删，残留那条会被前端自动绑定逻辑再绑回来。
-	try {
-		const tokens = loadUuTokens().filter(t =>
-			t.token !== removedToken && !(removedUserId && String(t.userId) === removedUserId));
-		saveUuTokens(tokens);
-	} catch (err) {
-		console.warn('[uu] 清理 token 列表失败:', err.message);
-	}
-	emitUuAccount(name);
-	return publicUuAccount(name);
-}
-
-
-function setUuAuto(accountName, gameId, enabled) {
-	const name = String(accountName || '').trim();
-	const state = uuDelivery.get(name);
-	if (!state || !state.token) {
-		throw uuError(409, '该账号尚未绑定 token');
-	}
-	const gid = normalizeUuGameId(gameId);
-	const g = gameDelivery(state, gid);
-	g.auto = !!enabled;
-	if (g.auto) {
-		startUuPolling(state, gid);
-		addUuLog(state, 'info', `已开启 ${uuGameLabel(gid)} 自动发货轮询`);
-	} else {
-		stopUuPolling(state, gid);
-		addUuLog(state, 'info', `已关闭 ${uuGameLabel(gid)} 自动发货轮询`);
-	}
-	saveUuConfig();
-	emitUuAccount(name);
-	return publicUuAccount(name);
-}
-
-
-function startUuPolling(state, gameId) {
-	const gid = String(gameId);
-	const g = gameDelivery(state, gid);
-	if (!state || !state.token || !g.auto || g.pollTimer) {
-		return;
-	}
-	g.pollTimer = setInterval(() => {
-		runUuDeliveryPass(state.accountName, gid, {source: 'auto'}).catch(() => {});
-	}, UU_POLL_INTERVAL_MS);
-	runUuDeliveryPass(state.accountName, gid, {source: 'auto'}).catch(() => {});
-}
-
-function stopUuPolling(state, gameId) {
-	const gid = String(gameId);
-	const g = state && state.byGame ? state.byGame[gid] : null;
-	if (g && g.pollTimer) {
-		clearInterval(g.pollTimer);
-		g.pollTimer = null;
-	}
-}
-
-// 设置全局轮询间隔（毫秒），并重启所有正在轮询的(账号×游戏)使其立即生效
-function setUuPollInterval(ms) {
-	UU_POLL_INTERVAL_MS = clampUuPollMs(ms);
-	for (const state of uuDelivery.values()) {
-		for (const gid of DELIVER_GAME_IDS) {
-			const g = state.byGame && state.byGame[gid];
-			if (g && g.pollTimer) {
-				stopUuPolling(state, gid);
-				startUuPolling(state, gid);
-			}
-		}
-	}
-	saveUuConfig();
-	return UU_POLL_INTERVAL_MS;
-}
-
-function pushUuRecord(state, record) {
-	state.recentOrders.unshift(record);
-	if (state.recentOrders.length > 30) {
-		state.recentOrders.length = 30;
-	}
-}
-
-// ===== CS2 自动上架 worker（与发货并行，独立生命周期） =====
-
-function startUuListPolling(state) {
-	if (!state || !state.token || !state.listAuto || state.listTimer) {
-		return;
-	}
-	state.listTimer = setInterval(() => {
-		runUuListingPass(state.accountName, {source: 'auto'}).catch(() => {});
-	}, UU_LIST_INTERVAL_MS);
-	runUuListingPass(state.accountName, {source: 'auto'}).catch(() => {});
-}
-
-function stopUuListPolling(state) {
-	if (state && state.listTimer) {
-		clearInterval(state.listTimer);
-		state.listTimer = null;
-	}
-}
-
-function setUuListAuto(accountName, enabled) {
-	const name = String(accountName || '').trim();
-	const state = uuDelivery.get(name);
-	if (!state || !state.token) {
-		throw uuError(409, '该账号尚未绑定 token');
-	}
-	state.listAuto = !!enabled;
-	if (state.listAuto) {
-		startUuListPolling(state);
-		addUuLog(state, 'info', '已开启 CS2 自动上架');
-	} else {
-		stopUuListPolling(state);
-		addUuLog(state, 'info', '已关闭 CS2 自动上架');
-	}
-	saveUuConfig();
-	emitUuAccount(name);
-	return publicUuAccount(name);
-}
-
-// 一次自动上架：拉 CS2 库存 → 过滤可上架皮肤 → 按磨损段定价 → 上架（仅出售）。
-// 磨损来源：UU 库存 AssetInfo.Abrade；缺失则跳过（待外部 GC 解析服务，P4）。上架仅处理 AssetStatus=0（未在售），天然避免重复上架。
-async function runUuListingPass(accountName, options = {}) {
-	const name = String(accountName || '').trim();
-	const state = uuDelivery.get(name);
-	if (!state || !state.token) {
-		throw uuError(409, '该账号尚未绑定 token');
-	}
-	if (state.listRunning) {
-		return publicUuAccount(name); // 上一轮未结束，跳过
-	}
-	const source = options.source || 'manual';
-
-	state.listRunning = true;
-	state.listStatus = 'listing';
-	state.lastListAt = new Date().toISOString();
-	state.listStats.scans += 1;
-	emitUuAccount(name);
-
-	try {
-		const cfg = state.listConfig || {};
-		const whitelist = Array.isArray(cfg.whitelist) ? cfg.whitelist.filter(Boolean) : [];
-		const blacklist = Array.isArray(cfg.blacklist) ? cfg.blacklist.filter(Boolean) : [];
-		const maxPrice = Number(cfg.maxPrice) > 0 ? Number(cfg.maxPrice) : 0;
-		const dryRun = !!cfg.dryRun;
-
-		// 上架是纯 UU 操作，不依赖 Steam 在线/cookies（那是发货才需要的）。token 通用，强制 CS2。
-		const uuLogger = (level, message) => {
-			if (level !== 'debug') {
-				addUuLog(state, level, message);
-			}
-		};
-		const uu = new UuAccount(state.token, {gameId: String(CS2_APP_ID), logger: uuLogger});
-		const engine = new UuPriceEngine({params: {requestGap: UU_LIST_QUERY_GAP}, logger: uuLogger});
-
-		// ===== Phase 1: 上架未在售的库存物品 =====
-		addUuLog(state, 'info', source === 'auto' ? 'CS2 自动上架: 开始扫描库存' : 'CS2 上架: 手动触发扫描');
-		const inventory = await uu.getInventory({refresh: true});
-
-		// 过滤：可交易 + 未在售(AssetStatus=0) + 有模板 + 命中白名单(空=全部) + 未命中黑名单
-		const candidates = [];
-		for (const it of inventory) {
-			if (!it.AssetInfo) continue;
-			if (it.Tradable !== true || it.AssetStatus !== 0) continue;
-			const tm = it.TemplateInfo || {};
-			const shortName = tm.CommodityName || '';
-			if (!tm.Id || !shortName) continue;
-			if (whitelist.length && !whitelist.some(s => s && shortName.includes(s))) continue;
-			if (blacklist.length && blacklist.some(s => s && shortName.includes(s))) {
-				addUuLog(state, 'info', `跳过(黑名单): ${shortName}`);
-				continue;
-			}
-			candidates.push(it);
-		}
-
-		const toSell = [];
-		if (candidates.length) {
-			addUuLog(state, 'info', `发现 ${candidates.length} 件可上架物品，开始按磨损定价...`);
-			for (const it of candidates) {
-				const tm = it.TemplateInfo;
-				const shortName = tm.CommodityName;
-				let abrade = parseFloat(it.AssetInfo && it.AssetInfo.Abrade);
-				if (!Number.isFinite(abrade)) {
-					// UU 未返回磨损 → 用外部 GC 解析服务兜底（见 inspect-service/）
-					const resolved = await resolveAbradeViaInspect(it.ActionLink);
-					if (resolved != null) {
-						abrade = resolved;
-						addUuLog(state, 'info', `外部解析磨损: ${shortName} → ${abrade.toFixed(4)}`);
-					} else {
-						state.listStats.noAbrade += 1;
-						addUuLog(state, 'warn', `跳过(无磨损${INSPECT_SERVICE_URL ? '，外部解析失败' : '，未配置外部解析服务'}): ${shortName}`);
-						continue;
-					}
-				}
-				let price = 0;
-				try {
-					price = await engine.getAbradeRelatedPrice(uu, tm.Id, shortName, abrade);
-				} catch (err) {
-					state.listStats.skipped += 1;
-					addUuLog(state, 'error', `定价失败 ${shortName}: ${err && err.message ? err.message : err}`);
-					continue;
-				}
-				if (!(price > 0)) {
-					state.listStats.skipped += 1;
-					addUuLog(state, 'info', `跳过(无参考价): ${shortName}`);
-					continue;
-				}
-				if (maxPrice && price > maxPrice) {
-					state.listStats.skipped += 1;
-					addUuLog(state, 'info', `跳过(超过最高价 ¥${maxPrice}): ${shortName} ¥${price}`);
-					continue;
-				}
-				addUuLog(state, 'info', `将上架: ${shortName}（磨损 ${abrade.toFixed(4)}） ¥${price}`);
-				toSell.push({AssetId: it.SteamAssetId, Price: price});
-			}
-		} else {
-			addUuLog(state, 'info', '无新可上架物品（库存无可交易/未在售的皮肤）');
-		}
-
-		if (toSell.length) {
-			if (dryRun) {
-				addUuLog(state, 'warn', `[dryRun] 仅试算，未真正上架 ${toSell.length} 件`);
-			} else {
-				const result = await uu.sellItems(toSell);
-				state.listStats.listed += result.success;
-				state.listStats.failed += result.fail;
-				addUuLog(state, result.success > 0 ? 'success' : 'warn', `上架完成: 成功 ${result.success} 件, 失败 ${result.fail} 件`);
-			}
-		}
-
-		// ===== Phase 2: 自动改价（对已在售物品按当前市场重新定价跟价） =====
-		if (cfg.reprice !== false) {
-			const sellList = await uu.getSellList();
-			const toChange = [];
-			for (const it of sellList) {
-				const shortName = it.name || '';
-				if (!shortName.includes('|')) continue; // 跳过非皮肤(存储组件等)
-				if (whitelist.length && !whitelist.some(s => s && shortName.includes(s))) continue;
-				if (blacklist.length && blacklist.some(s => s && shortName.includes(s))) continue;
-				const abrade = parseFloat(it.abrade);
-				if (!Number.isFinite(abrade)) continue; // 无磨损不参与改价
-				const commodityId = it.id;
-				if (!commodityId) continue;
-				const curPrice = parseFloat(it.sellAmount);
-				let newPrice = 0;
-				try {
-					newPrice = await engine.getAbradeRelatedPrice(uu, it.templateId, shortName, abrade);
-				} catch (err) {
-					addUuLog(state, 'error', `改价定价失败 ${shortName}: ${err && err.message ? err.message : err}`);
-					continue;
-				}
-				if (!(newPrice > 0)) continue;
-				if (maxPrice && newPrice > maxPrice) continue;
-				if (Number.isFinite(curPrice) && Math.abs(newPrice - curPrice) < 0.01) continue; // 价格未变化则不改
-				addUuLog(state, 'info', `将改价: ${shortName} ¥${Number.isFinite(curPrice) ? curPrice : '?'} → ¥${newPrice}`);
-				toChange.push({CommodityId: commodityId, Price: newPrice});
-			}
-			if (toChange.length) {
-				if (dryRun) {
-					addUuLog(state, 'warn', `[dryRun] 仅试算，未真正改价 ${toChange.length} 件`);
-				} else {
-					const cr = await uu.changeSalePrice(toChange);
-					state.listStats.repriced += cr.success;
-					addUuLog(state, cr.success > 0 ? 'success' : 'warn', `改价完成: 成功 ${cr.success} 件, 失败 ${cr.fail} 件`);
-				}
-			} else {
-				addUuLog(state, 'info', '无需改价（在售价格均为最新）');
-			}
-		}
-
-		state.listStatus = 'idle';
-		state.listLastError = '';
-	} catch (err) {
-		state.listStatus = 'error';
-		state.listLastError = err && err.message ? err.message : String(err);
-		addUuLog(state, 'error', 'CS2 自动上架失败: ' + state.listLastError);
-	} finally {
-		state.listRunning = false;
-		emitUuAccount(name);
-	}
-	return publicUuAccount(name);
-}
-
-async function runUuDeliveryPass(accountName, gameId, options = {}) {
-	const name = String(accountName || '').trim();
-	const state = uuDelivery.get(name);
-	if (!state || !state.token) {
-		throw uuError(409, '该账号尚未绑定 token');
-	}
-	const gid = normalizeUuGameId(gameId);
-	const label = uuGameLabel(gid);
-	const g = gameDelivery(state, gid);
-	if (g.running) {
-		return publicUuAccount(name); // 该游戏上一轮尚未结束，跳过
-	}
-	const source = options.source || 'manual';
-
-	g.running = true;
-	g.status = 'scanning';
-	g.lastScanAt = new Date().toISOString();
-	g.stats.scans += 1;
-	emitUuAccount(name);
-
-	try {
-		const ready = uuAttemptReadiness(name);
-		// 就绪检查（缺哪样都没法发货）。原因变化时才播报一次，避免自动轮询每 30s 刷屏。
-		let notReady = '';
-		if (!ready.online) {
-			notReady = 'Steam 账号未在线，无法发货——请先在「账户管理」登录该账号';
-		} else if (!ready.hasCookies) {
-			notReady = 'Steam 账号缺少 WebSession cookies，请在账户页重新登录/获取';
-		} else if (!ready.hasIdentitySecret) {
-			notReady = '缺少 identity_secret（maFile，手机令牌确认用），无法接受报价——请为该账号导入 maFile';
-		}
-		if (notReady) {
-			if (source !== 'auto' || g.lastSkipReason !== notReady) {
-				addUuLog(state, 'warn', `[${label}] ${notReady}`);
-			}
-			g.lastSkipReason = notReady;
-			g.status = ready.online ? 'error' : 'idle';
-			g.lastError = ready.online ? notReady : '';
-			return publicUuAccount(name);
-		}
-		g.lastSkipReason = ''; // 已就绪，清除上次的未就绪原因
-
-		const attempt = ready.attempt;
-		// 按游戏建 UuAccount：host 自动选（CS2→api.youpin898.com，TF2→g3-api）
-		const uu = new UuAccount(state.token, {
-			gameId: gid,
-			logger: (level, message) => {
-				if (level !== 'debug') {
-					addUuLog(state, level, `[${label}] ${message}`);
-				}
-			}
-		});
-
-			const beforeStats = {...g.stats};
-			const orders = await uu.getWaitDeliverList({gameId: gid});
-			// 先处理"待发送报价"订单（卖家需主动发报价）：发出报价后会转为"待确认报价"，下一轮再接受。
-			const needSend = orders.filter(isWaitSendOfferOrder);
-			if (needSend.length) {
-				addUuLog(state, 'info', `[${label}] 轮询: 发现 ${needSend.length} 笔待发送报价订单，尝试发送报价`);
-				for (let i = 0; i < needSend.length; i++) {
-					await sendUuOrderOffer(state, uu, needSend[i], label);
-					emitUuAccount(name);
-					if (i < needSend.length - 1) {
-						await sleep(UU_DELIVER_GAP_MS); // 逐笔间隔，避免频繁访问 UU 接口
-					}
-				}
-			}
-			const allPending = orders.filter(order => Number(order.orderSubStatus) === Number(UU_WAIT_CONFIRM_SUBSTATUS));
-			// 清理过期冷却记录，并跳过仍处于冷却期内的订单
-			const nowTs = Date.now();
-			for (const [ono, until] of g.orderCooldown) {
-				if (until <= nowTs) {
-					g.orderCooldown.delete(ono);
-				}
-			}
-			const pending = allPending.filter(order => {
-				const until = g.orderCooldown.get(order.orderNo);
-				return !(until && nowTs < until);
-			});
-			const cooling = allPending.length - pending.length;
-			if (!pending.length) {
-				if (source === 'auto') {
-					addUuLog(state, 'info', cooling > 0
-						? `[${label}] 轮询: 待确认报价订单均处于发货冷却期（${cooling} 笔），稍后再试`
-						: `[${label}] 轮询: 无待确认报价订单`);
-				} else {
-					addUuLog(state, 'info', `[${label}] 待发货列表无可处理的"待确认报价"订单（共 ${orders.length} 单${cooling > 0 ? `，${cooling} 笔冷却中` : ''}）`);
-				}
-				g.status = 'idle';
-				g.lastError = '';
-				return publicUuAccount(name);
-			}
-
-			addUuLog(state, 'info', `[${label}] 轮询: 发现 ${pending.length} 笔待确认报价，开始发货${cooling > 0 ? `（另有 ${cooling} 笔冷却中）` : ''}`);
-			for (let i = 0; i < pending.length; i++) {
-				await deliverUuOrder(state, g, uu, pending[i], attempt, gid, label);
-				emitUuAccount(name);
-				if (i < pending.length - 1) {
-					await sleep(UU_DELIVER_GAP_MS);
-				}
-			}
-			const delivered = (g.stats.delivered || 0) - (beforeStats.delivered || 0);
-			const failed = (g.stats.failed || 0) - (beforeStats.failed || 0);
-			if (delivered > 0 || failed > 0) {
-				addUuLog(state, delivered > 0 ? 'success' : 'warn', `[${label}] 本轮结果: 发货 ${delivered} 笔成功, ${failed} 笔失败`);
-			}
-			g.status = 'idle';
-			g.lastError = '';
-	} catch (err) {
-		g.status = 'error';
-		g.lastError = err && err.message ? err.message : String(err);
-		addUuLog(state, 'error', `[${label}] 发货轮询失败: ` + g.lastError);
-	} finally {
-		g.running = false;
-		emitUuAccount(name);
-	}
-	return publicUuAccount(name);
-}
-
-// 判断订单是否处于“待发送报价”（卖家需先主动发出 Steam 报价才能进入待确认报价 1103）。
-// 用子状态名匹配（含“发送报价”且非“确认”），避免依赖未知的子状态码，对齐 Steamauto 的消息匹配做法。
-function isWaitSendOfferOrder(order) {
-	const name = String(order && order.subStatusName || '');
-	return name.includes('发送报价') && !name.includes('确认');
-}
-
-// 处理“待发送报价”订单：调用 UU send-offer 发出报价，并轮询 get-offer-status 直到发送成功(status=3)。
-// 成功后该订单将转为“待确认报价”(1103)，由下一轮发货流程完成确认+接受。对齐 Steamauto send_offer 流程。
-async function sendUuOrderOffer(state, uu, order, label = '') {
-	const orderNo = order.orderNo;
-	const itemName = order.itemName || order.hashName || '';
-	const tag = label ? `[${label}] ` : '';
-	try {
-		addUuLog(state, 'info', `${tag}订单 ${orderNo}「${itemName}」处于「${order.subStatusName || '待发送报价'}」，尝试发送报价...`);
-		const result = await uu.sendOffer(orderNo);
-		if (result !== true) {
-			addUuLog(state, 'warn', `订单 ${orderNo} 发送报价失败: ${result}`);
-			return false;
-		}
-		addUuLog(state, 'info', `订单 ${orderNo} 报价发送中，等待发送完成...`);
-		for (let i = 0; i < 5; i++) {
-			await sleep(1500);
-			const status = await uu.getOfferStatus(orderNo);
-			const code = status && typeof status === 'object' ? Number(status.status) : null;
-			if (code === 3) {
-				addUuLog(state, 'success', `✅ 订单 ${orderNo} 报价已发送成功，将在下一轮自动确认接受`);
-				return true;
-			}
-			if (i === 4) {
-				addUuLog(state, 'warn', `订单 ${orderNo} 报价发送等待超时（最后状态: ${typeof status === 'object' ? JSON.stringify(status) : status}）`);
-			}
-		}
-		return false;
-	} catch (err) {
-		addUuLog(state, 'error', `订单 ${orderNo} 发送报价异常: ${err && err.message ? err.message : err}`);
-		return false;
-	}
-}
-
-async function deliverUuOrder(state, g, uu, order, attempt, gameId, label = '') {
-	const orderNo = order.orderNo;
-	const itemName = order.itemName || order.hashName || '';
-	const tag = label ? `[${label}] ` : '';
-
-	if (g.delivered.has(orderNo)) {
-		return; // 本会话已成功发货，避免重复接受
-	}
-
-	const record = {
-		orderNo,
-		itemName,
-		tradeOfferId: null,
-		ok: false,
-		reason: '',
-		at: new Date().toISOString()
-	};
-
-	try {
-		addUuLog(state, 'info', `${tag}订单 ${orderNo}「${itemName}」开始处理`);
-		const detail = await uu.getOrderDetail(orderNo);
-		const tradeOfferId = detail && detail.tradeOfferId;
-		const partnerSteamId = detail && detail.buyer && detail.buyer.steamId; // UU 报的对方 steamId(字符串)
-		const assetId = detail && detail.commodity && (detail.commodity.assetId || detail.commodity.assertId);
-		record.tradeOfferId = tradeOfferId || null;
-
-		if (!tradeOfferId) {
-			record.reason = '暂无 tradeOfferId（报价未发出/已取消）';
-			addUuLog(state, 'warn', `${tag}订单 ${orderNo} ${record.reason}，跳过`);
-			g.stats.skipped += 1;
-			pushUuRecord(state, record);
-			return;
-		}
-
-		// 进入实际发货流程：登记冷却，避免本订单在 UU 服务端状态延迟期间被重复接受报价（错误 11）
-		g.orderCooldown.set(orderNo, Date.now() + UU_ORDER_COOLDOWN_MS);
-
-		const verifyOptions = {
-			cookies: attempt.cookies,
-			identitySecret: attempt.identitySecret,
-			tradeOfferId,
-			expectedPartnerSteamId: partnerSteamId,
-			expectGiveAppId: Number(gameId),
-			expectGiveAssetIds: assetId ? [String(assetId)] : undefined,
-			logger: (level, message) => {
-				if (level !== 'debug') {
-					addUuLog(state, level, message);
-				}
-			}
-		};
-
-		// 阶段1（UU 侧）：confirmOffer 确认报价
-		const confirm = await uu.confirmOffer(orderNo, tradeOfferId);
-		if (confirm === true) {
-			addUuLog(state, 'info', `${tag}订单 ${orderNo} 阶段1 confirmOffer 成功`);
-		} else {
-			addUuLog(state, 'warn', `${tag}订单 ${orderNo} 阶段1 confirmOffer 返回: ${confirm}（继续尝试接受报价）`);
-		}
-
-		// 阶段1 与阶段2 之间留间隔：给 UU 服务端处理时间，并降低接口访问频率
-		await sleep(UU_CONFIRM_ACCEPT_GAP_MS);
-
-		// 阶段2（Steam 侧）：fail-closed 校验后接受报价 + identity_secret 手机确认
-		const result = await acceptVerifiedTradeOffer({...verifyOptions, dryRun: false});
-		record.ok = !!result.ok && !!result.accepted;
-		record.reason = result.reason;
-		if (record.ok) {
-			g.stats.delivered += 1;
-			g.delivered.add(orderNo);
-			addUuLog(state, 'success', `${tag}✅ 订单 ${orderNo}「${itemName}」发货成功（已接受+手机确认）`);
-		} else {
-			g.stats.failed += 1;
-			addUuLog(state, 'error', `${tag}⛔ 订单 ${orderNo} 接受报价失败(fail-closed): ${result.reason}`);
-		}
-		pushUuRecord(state, record);
-	} catch (err) {
-		record.reason = err && err.message ? err.message : String(err);
-		g.stats.failed += 1;
-		addUuLog(state, 'error', `${tag}订单 ${orderNo} 处理异常: ${record.reason}`);
-		pushUuRecord(state, record);
-	}
-}
-
-async function getUuWaitDeliverOrders(accountName) {
-	const name = String(accountName || '').trim();
-	const state = uuDelivery.get(name);
-	if (!state || !state.token) {
-		throw uuError(409, '该账号尚未绑定 token');
-	}
-	const logger = (level, message) => {
-		if (level !== 'debug') {
-			addUuLog(state, level, message);
-		}
-	};
-	// 两个游戏分别查（host 不同），合并返回
-	const out = [];
-	for (const gid of DELIVER_GAME_IDS) {
-		try {
-			const uu = new UuAccount(state.token, {gameId: gid, logger});
-			const orders = await uu.getDeliverableOrders({gameId: gid});
-			for (const order of orders) {
-				out.push({
-					gameId: gid,
-					gameLabel: uuGameLabel(gid),
-					orderNo: order.orderNo,
-					itemName: order.itemName,
-					hashName: order.hashName,
-					subStatus: order.orderSubStatus,
-					subStatusName: order.subStatusName,
-					tradeOfferId: order.tradeOfferId,
-					offerSendResult: order.offerSendResult,
-					sellAmount: order.sellAmount
-				});
-			}
-		} catch (err) {
-			addUuLog(state, 'warn', `[${uuGameLabel(gid)}] 读取待发货失败: ${err && err.message ? err.message : err}`);
-		}
-	}
-	return out;
-}
-
-// ===== 悠悠短信登录获取 token =====
-
-function pruneUuLoginSessions() {
-	const now = Date.now();
-	for (const [id, session] of uuLoginSessions) {
-		if (now - session.createdAt > UU_LOGIN_SESSION_TTL_MS) {
-			uuLoginSessions.delete(id);
-		}
-	}
-}
-
-// 第一步：生成设备会话 + 取 UK + 发送短信验证码（或检测到需要上行短信）
-async function startUuSmsLogin(phone) {
-	const tel = String(phone || '').trim();
-	if (!/^\d{6,15}$/.test(tel)) {
-		throw uuError(400, '手机号格式不正确');
-	}
-	pruneUuLoginSessions();
-
-	// 设备身份在 start/verify 之间必须保持一致（与 get-uu-token.js 对齐）
-	const deviceInfo = generateRandomString(10);
-	const headers = generateHeaders(deviceInfo, deviceInfo, '', '730');
-	const sessionId = deviceInfo;
-
-	let uk = '';
-	try {
-		uk = await UuAccount.getUuUk();
-	} catch (err) {
-		uk = '';
-	}
-	// 与上游一致：把真实 uk 注入共享 headers，使后续 getSmsUpSignInConfig / smsSignIn
-	// （含 verify 阶段复用的 session.headers）都带上同一个有效 uk，而非随机值。
-	if (uk) {
-		headers.uk = uk;
-	}
-
-	const result = await UuAccount.sendLoginSmsCode(tel, sessionId, {headers, uk});
-	const msg = String((result && result.Msg) || '');
-	const loginSessionId = crypto.randomBytes(12).toString('hex');
-
-	if (msg.includes('成功')) {
-		uuLoginSessions.set(loginSessionId, {phone: tel, headers, sessionId, mode: 'sms', createdAt: Date.now()});
-		return {loginSessionId, mode: 'sms', phone: tel, message: msg || '验证码已发送'};
-	}
-
-	// 下行短信失败 → 尝试“上行短信”验证流程
-	const cfg = await UuAccount.getSmsUpSignInConfig(headers);
-	if (cfg && cfg.Code === 0 && cfg.Data) {
-		uuLoginSessions.set(loginSessionId, {phone: tel, headers, sessionId, mode: 'sms-up', createdAt: Date.now()});
-		return {
-			loginSessionId,
-			mode: 'sms-up',
-			phone: tel,
-			smsUpContent: cfg.Data.SmsUpContent || '',
-			smsUpNumber: cfg.Data.SmsUpNumber || '',
-			message: msg || '该手机号需要上行短信验证'
-		};
-	}
-
-	throw uuError(502, '发送验证码失败: ' + (msg || JSON.stringify(result)) + '；上行短信配置也获取失败');
-}
-
-// 第二步：用验证码（下行）或空码（上行）登录拿 token，并可选自动绑定到账号
-async function verifyUuSmsLogin({loginSessionId, code, accountName, gameId} = {}) {
-	pruneUuLoginSessions();
-	const session = uuLoginSessions.get(String(loginSessionId || ''));
-	if (!session) {
-		throw uuError(400, '登录会话不存在或已过期，请重新发送验证码');
-	}
-	if (session.mode === 'sms' && !String(code || '').trim()) {
-		throw uuError(400, '请输入短信验证码');
-	}
-
-	const verifyCode = session.mode === 'sms' ? String(code).trim() : '';
-	let response;
-	try {
-		response = await UuAccount.smsSignIn(session.phone, verifyCode, session.sessionId, {headers: session.headers});
-	} catch (err) {
-		throw uuError(502, 'UU 登录请求失败: ' + (err && err.message ? err.message : err));
-	}
-
-	const token = response && response.Data && response.Data.Token;
-	if (!token) {
-		throw uuError(400, 'UU 登录失败: ' + ((response && response.Msg) || JSON.stringify(response)));
-	}
-	uuLoginSessions.delete(String(loginSessionId));
-	// 这里的游戏只决定「校验/查绑定时打哪个网关」，不决定 token 的归属(token 通用)。
-	// 前端已不再传 gameId；缺省走 CS2，与登录/cookie-pull 一致(那两处本来就写死 730)。
-	// 注意不能直接用 normalizeUuGameId(undefined)——它会落到 TF2。
-	const gameIdNorm = uuDefaultGameId(gameId);
-
-
-	// 持久化 token 到加密库 + 查 UU 绑定的 Steam 账号
-	let linkedSteamId = '';
-	const jwt = decodeJwt(token);
-	const userId = jwt && jwt.Id ? String(jwt.Id) : '';
-	const nickname = jwt && jwt.Name ? String(jwt.Name) : '';
-	const jwtExp = jwt && jwt.exp ? Number(jwt.exp) : null;
-
-	try {
-		const uu = new UuAccount(token, {gameId: gameIdNorm});
-		const pull = await uu.getSteamCookiePull();
-		linkedSteamId = pull.steamId || '';
-	} catch (err) {
-		// cookie/pull 失败不阻断
-	}
-
-	// 写入 token 列表 —— 按 userId 去重，**不按游戏**。
-	// UU token 是按 UU 账号发放的(JWT 里只有 Id/Name，没有游戏字段)，CS2/TF2 通用；
-	// 以前这里的 key 是 (userId, gameId)，同一个 UU 账号在弹窗里选 CS2 登一次、选 TF2 再登一次
-	// 就会存成两条、两个不同的 JWT，然后被自动绑定逻辑各绑一次。
-	try {
-		const tokens = loadUuTokens();
-		const idx = tokens.findIndex(t => t.userId === userId);
-		const entry = {token, userId, nickname, linkedSteamId, jwtExp, acquiredAt: new Date().toISOString()};
-		if (idx >= 0) {
-			tokens[idx] = entry;
-		} else {
-			tokens.push(entry);
-		}
-		saveUuTokens(tokens);
-	} catch (err) {
-		// 持久化失败不阻断
-	}
-
-	const out = {token: String(token), userId, nickname, linkedSteamId, jwtExp, bound: false, account: null, bindError: ''};
-	const name = String(accountName || '').trim();
-	if (name) {
-		try {
-			out.account = await bindUuToken(name, token, gameId);
-			out.bound = true;
-		} catch (err) {
-			out.bindError = err && err.message ? err.message : String(err);
-		}
-	} else if (linkedSteamId) {
-		// 自动匹配本地已登录账号
-		const matchedAttempt = findAttemptBySteamId(linkedSteamId);
-		if (matchedAttempt && matchedAttempt.accountName) {
-			try {
-				out.account = await bindUuToken(matchedAttempt.accountName, token, gameId);
-				out.bound = true;
-				out.autoBoundAccount = matchedAttempt.accountName;
-				console.log('[uu] 自动绑定: token SteamID ' + linkedSteamId + ' -> 账号 ' + matchedAttempt.accountName);
-			} catch (err) {
-				out.bindError = err && err.message ? err.message : String(err);
-			}
-		}
-	}
-	return out;
 }

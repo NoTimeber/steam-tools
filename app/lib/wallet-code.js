@@ -1,7 +1,7 @@
 'use strict';
 
 // Steam 充值码(钱包码)兑换 —— 自包含「登录 → 兑换 → 登出」。
-// 思路与 lib/trade-offer.js 一致:用 steam-user 登录拿到 webSession cookies,
+// 思路与 src/steam/trade-offer.ts 一致:用 steam-user 登录拿到 webSession cookies,
 // 再交给 node-steamstore(npm 包名 steamstore)调用 ajaxredeemwalletcode 兑换。
 //
 // 与账户管理模块解耦:本模块自建临时 SteamUser,不写入 server.js 的 attempts 表、

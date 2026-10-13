@@ -10,7 +10,7 @@
 //
 // 也可不传 orderNo，脚本会自动从待发货列表里挑第一笔“待确认报价”订单。
 
-const {UuAccount, SUBSTATUS_WAIT_CONFIRM} = require('./lib/uuyoupin');
+const {UuAccount, SUBSTATUS_WAIT_CONFIRM} = require('../src/uu/client.ts');
 
 async function main() {
 	const args = process.argv.slice(2).filter(a => a !== '--confirm');

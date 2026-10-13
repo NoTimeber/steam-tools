@@ -12,8 +12,8 @@
 
 const fs = require('fs');
 const path = require('path');
-const {UuAccount} = require('./lib/uuyoupin');
-const {acceptVerifiedTradeOffer} = require('./lib/trade-offer');
+const {UuAccount} = require('../src/uu/client.ts');
+const {acceptVerifiedTradeOffer} = require('../src/steam/trade-offer.ts');
 
 const ROOT = __dirname;
 const SESSION_DIR = path.join(ROOT, 'data', 'sessions');

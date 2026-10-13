@@ -13,8 +13,8 @@
 
 const fs = require('fs');
 const path = require('path');
-const {UuAccount, decodeJwt} = require('./lib/uuyoupin');
-const {UuPriceEngine} = require('./lib/uu-pricing');
+const {UuAccount, decodeJwt} = require('../src/uu/client.ts');
+const {UuPriceEngine} = require('../src/uu/pricing.ts');
 
 function loadCs2Token() {
 	const fromArg = (process.argv[2] || process.env.UU_TOKEN || '').trim();

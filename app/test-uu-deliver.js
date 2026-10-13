@@ -9,7 +9,7 @@
 // 流程：解析 token 身份 → 拉取待发货列表 → 为每单补 tradeOfferId / offerSendResult 并打印。
 // 全程只读，不会确认/改变任何订单。
 
-const {UuAccount, decodeJwt} = require('./lib/uuyoupin');
+const {UuAccount, decodeJwt} = require('../src/uu/client.ts');
 
 async function main() {
 	const token = (process.argv[2] || process.env.UU_TOKEN || '').trim();

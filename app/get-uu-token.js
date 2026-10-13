@@ -10,7 +10,7 @@
 const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
-const {UuAccount, generateHeaders, generateRandomString} = require('./lib/uuyoupin');
+const {UuAccount, generateHeaders, generateRandomString} = require('../src/uu/client.ts');
 
 function ask(question) {
 	const rl = readline.createInterface({input: process.stdin, output: process.stdout});

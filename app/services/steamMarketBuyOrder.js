@@ -28,8 +28,8 @@
 // 坑:success=22 时 Steam 往往**不返回 buy_orderid**,无法按对象 id 匹配确认项 → 改用「挂单前后快照差分」:
 // 挂单前记下已有确认项 id,挂单后新出现的那条就是本单,其 creator 字段即真正的 buy_orderid。
 // 必须走工厂建 community:库默认的 Chrome/118 UA 会被 Steam 以 429 挡掉,mobileconf 全线失败。
-// 详见 lib/steam-community-ua.js。
-const {createSteamCommunity} = require('../lib/steam-community-ua');
+// 详见 src/steam/community.ts。
+const {createSteamCommunity} = require('../../src/steam/community.ts');
 const SteamTotp = require('steam-totp');
 
 const COMMUNITY = 'https://steamcommunity.com';

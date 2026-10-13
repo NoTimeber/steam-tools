@@ -14,9 +14,14 @@
 //      按真实 GC 实测的规则拒单:带 currency=1(美元)或 purchase_type=0 → result=8,不推授权请求;
 //    - ClientMicroTxnAuthorize(_send)→ 记下已授权,回 OK;
 //    - StorePurchaseFinalize(CS2 2504 / TF2 2512)→ 已授权的回 result=1 和新 item_id,扣钱包并发 wallet 事件;未授权回 5。
-// 4. 外网拦截:全局 fetch 只放行本机;汇率接口返回固定数据;其余外部请求直接失败。
+// 4. 假悠悠接口(*.youpin898.com):按 FAKE_UU_FILE 里的场景回包(测试随时改这个文件),见 fakeUu();
+//    token 不在场景里的一律回登录失效(84101)。
+// 5. 报价接受:steam-tradeoffer-manager / steamcommunity 换成替身,报价从场景的 offers 里取;
+//    接受、手机确认只记日志,不连 Steam。
+// 6. 外网拦截:全局 fetch 只放行本机;汇率接口返回固定数据;其余外部请求直接失败。
 //
-// logOn / logOff / gamesPlayed / sendToGC / 下单各步 / 被拦的外部请求都追加一行 JSON 到 FAKE_STEAM_LOG(设置了才写)。
+// logOn / logOff / gamesPlayed / sendToGC / 下单各步 / 悠悠请求 / 报价接受 / 被拦的外部请求
+// 都追加一行 JSON 到 FAKE_STEAM_LOG(设置了才写)。
 
 const path = require('path');
 const fs = require('fs');
@@ -222,6 +227,100 @@ Object.assign(FakeSteamUser, {EResult: real.EResult, EConnectionProtocol: real.E
 FakeSteamUser.prototype._handlerManager = {add: (msg, handler) => messageHandlers.set(msg, handler)};
 require.cache[realPath] = {id: realPath, filename: realPath, loaded: true, exports: FakeSteamUser, children: [], paths: []};
 
+// ===== 假悠悠接口 =====
+// 场景文件形如:
+// {tokens: {<token>: {steamId}}, smsToken, orders: {730: [{orderNo, subStatus, subStatusName, itemName}], 440: [...]},
+//  details: {<orderNo>: {tradeOfferId, buyer: {steamId}, commodity: {assetId}}},
+//  offers: {<tradeOfferId>: {partner, state, give: [{appid, assetid}], receive: []}}}
+function uuScenario() {
+	const file = process.env.FAKE_UU_FILE;
+	try {
+		return file ? JSON.parse(fs.readFileSync(file, 'utf8')) : {};
+	} catch (_) {
+		return {};
+	}
+}
+
+function fakeUu(url, init) {
+	const scenario = uuScenario();
+	const headers = Object.fromEntries(Object.entries((init && init.headers) || {}).map(([key, value]) => [key.toLowerCase(), String(value)]));
+	const body = init && init.body ? JSON.parse(String(init.body)) : {};
+	const token = String(headers.authorization || '').replace(/^Bearer /, '');
+	record({event: 'uuRequest', host: url.hostname, path: url.pathname, gameid: headers.gameid || headers.Gameid || '', body});
+	const json = (value, status = 200) => new Response(JSON.stringify(value), {status, headers: {'content-type': 'application/json'}});
+	const known = (scenario.tokens || {})[token];
+	switch (url.pathname) {
+		case '/api/deviceW2':
+			return new Response('fake uu: no uk', {status: 500});
+		case '/api/user/Auth/SendSignInSmsCode':
+			return json({Code: 0, Msg: '发送成功'});
+		case '/api/user/Auth/SmsSignIn':
+			return json(scenario.smsToken ? {Code: 0, Data: {Token: scenario.smsToken}} : {Code: 1, Msg: '验证码错误'});
+	}
+	if (!known) {
+		return json({code: 84101, msg: '登录状态失效'});
+	}
+	switch (url.pathname) {
+		case '/api/youpin/bff/steam/cookie/pull':
+			return json({code: 0, data: {steamCookie: JSON.stringify({steamId: known.steamId})}});
+		case '/api/youpin/bff/trade/sell/page/v1/waitDeliver/waitDeliverList':
+			return json({code: 0, data: {waitDeliverList: ((scenario.orders || {})[String(body.gameId)] || []).map(order => ({
+				orderInfoVO: {orderNo: order.orderNo, orderSubStatus: order.subStatus, orderSubStatusName: order.subStatusName},
+				commodityInfoVO: {commodityName: order.itemName}
+			}))}});
+		case '/api/youpin/bff/trade/v1/order/query/detail': {
+			const detail = (scenario.details || {})[body.orderNo];
+			return json(detail ? {code: 0, data: detail} : {code: 1, msg: '订单不存在'});
+		}
+		case '/api/youpin/bff/trade/v1/order/sell/delivery/confirmOffer':
+			return json({code: 0, data: {success: true}});
+	}
+	return json({code: -1, msg: 'fake uu: 未实现 ' + url.pathname});
+}
+
+// ===== 报价接受的替身 =====
+const ACTIVE_OFFER_STATE = 2;
+class FakeTradeOfferManager {
+	constructor() {}
+	setCookies(cookies, callback) {
+		callback(null);
+	}
+	getOffer(id, callback) {
+		const offer = (uuScenario().offers || {})[id];
+		if (!offer) {
+			callback(new Error('fake steam: 报价不存在 ' + id));
+			return;
+		}
+		callback(null, {
+			id: String(id),
+			partner: {getSteamID64: () => String(offer.partner)},
+			state: offer.state == null ? ACTIVE_OFFER_STATE : offer.state,
+			isOurOffer: false,
+			itemsToGive: offer.give || [],
+			itemsToReceive: offer.receive || [],
+			accept(done) {
+				record({event: 'offerAccept', offerId: String(id)});
+				done(null, 'pending');
+			}
+		});
+	}
+}
+FakeTradeOfferManager.ETradeOfferState = {Active: ACTIVE_OFFER_STATE};
+
+class FakeSteamCommunity {
+	constructor() {}
+	setCookies() {}
+	acceptConfirmationForObject(identitySecret, objectId, callback) {
+		record({event: 'offerConfirm', offerId: String(objectId), identitySecret});
+		callback(null);
+	}
+}
+
+for (const [name, exports] of [['steam-tradeoffer-manager', FakeTradeOfferManager], ['steamcommunity', FakeSteamCommunity]]) {
+	const resolved = require.resolve(name, {paths: [ROOT]});
+	require.cache[resolved] = {id: resolved, filename: resolved, loaded: true, exports, children: [], paths: []};
+}
+
 // ===== 外网拦截 =====
 const FIXED_USD_RATES = {result: 'success', base_code: 'USD', rates: {USD: 1, EUR: 0.9, GBP: 0.78, CNY: 7.1, UYU: 40, JPY: 150, RUB: 90}};
 const realFetch = globalThis.fetch;
@@ -229,6 +328,9 @@ globalThis.fetch = async function offlineFetch(input, init) {
 	const url = new URL(typeof input === 'string' || input instanceof URL ? String(input) : input.url);
 	if (url.hostname === '127.0.0.1' || url.hostname === 'localhost' || url.hostname === '[::1]') {
 		return realFetch(input, init);
+	}
+	if (url.hostname.endsWith('.youpin898.com')) {
+		return fakeUu(url, init);
 	}
 	if (url.origin + url.pathname === 'https://open.er-api.com/v6/latest/USD') {
 		return new Response(JSON.stringify(FIXED_USD_RATES), {status: 200, headers: {'content-type': 'application/json'}});
