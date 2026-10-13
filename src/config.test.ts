@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {join, resolve} from 'node:path';
 import {loadConfig} from './config.ts';
 
-const dirs = {appRoot: resolve('/srv/tools'), appDir: resolve('/srv/tools/app')};
+const dirs = {appRoot: resolve('/srv/tools'), appDir: resolve('/srv/tools/app'), webDir: resolve('/srv/tools/web/dist')};
 
 test('缺省:数据在安装根 data/,schema 在 app/schema/,端口 53110,自动恢复开', () => {
 	const config = loadConfig({}, dirs);

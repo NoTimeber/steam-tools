@@ -6,6 +6,14 @@ WORKDIR /srv/steam-tools
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --no-audit --no-fund
 
+# ---- 新版前端(web/,Vue 3 + Naive UI):构建出静态文件,运行层只要 web/dist ----
+FROM node:24-bookworm-slim AS web
+WORKDIR /srv/web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY web/ ./
+RUN npm run build
+
 # ---- 运行层 ----
 FROM node:24-bookworm-slim
 ENV NODE_ENV=production \
@@ -26,6 +34,7 @@ COPY package.json ./
 COPY app ./app
 # 新代码是 TypeScript,Node 24 直接运行(类型擦除),不需要构建步骤
 COPY src ./src
+COPY --from=web /srv/web/dist ./web/dist
 
 # 以非 root 运行;/data 挂卷存放账号、maFile、session、UU token 等全部运行数据
 USER node

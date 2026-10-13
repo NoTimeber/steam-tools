@@ -50,6 +50,14 @@ npm run typecheck   # 类型检查(src/ 和 test/)
 | `wallet.e2e.ts` | 充值码批量兑换：临时登录（密码 / maFile refreshToken）→ 兑换 → 登出，成功/已使用/限流/登录失败的推送，临时登录不进账户列表 |
 | `market.e2e.ts` | 市场求购：行情（社区 nameid 库）、多账号挂求购、手机确认后重发落单、刷新对账、撤单、挂满 |
 
+## 离线演示服务
+
+[`demo/server.ts`](demo/server.ts)：用上面的假 Steam 跑真实的服务端，带几个演示账号（登录成功 / 要令牌验证码 / 密码错误），开发前端时用。
+
+```bash
+node test/demo/server.ts
+```
+
 ## 价目表样本
 
 见 [fixtures/price-sheets/README.md](fixtures/price-sheets/README.md)。

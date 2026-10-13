@@ -36,3 +36,9 @@ node_modules/
 npm-debug.log*
 .DS_Store
 Thumbs.db
+
+# 前端构建产物(web/ 下 npm run build 生成)
+/web/dist/
+
+# 本机预览配置(写的是本机 Node 路径)
+/.claude/launch.json

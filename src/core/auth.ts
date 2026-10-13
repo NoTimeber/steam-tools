@@ -348,7 +348,8 @@ export function createAuth(options: AuthOptions = {}) {
 		if (path.startsWith('/api/')) {
 			return res.status(401).json({success: false, error: 'unauthorized'});
 		}
-		return res.redirect('/login');
+		// 新版前端(/next/)登录后回到新版;只认这一个固定地址,不接受任意跳转
+		return res.redirect(path === '/next' || path.startsWith('/next/') ? '/login?next=%2Fnext%2F' : '/login');
 	}
 
 	function socketAuth(socket: {handshake?: {headers?: Record<string, unknown>}}, next: (err?: Error) => void): void {

@@ -4,7 +4,7 @@
 // 运行:node src/main.ts(Node 24 直接跑 TypeScript,不需要构建)。旧版 launcher 仍启动 app/server.js,它只转到这里。
 
 // 这两个 import 必须在最前面:先加载 .env,再加载 GC 库并修好 protobuf 共享根(见各自文件头)
-import {APP_DIR, APP_ROOT} from './core/env.ts';
+import {APP_DIR, APP_ROOT, WEB_DIST_DIR} from './core/env.ts';
 import {GlobalOffensive, TeamFortress2} from './steam/gc-libs.ts';
 
 import {existsSync, mkdirSync} from 'node:fs';
@@ -62,7 +62,7 @@ const SteamUser = require('steam-user') as SteamUserModule;
 const SteamTotp = require('steam-totp') as {generateAuthCode(sharedSecret: string): string};
 const {Server} = require('socket.io') as typeof import('socket.io');
 
-const config = loadConfig(process.env, {appRoot: APP_ROOT, appDir: APP_DIR});
+const config = loadConfig(process.env, {appRoot: APP_ROOT, appDir: APP_DIR, webDir: WEB_DIST_DIR});
 
 mkdirSync(config.steamUserDir, {recursive: true});
 mkdirSync(config.cookiesDir, {recursive: true});
@@ -297,6 +297,7 @@ const app = createWebApp({
 	isAllowedOrigin,
 	trustProxy: parseTrustProxy(config.http.trustProxy),
 	publicDir: config.publicDir,
+	webDir: config.webDir,
 	routes: [
 		router => systemRoutes(router, {sessionCount: () => attempts.size, launcher}),
 		router => accountRoutes(router, {accounts, debug}),

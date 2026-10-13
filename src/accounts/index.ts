@@ -2,12 +2,14 @@
 // 登录(密码 / refreshToken)、Steam Guard、WebSession、登出、删除账号、连接/断开 GC,以及重启后自动恢复登录要的凭据。
 // 路由在 ./routes.ts;会话管理、加密库、推送由 src/main.ts 注入,单元测试用假的。
 
+import {randomUUID} from 'node:crypto';
 import {createRequire} from 'node:module';
 import {gameConfig, normalizeGame} from '../steam/games.ts';
 import {disconnectGameSession, ensureGameSession} from '../steam/gc-client.ts';
 import {safeName} from '../steam/session-manager.ts';
 import type {Attempt, AttemptProfile, RestoreCredentials, SessionManager} from '../steam/session-manager.ts';
-import type {AccountStore} from '../store/accounts.ts';
+import {normalizeStoredAccount} from '../store/accounts.ts';
+import type {AccountStore, StoredAccount} from '../store/accounts.ts';
 import type {MaFileStore} from '../store/mafiles.ts';
 import type {SteamSessionStore} from '../store/steam-sessions.ts';
 import {createCountryLookup} from './country.ts';
@@ -102,6 +104,44 @@ export function createAccountService(options: AccountServiceOptions) {
 			return {accounts: store.accounts.replaceAll(mergeClientAccountSecrets(store.accounts, list)).map(publicStoredAccount)};
 		} catch (err) {
 			throw accountError(500, errorText(err) || '保存账户名单失败');
+		}
+	}
+
+	/**
+	 * 导入(新版前端用):按账号名合并进名单,不动名单里的其它账号。已有的账号只覆盖非空的密码/shared_secret,
+	 * hasMaFile 只会被置上;新账号追加到末尾。旧前端整表替换(saveAccounts),两个界面同时开着时会互相覆盖。
+	 */
+	function upsertAccounts(body: {accounts?: unknown}): {added: number; updated: number; accounts: PublicStoredAccount[]} {
+		const incoming = (Array.isArray(body.accounts) ? body.accounts : [])
+			.map(item => normalizeStoredAccount(item))
+			.filter((account): account is StoredAccount => !!account);
+		if (!incoming.length) {
+			throw accountError(400, '没有可导入的账号');
+		}
+		try {
+			const list = store.accounts.list();
+			const byKey = new Map(list.map(account => [account.accountName.toLowerCase(), account]));
+			let added = 0;
+			let updated = 0;
+			for (const input of incoming) {
+				const existing = byKey.get(input.accountName.toLowerCase());
+				if (existing) {
+					existing.password = input.password || existing.password;
+					existing.sharedSecret = input.sharedSecret || existing.sharedSecret;
+					existing.twoFactorCode = input.twoFactorCode || existing.twoFactorCode;
+					existing.hasMaFile = existing.hasMaFile || input.hasMaFile;
+					existing.source = input.source || existing.source;
+					updated++;
+				} else {
+					const account = {...input, id: input.id || randomUUID()};
+					list.push(account);
+					byKey.set(account.accountName.toLowerCase(), account);
+					added++;
+				}
+			}
+			return {added, updated, accounts: store.accounts.replaceAll(list).map(publicStoredAccount)};
+		} catch (err) {
+			throw accountError(500, errorText(err) || '导入账户失败');
 		}
 	}
 
@@ -386,7 +426,7 @@ export function createAccountService(options: AccountServiceOptions) {
 	}
 
 	return {
-		listAccounts, saveAccounts, meta, importMaFiles, authCode,
+		listAccounts, saveAccounts, upsertAccounts, meta, importMaFiles, authCode,
 		login, loginWithRefreshToken, submitGuard, requestWebSession, logout, cleanup, connectGc, disconnectGc, cookies, listAttempts,
 		restoreCredentials,
 		/** 拿到 WebSession 后后台刷新真实账户国家 */

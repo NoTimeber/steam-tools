@@ -21,6 +21,8 @@ export function accountRoutes(router: Router, {accounts, debug}: AccountRouteDep
 	router.get('/api/accounts/list', spreadRoute(() => accounts.listAccounts(), '读取账户名单失败'));
 	// 全量替换账户名单(前端 saveAccounts 推送的就是完整 state.accounts)。
 	router.post('/api/accounts/list', spreadRoute(req => accounts.saveAccounts(req.body || {}), '保存账户名单失败'));
+	// 导入:按账号名合并,不动其它账号(新版前端用)
+	router.post('/api/accounts/upsert', spreadRoute(req => accounts.upsertAccounts(req.body || {}), '导入账户失败'));
 	router.post('/api/accounts/meta', spreadRoute(req => accounts.meta(req.body || {}), '读取账号资料失败'));
 	// 服务端持久化 maFile:完整 maFile(含 identity_secret)加密存入数据库,发货/求购确认时取 identity_secret。
 	router.post('/api/mafile/import', spreadRoute(req => accounts.importMaFiles(req.body || {}), '导入 maFile 失败'));

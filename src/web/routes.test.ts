@@ -104,7 +104,7 @@ function registerAll(overrides: {
 	return table;
 }
 
-test('路由表:与拆分前 app/server.js 注册的完全一致', () => {
+test('路由表:拆分前 app/server.js 注册的全部保留,另加新版前端用的 /api/accounts/upsert', () => {
 	const purchaseAliases = ['purchase', 'cs2', 'tf2'].flatMap(prefix => [
 		`GET /api/${prefix}/online-accounts`,
 		`GET /api/${prefix}/items`,
@@ -113,7 +113,7 @@ test('路由表:与拆分前 app/server.js 注册的完全一致', () => {
 	]);
 	const expected = [
 		'GET /api/health', 'GET /api/update/status', 'POST /api/update/check', 'POST /api/update/restart',
-		'GET /api/attempts', 'GET /api/accounts/list', 'POST /api/accounts/list', 'POST /api/accounts/meta', 'POST /api/mafile/import',
+		'GET /api/attempts', 'GET /api/accounts/list', 'POST /api/accounts/list', 'POST /api/accounts/upsert', 'POST /api/accounts/meta', 'POST /api/mafile/import',
 		'POST /api/auth-code', 'POST /api/login', 'POST /api/login-refresh', 'POST /api/guard/:id', 'POST /api/web-session/:id',
 		'POST /api/logout/:id', 'POST /api/accounts/cleanup', 'POST /api/gc/connect/:id', 'POST /api/gc/disconnect/:id', 'GET /api/cookies/:id',
 		'GET /api/inventory/:id',

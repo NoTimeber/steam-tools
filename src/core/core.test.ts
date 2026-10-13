@@ -140,6 +140,7 @@ test('鉴权:网关放行健康检查/鉴权端点/登录页/socket.io,未登录
 	assert.equal(pass('/api/attempts'), false);
 	assert.equal(h.call(h.auth.middleware as never, {}, {path: '/api/x'}).status, 401);
 	assert.deepEqual(h.call(h.auth.middleware as never, {}, {path: '/'}).body, {redirect: '/login'});
+	assert.deepEqual(h.call(h.auth.middleware as never, {}, {path: '/next/'}).body, {redirect: '/login?next=%2Fnext%2F'});
 	const secure = h.call(h.auth.login, {password: 'env-password'}, {secure: true});
 	assert.match(secure.headers['Set-Cookie'] ?? '', /; Secure$/);
 	assert.equal(pass('/api/attempts', 'sid=' + h.cookie()), true);

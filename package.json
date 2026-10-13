@@ -15,7 +15,8 @@
     "test:e2e": "node --test --test-concurrency=1 \"test/e2e/*.e2e.ts\"",
     "legacy:launcher": "node launcher.js",
     "release": "node tools/build-release.js",
-    "keygen": "node tools/keygen.js"
+    "keygen": "node tools/keygen.js",
+    "demo": "node test/demo/server.ts"
   },
   "dependencies": {
     "binarykvparser": "^2.3.0",

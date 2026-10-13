@@ -2,7 +2,7 @@
 
 import {after, before, describe, test} from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtempSync, rmSync, writeFileSync} from 'node:fs';
+import {mkdirSync, mkdtempSync, rmSync, writeFileSync} from 'node:fs';
 import {createServer} from 'node:http';
 import type {Server} from 'node:http';
 import {tmpdir} from 'node:os';
@@ -39,11 +39,15 @@ describe('Web 外壳', () => {
 		publicDir = mkdtempSync(join(tmpdir(), 'steam-tools-web-'));
 		writeFileSync(join(publicDir, 'login.html'), '<p>login</p>');
 		writeFileSync(join(publicDir, 'index.html'), '<p>app</p>');
+		mkdirSync(join(publicDir, 'next', 'assets'), {recursive: true});
+		writeFileSync(join(publicDir, 'next', 'index.html'), '<p>next</p>');
+		writeFileSync(join(publicDir, 'next', 'assets', 'main-abc123.js'), 'console.log(1)');
 		const app = createWebApp({
 			auth: fakeAuth,
 			isAllowedOrigin: headers => !headers.origin || headers.origin === 'http://ok.example',
 			trustProxy: false,
 			publicDir,
+			webDir: join(publicDir, 'next'),
 			logger: {error: (...args: unknown[]) => logged.push(args)},
 			routes: [
 				router => router.post('/api/echo', spreadRoute(req => ({body: req.body, game: requestGame(req)}), '回显失败')),
@@ -95,6 +99,16 @@ describe('Web 外壳', () => {
 		const index = await send('/', {headers: authed});
 		assert.equal(await index.text(), '<p>app</p>');
 		assert.match(index.headers.get('cache-control') ?? '', /no-store/);
+	});
+
+	test('新版前端挂在 /next/:要登录;带哈希的 assets 长缓存,入口不缓存', async () => {
+		assert.equal((await send('/next/')).headers.get('location'), '/login');
+		const index = await send('/next/', {headers: authed});
+		assert.equal(await index.text(), '<p>next</p>');
+		assert.match(index.headers.get('cache-control') ?? '', /no-store/);
+		const asset = await send('/next/assets/main-abc123.js', {headers: authed});
+		assert.equal(asset.status, 200);
+		assert.equal(asset.headers.get('cache-control'), 'public, max-age=31536000, immutable');
 	});
 
 	test('同源校验:跨站写请求 403(鉴权端点也拦),GET 不拦', async () => {

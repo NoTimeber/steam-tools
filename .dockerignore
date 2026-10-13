@@ -22,9 +22,12 @@ app/package-lock.json
 app/data/*
 !app/data/cs2-skin-db.json
 
-# 开发用,不进镜像
+# 开发用,不进镜像(web/ 在镜像里重新装依赖、重新构建)
 .git/
 node_modules/
+web/node_modules/
+web/dist/
+.claude/
 tools/
 re-tools/
 module-development/

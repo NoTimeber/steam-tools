@@ -322,3 +322,29 @@ test('名单读写:写过才算 initialized;下发不含密钥', () => {
 	assert.deepEqual(saved.accounts.map(a => [a.accountName, a.hasPassword]), [['alpha', true], ['zulu', false]]);
 	assert.equal(svc.listAccounts().initialized, true);
 });
+
+test('导入(upsert):按账号名合并,不动其它账号;已有账号只覆盖非空密钥,hasMaFile 只会被置上', () => {
+	const {svc} = service([
+		{id: 'id-a', accountName: 'alpha', password: 'pw-a', sharedSecret: 'SS-a', hasMaFile: true, country: 'JP', source: 'import'},
+		{id: 'id-b', accountName: 'bravo', password: 'pw-b'}
+	]);
+	const result = svc.upsertAccounts({accounts: [
+		{accountName: 'ALPHA', password: '', sharedSecret: 'SS-new', hasMaFile: false, source: 'maFile'},
+		{accountName: 'charlie', password: 'pw-c'},
+		{accountName: '  '}
+	]});
+	assert.deepEqual([result.added, result.updated], [1, 1]);
+	assert.deepEqual(result.accounts.map(a => [a.accountName, a.hasPassword, a.hasSharedSecret, a.hasMaFile, a.source]), [
+		['alpha', true, true, true, 'maFile'],
+		['bravo', true, false, false, ''],
+		['charlie', true, false, false, '']
+	]);
+	assert.equal(result.accounts[0]!.country, 'JP');
+	assert.equal(result.accounts[0]!.id, 'id-a');
+	assert.ok(result.accounts[2]!.id, '新账号要有 id');
+	assert.ok(!('password' in result.accounts[2]!), '下发不含密码');
+	// 存进去的是合并后的密钥
+	assert.deepEqual(svc.restoreCredentials('alpha')?.password, 'pw-a');
+	assert.deepEqual(svc.restoreCredentials('alpha')?.profile.sharedSecret, 'SS-new');
+	assert.throws(() => svc.upsertAccounts({accounts: [{accountName: ''}]}), (err: Error & {statusCode?: number}) => err.statusCode === 400);
+});

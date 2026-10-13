@@ -20,6 +20,7 @@ export interface ExpressApp extends Router {
 	disable(setting: string): unknown;
 	set(setting: string, value: unknown): unknown;
 	use(handler: Handler | ErrorHandler): unknown;
+	use(path: string, handler: Handler): unknown;
 }
 
 interface Express {
@@ -34,11 +35,20 @@ export interface WebAppOptions {
 	isAllowedOrigin(headers: Record<string, unknown>): boolean;
 	/** 反代信任设置(Express 的 trust proxy) */
 	trustProxy: string | number | boolean;
-	/** 前端静态资源目录(app/public) */
+	/** 旧版前端静态资源目录(app/public),挂在 / */
 	publicDir: string;
+	/** 新版前端构建产物(web/dist),挂在 /next/;没构建时目录不存在,访问 404 */
+	webDir?: string;
 	/** 登录之后才能访问的路由,按顺序注册 */
 	routes: ReadonlyArray<(router: Router) => void>;
 	logger?: Pick<Console, 'error'>;
+}
+
+function noStore(res: Response): void {
+	res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+	res.setHeader('Pragma', 'no-cache');
+	res.setHeader('Expires', '0');
+	res.setHeader('Surrogate-Control', 'no-store');
 }
 
 export function createWebApp(options: WebAppOptions): ExpressApp {
@@ -85,16 +95,28 @@ export function createWebApp(options: WebAppOptions): ExpressApp {
 	const gateway: Handler = (req, res, next) => auth.middleware(req, res, next);
 	app.use(gateway);
 
+	if (options.webDir) {
+		// Vite 产物:assets/ 下文件名带内容哈希,可以长缓存;入口 index.html 每次都要新的
+		app.use('/next', express.static(options.webDir, {
+			etag: false,
+			lastModified: false,
+			maxAge: 0,
+			setHeaders(res, filePath) {
+				if (/[\\/]assets[\\/]/u.test(String(filePath || ''))) {
+					res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+				} else {
+					noStore(res);
+				}
+			}
+		}));
+	}
 	app.use(express.static(options.publicDir, {
 		etag: false,
 		lastModified: false,
 		maxAge: 0,
 		setHeaders(res, filePath) {
 			if (/\.(?:html|js|css)$/iu.test(String(filePath || ''))) {
-				res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-				res.setHeader('Pragma', 'no-cache');
-				res.setHeader('Expires', '0');
-				res.setHeader('Surrogate-Control', 'no-store');
+				noStore(res);
 			}
 		}
 	}));

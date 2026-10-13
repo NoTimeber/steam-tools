@@ -7,8 +7,10 @@
 import {join, resolve} from 'node:path';
 
 export const APP_ROOT = process.env.APP_ROOT ? resolve(process.env.APP_ROOT) : join(import.meta.dirname, '..', '..');
-/** 随代码发布的目录:前端、物品 schema、随包皮肤库、社区 nameid 库 */
+/** 随代码发布的目录:旧版前端、物品 schema、随包皮肤库、社区 nameid 库 */
 export const APP_DIR = join(import.meta.dirname, '..', '..', 'app');
+/** 新版前端(web/)的构建产物 */
+export const WEB_DIST_DIR = join(import.meta.dirname, '..', '..', 'web', 'dist');
 
 try {
 	process.loadEnvFile(join(APP_ROOT, '.env'));

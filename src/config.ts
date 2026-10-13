@@ -11,6 +11,8 @@ export interface Config {
 	/** 随代码发布的目录(app/):前端、物品 schema、随包皮肤库、社区 nameid 库 */
 	appDir: string;
 	publicDir: string;
+	/** 新版前端(Vue,web/ 构建产物),先挂在 /next/ 下和旧版并存 */
+	webDir: string;
 	host: string;
 	port: number;
 
@@ -95,10 +97,11 @@ function atLeast(value: string | undefined, fallback: number, min: number): numb
 export interface ConfigDirs {
 	appRoot: string;
 	appDir: string;
+	webDir: string;
 }
 
 export function loadConfig(env: Env, dirs: ConfigDirs): Config {
-	const {appRoot, appDir} = dirs;
+	const {appRoot, appDir, webDir} = dirs;
 	const dataDir = env.DATA_DIR ? resolve(env.DATA_DIR) : join(appRoot, 'data');
 	const configDir = env.CONFIG_DIR ? resolve(env.CONFIG_DIR) : join(dataDir, 'config');
 	const schemaDir = env.SCHEMA_DIR ? resolve(env.SCHEMA_DIR) : join(appDir, 'schema');
@@ -108,6 +111,7 @@ export function loadConfig(env: Env, dirs: ConfigDirs): Config {
 		appRoot,
 		appDir,
 		publicDir: join(appDir, 'public'),
+		webDir,
 		host: env.HOST || '0.0.0.0',
 		port: Number(env.PORT || 53110),
 

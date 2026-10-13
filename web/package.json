@@ -1,0 +1,29 @@
+{
+  "name": "steam-tools-web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Steam 工具台前端(Vue 3 + Naive UI)",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "typecheck": "vue-tsc --noEmit -p tsconfig.json",
+    "test": "node --test \"src/**/*.test.ts\""
+  },
+  "dependencies": {
+    "naive-ui": "2.45.3",
+    "socket.io-client": "4.8.3",
+    "vue": "3.5.44",
+    "vue-router": "5.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "@vitejs/plugin-vue": "6.0.10",
+    "typescript": "5.9.3",
+    "vite": "8.3.4",
+    "vue-tsc": "3.3.13"
+  }
+}
