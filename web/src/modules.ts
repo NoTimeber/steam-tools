@@ -12,7 +12,7 @@ export interface ModuleEntry {
 export const MODULES: readonly ModuleEntry[] = [
 	{key: 'accounts', label: '账户管理', view: () => import('./views/AccountsView.vue')},
 	{key: 'inventory', label: '库存管理', view: () => import('./views/InventoryView.vue')},
-	{key: 'purchase', label: '内购任务'},
+	{key: 'purchase', label: '内购任务', view: () => import('./views/PurchaseView.vue')},
 	{key: 'buygame', label: '买游戏'},
 	{key: 'market', label: '市场求购'},
 	{key: 'uu', label: 'UU发货'},

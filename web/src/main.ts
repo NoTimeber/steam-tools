@@ -3,6 +3,7 @@ import App from './App.vue';
 import {socket} from './api/socket.ts';
 import {router} from './router.ts';
 import {startAccounts} from './stores/accounts.ts';
+import {startPurchase} from './stores/purchase.ts';
 import {loadUpdateStatus} from './stores/update.ts';
 import './styles.css';
 
@@ -10,4 +11,5 @@ createApp(App).use(router).mount('#app');
 
 socket.connect();
 startAccounts();
+startPurchase();
 loadUpdateStatus();
