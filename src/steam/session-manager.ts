@@ -11,6 +11,7 @@ import {randomBytes} from 'node:crypto';
 import type {SteamSessionStore} from '../store/steam-sessions.ts';
 import type {LoginIntentStore} from '../store/login-intents.ts';
 import {normalizeGame} from './games.ts';
+import {normalizeCountryCode} from './currencies.ts';
 
 export interface SteamClient extends EventEmitter {
 	steamID: {getSteamID64(): string} | null;
@@ -183,11 +184,6 @@ export function safeName(value: unknown): string {
 		.replace(/[^a-z0-9_.-]+/gi, '_')
 		.replace(/^_+|_+$/g, '')
 		.slice(0, 80) || 'session';
-}
-
-function normalizeCountryCode(value: unknown): string {
-	const country = String(value || '').trim().toUpperCase();
-	return /^[A-Z]{2,3}$/.test(country) ? country : '';
 }
 
 function sameAccount(left: string, right: string): boolean {

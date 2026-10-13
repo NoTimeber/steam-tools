@@ -45,13 +45,20 @@ async function freePort(): Promise<number> {
 
 export interface FakeSteamEvent {
 	run: string;
-	event: 'logOn' | 'logOff' | 'gamesPlayed' | 'sendToGC' | 'blockedFetch';
+	event: 'logOn' | 'logOff' | 'gamesPlayed' | 'sendToGC' | 'blockedFetch' | 'purchaseInit' | 'microTxnAuthorize' | 'purchaseFinalize';
 	client?: string;
 	details?: Record<string, unknown>;
 	apps?: number[];
 	appid?: number;
 	msgType?: number;
 	url?: string;
+	/** purchaseInit:解码后的下单请求 */
+	body?: {country?: string; language?: number; currency?: number; line_items?: Array<Record<string, number>>};
+	txnId?: string;
+	transId?: string;
+	approve?: number;
+	/** purchaseFinalize:是否已授权、扣款成功 */
+	ok?: boolean;
 }
 
 export interface StartOptions {
