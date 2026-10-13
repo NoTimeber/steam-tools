@@ -24,6 +24,7 @@ npm run typecheck   # 类型检查(src/ 和 test/)
   - **GC 商店下单**：按真实 GC 实测的规则拒单，授权、扣款后钱包余额跟着变。
   - **假悠悠接口、报价接受替身**：按 `FAKE_UU_FILE` 里的场景回包。
   - **假 Steam 市场**：挂求购、手机确认、撤单、我的求购单都有状态；开关（要不要手机确认、拒单、已成交）在 `FAKE_MARKET_FILE`。
+  - **假 Steam 商店结算**：买游戏用到的 store / api / checkout 端点，每个账号钱包 10.00 美元、记住已拥有的包；商品可用 `FAKE_STORE_PACKAGES` 追加。
   - **外网拦截**：`fetch` 只放行本机；汇率接口返回固定数据；其它外部请求直接失败，并记进日志供测试断言。
 
 [`support/server.ts`](e2e/support/server.ts) 提供这些工具：
@@ -41,6 +42,7 @@ npm run typecheck   # 类型检查(src/ 和 test/)
 | `gc.e2e.ts` | 连接和断开 CS2 GC、通过 GC 拉价目表生成内购目录（与解析快照对比）、外网拦截 |
 | `purchase.e2e.ts` | 从 HTTP 接口下单：GC 下单 → 钱包扣款授权 → 确认，余额变化；下单载荷不合 GC 规则时被拒 |
 | `uu.e2e.ts` | UU 短信登录拿 token、按 SteamID 自动绑定、自动发货（报价严格校验后接受 + 手机确认）、fail-closed |
+| `buygame.e2e.ts` | 买游戏：解析 subid、试运行不扣款、真扣款、重复购买被拒、余额不足预检拦截 |
 | `market.e2e.ts` | 市场求购：行情（社区 nameid 库）、多账号挂求购、手机确认后重发落单、刷新对账、撤单、挂满 |
 
 ## 价目表样本

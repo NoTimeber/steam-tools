@@ -45,7 +45,6 @@ const {describeGcItem, loadItemsGameSchema} = require('./items-game-schema');
 const {redeemForAccount} = require('./lib/wallet-code');
 const {createAuth} = require('./lib/auth');
 const {createFingerprintStore} = require('./services/fingerprint');
-const {createSteamStorePurchaser} = require('./services/steamStorePurchase');
 const {createCs2Terminal} = require('./lib/cs2-terminal');
 const {writeFileAtomic, writeJsonAtomic, readJsonFileSafe} = require('./lib/atomic-file');
 // 凭据数据层(TypeScript,由 Node 24 直接运行):SQLite + 字段加密,见 src/store/。
@@ -65,13 +64,15 @@ const {
 	disconnectGameSession: disconnectAttemptGameSession
 } = require('../src/steam/gc-client.ts');
 const {installMicroTxnHooks} = require('../src/steam/microtxn.ts');
-const {findOnlineAttempt} = require('../src/steam/attempts.ts');
+const {findOnlineAttempt, findAttemptByKey: findAttemptInMap, listCookieFlowAccounts} = require('../src/steam/attempts.ts');
 // CS2/TF2 游戏内购(TypeScript):商品目录、GC 下单、内购任务,见 src/purchase/。
 const {createPurchaseService, normalizeCartData, publicTask: publicPurchaseTask} = require('../src/purchase/index.ts');
 // UU(悠悠有品)发货/自动上架/token 管理(TypeScript),见 src/uu/。
 const {createUuService} = require('../src/uu/index.ts');
 // Steam 社区市场求购单(TypeScript):行情参考、挂求购/手机确认、撤单、对账,见 src/market/。
 const {createMarketService} = require('../src/market/index.ts');
+// 买游戏(TypeScript):Steam 商店结算协议、多账号购买任务,见 src/buygame/。
+const {createBuyGameService} = require('../src/buygame/index.ts');
 
 const PORT = Number(process.env.PORT || 53110);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -85,11 +86,6 @@ const STEAM_USER_DIR = path.join(DATA_DIR, 'steam-user');
 const fingerprintStore = createFingerprintStore({
 	dataDir: DATA_DIR,
 	logger: (level, message) => console.log(`[fingerprint:${level}] ${message}`)
-});
-
-// Steam 商店「协议购买整款游戏」(钱包给自己买),见 services/steamStorePurchase.js。
-const steamStorePurchaser = createSteamStorePurchaser({
-	logger: (level, message) => console.log(`[steam-purchase:${level}] ${message}`)
 });
 
 // CS2「创世终端机」开启(P0/P1/P2:抓包 + 拉报价 + 解封,不含花钱兑换),见 lib/cs2-terminal.js。
@@ -245,12 +241,6 @@ const auth = createAuth({
 });
 io.use(auth.socketAuth);
 
-// 「买游戏」(协议购买整款 Steam 游戏)任务,见 services/steamStorePurchase.js。
-const buyGameTasks = [];
-const buyGameTaskIndex = new Map();
-const BUYGAME_TASK_LIMIT = 50;
-const BUYGAME_DEFAULT_CONCURRENCY = 3;   // 买游戏默认并发线程数
-const BUYGAME_MAX_CONCURRENCY = 10;      // 并发上限,防止过多并发被 Steam 限频
 const PURCHASE_PRICE_SHEET_DIR = path.join(DATA_DIR, 'price-sheets');
 const PURCHASE_CATALOG_CACHE_DIR = path.join(DATA_DIR, 'purchase-catalogs');
 
@@ -374,6 +364,13 @@ const market = createMarketService({
 	readJson: readJsonFile,
 	writeJson: writeJsonAtomic,
 	writeText: (file, text) => writeFileAtomic(file, text, 'utf8')
+});
+
+// 买游戏:任务只在内存里(最多 50 个),进度经 socket.io 推送
+const buyGame = createBuyGameService({
+	findAttempt: findAttemptByKey,
+	cookiesFor: resolveInventoryCookies,
+	emit: (event, task) => io.emit(event, task)
 });
 
 app.disable('x-powered-by');
@@ -1225,100 +1222,43 @@ app.post('/api/task/tf2-purchase', purchaseTaskRoute('tf2'));
 // 协议购买整款 Steam 游戏(钱包给自己买)。默认 dryRun:只验证到最终价、不扣款。
 // body: { id: <账号attempt id>, packageIds: [subid...], dryRun?: true|false }
 app.post('/api/steam-purchase/test', debugOnly, async (req, res) => {
-	const body = req.body || {};
-	const key = String(body.id || body.accountId || body.accountName || '').trim();
-	let attempt = attempts.get(key);
-	if (!attempt && key) {
-		const lower = key.toLowerCase();
-		for (const item of attempts.values()) {
-			if (String(item.accountName || '').toLowerCase() === lower) {
-				attempt = item;
-				break;
-			}
-		}
-	}
-	if (!attempt) {
-		return res.status(404).json({success: false, error: '账号不存在或未登录(用 id 或账号名指定)'});
-	}
-
-	const cookies = resolveInventoryCookies(attempt);
-	if (!cookies.length) {
-		return res.status(409).json({success: false, error: '当前账号没有可用的 WebSession cookies,请重新登录'});
-	}
-
-	const packageIds = Array.isArray(body.packageIds)
-		? body.packageIds
-		: (body.packageId != null ? [body.packageId] : []);
-	const dryRun = body.dryRun !== false; // 默认 true:不扣款
-
 	try {
-		const result = await steamStorePurchaser.purchasePackages({
-			cookies,
-			sessionid: attempt.webSessionID,
-			userAgent: attempt.userAgent,
-			country: attempt.country || attempt.loginGeoCountry || 'CN',
-			currency: attempt.currency,
-			packageIds,
-			dryRun
-		});
-		res.json({success: true, result});
+		res.json({success: true, result: await buyGame.testPurchase(req.body || {})});
 	} catch (err) {
-		res.status(500).json({success: false, error: err && err.message ? err.message : '购买失败'});
+		sendBuyGameError(res, err, '购买失败');
 	}
 });
 
-// ===== 买游戏(协议购买整款 Steam 游戏)=====
+// ===== 买游戏(协议购买整款 Steam 游戏,src/buygame/)=====
+function sendBuyGameError(res, err, fallback) {
+	res.status(err && err.statusCode || 500).json({success: false, error: err && err.message || fallback});
+}
 
 // 可购买账户:已登录且有 WebSession cookie 的账号(买游戏只需 cookie,不需要 GC)。
 app.get('/api/buygame/online-accounts', (req, res) => {
-	res.json({success: true, accounts: listBuyGameOnlineAccounts()});
+	res.json({success: true, accounts: listCookieFlowAccounts(attempts.values(), resolveInventoryCookies)});
 });
 
-// 解析一个 subid(packageid):返回游戏名/价格,供前端确认购买内容。
+// 解析一个 subid(packageid):返回游戏名/价格,供前端确认购买内容。query: { packageId|subid, accountId? }
 app.get('/api/buygame/resolve', async (req, res) => {
-	const packageId = Number(req.query.packageId || req.query.subid);
-	if (!Number.isInteger(packageId) || packageId <= 0) {
-		return res.status(400).json({success: false, error: 'packageId 无效'});
-	}
-	const attempt = findAttemptByKey(String(req.query.accountId || req.query.account || '').trim());
-	const country = (attempt && (attempt.country || attempt.loginGeoCountry)) || 'US';
 	try {
-		const info = await resolveSteamPackageInfo(packageId, country, attempt);
-		res.json({success: true, package: info});
+		res.json({success: true, package: await buyGame.resolvePackage(req.query)});
 	} catch (err) {
-		res.status(502).json({success: false, error: err && err.message ? err.message : '解析失败'});
+		sendBuyGameError(res, err, '解析失败');
 	}
 });
 
 app.get('/api/buygame/tasks', (req, res) => {
-	res.json({success: true, tasks: buyGameTasks.map(publicBuyGameTask)});
+	res.json({success: true, tasks: buyGame.listTasks()});
 });
 
-// 创建并执行买游戏任务。body: { items:[{accountId, packageIds:[subid...]}], dryRun }
+// 创建并执行买游戏任务。body: { items:[{accountId, packageIds:[subid...]}], dryRun, concurrency }
 app.post('/api/buygame/tasks', (req, res) => {
-	const body = req.body || {};
-	const rawItems = Array.isArray(body.items) ? body.items : [];
-	const items = [];
-	for (const raw of rawItems) {
-		const attempt = findAttemptByKey(String((raw && (raw.accountId || raw.account)) || '').trim());
-		if (!attempt) {
-			continue;
-		}
-		const packageIds = (Array.isArray(raw.packageIds) ? raw.packageIds : [])
-			.map(id => Number(id))
-			.filter(id => Number.isInteger(id) && id > 0);
-		if (!packageIds.length) {
-			continue;
-		}
-		items.push({attempt, packageIds: Array.from(new Set(packageIds))});
+	try {
+		res.json({success: true, task: buyGame.createTask(req.body || {})});
+	} catch (err) {
+		sendBuyGameError(res, err, '创建任务失败');
 	}
-	if (!items.length) {
-		return res.status(400).json({success: false, error: '没有有效的购买项(账号未在线或 subid 无效)'});
-	}
-	const dryRun = body.dryRun === true; // 买游戏默认真扣款;前端可勾选试运行
-	const task = createBuyGameTask(items, dryRun, body.concurrency); // 并发线程数,默认 3
-	startBuyGameTask(task);
-	res.json({success: true, task: publicBuyGameTask(task)});
 });
 
 // ===== Steam 社区市场:求购单(src/market/)=====
@@ -1328,7 +1268,7 @@ function sendMarketError(res, err, fallback) {
 
 // 可挂求购的在线账户(同「买游戏」:已登录 + 有 WebSession cookie)。
 app.get('/api/market/online-accounts', (req, res) => {
-	res.json({success: true, accounts: listBuyGameOnlineAccounts()});
+	res.json({success: true, accounts: listCookieFlowAccounts(attempts.values(), resolveInventoryCookies)});
 });
 
 // 行情参考。query: { accountId|account, url | (appid, marketHashName), itemNameId? }
@@ -2275,238 +2215,9 @@ function publicInventorySnapshot(snapshot) {
 purchase.catalog.preload();
 uu.start();
 
-// 「买游戏」「市场求购」都是纯 cookie 的 HTTP 重放(services/steamStorePurchase.js / src/market/),
-// 不需要活的 steam-user 连接,只要账号有有效 WebSession cookie 且未被手动登出即可用。
-// 这里特意不用 isAttemptOnline(src/steam/attempts.ts)—— 那个要求 status 仍是 logged_on/web_session,
-// 会把「登录后 steam 客户端断线(status=disconnected)」的账号误判为离线,导致挂求购/买游戏页选不到。
-// 与账户管理页「在线/登录成功」口径对齐:前端 collapseAttemptStatus 会把登录后断线/失败的账号
-// 仍折叠成「登录成功」并归入「在线」组(有 cookie 即说明曾成功拿到 WebSession),这里据此放行。
-function isAttemptUsableForCookieFlow(attempt) {
-	return !!(attempt
-		&& attempt.accountName
-		&& String(attempt.status || '') !== 'logged_out');
-}
-
-// ===== 买游戏:辅助函数 =====
-
-// 按内部 id 或账号名(不区分大小写)查找 attempt。
+// 按 attemptId 或账号名(不区分大小写)找会话,不看在线状态。
 function findAttemptByKey(key) {
-	if (!key) {
-		return null;
-	}
-	if (attempts.has(key)) {
-		return attempts.get(key);
-	}
-	const lower = key.toLowerCase();
-	for (const attempt of attempts.values()) {
-		if (String(attempt.accountName || '').toLowerCase() === lower) {
-			return attempt;
-		}
-	}
-	return null;
-}
-
-// 可买游戏的在线账户:已登录 + 有 WebSession cookie。
-function listBuyGameOnlineAccounts() {
-	return Array.from(attempts.values())
-		.filter(isAttemptUsableForCookieFlow)
-		.filter(attempt => resolveInventoryCookies(attempt).length > 0)
-		.sort((left, right) => String(left.accountName || '').localeCompare(String(right.accountName || ''), 'zh-CN'))
-		.map(attempt => ({
-			account: attempt.accountName,
-			attemptId: attempt.id,
-			personaName: attempt.personaName || '',
-			country: attempt.country || attempt.loginGeoCountry || '',
-			hasWallet: !!attempt.hasWallet,
-			currency: attempt.currency == null ? null : Number(attempt.currency),
-			currencyISO: String(attempt.currencyISO || currencyIdToIso(attempt.currency) || 'USD').trim().toUpperCase(),
-			balance: attempt.balance == null ? null : Number(attempt.balance)
-		}));
-}
-
-// 解析 packageid → 游戏名/价格(用账号的 cookie/UA/国家请求,拿区域价)。
-async function resolveSteamPackageInfo(packageId, country, attempt) {
-	const cc = String(country || 'US').trim().toUpperCase() || 'US';
-	const headers = {Accept: 'application/json, text/plain, */*', 'User-Agent': (attempt && attempt.userAgent) || 'Mozilla/5.0'};
-	const cookies = attempt ? resolveInventoryCookies(attempt) : [];
-	if (cookies.length) {
-		headers.Cookie = cookies.join('; ');
-	}
-	const url = `https://store.steampowered.com/api/packagedetails?packageids=${packageId}&cc=${cc}&l=schinese`;
-	const res = await fetch(url, {headers});
-	if (!res.ok) {
-		throw new Error(`packagedetails HTTP ${res.status}`);
-	}
-	const payload = await res.json();
-	const entry = payload && payload[packageId];
-	if (!entry || !entry.success || !entry.data) {
-		throw new Error('未找到该 subid(可能不存在或当前区域不可见)');
-	}
-	const data = entry.data;
-	const price = data.price || null;
-	const apps = Array.isArray(data.apps) ? data.apps : [];
-	return {
-		packageId,
-		name: String(data.name || (apps[0] && apps[0].name) || `Package ${packageId}`),
-		appid: apps.length ? Number(apps[0].id) : 0,
-		priceCents: price ? Number(price.final) : 0,
-		currencyISO: price ? String(price.currency || '').toUpperCase() : '',
-		discountPercent: price ? Number(price.discount_percent || 0) : 0,
-		available: !!price || (data.is_free_license === true)
-	};
-}
-
-// ===== 买游戏:任务模型与执行 =====
-
-function emitBuyGameTask(task, eventName = 'buygame:task-updated') {
-	io.emit(eventName, publicBuyGameTask(task));
-}
-
-function publicBuyGameTask(task) {
-	return {
-		id: task.id,
-		status: task.status,
-		dryRun: !!task.dryRun,
-		concurrency: Number(task.concurrency || BUYGAME_DEFAULT_CONCURRENCY),
-		createdAt: task.createdAt,
-		startedAt: task.startedAt,
-		finishedAt: task.finishedAt,
-		totalAccounts: Number(task.totalAccounts || 0),
-		processedAccounts: Number(task.processedAccounts || 0),
-		successCount: Number(task.successCount || 0),
-		failCount: Number(task.failCount || 0),
-		accounts: Array.isArray(task.accounts) ? task.accounts.map(acc => ({
-			account: acc.account,
-			attemptId: acc.attemptId,
-			status: acc.status,
-			country: acc.country,
-			currency: acc.currency == null ? null : Number(acc.currency),
-			currencyISO: acc.currencyISO,
-			packageIds: acc.packageIds.slice(),
-			balanceBefore: acc.balanceBefore,
-			spentCents: acc.spentCents == null ? null : Number(acc.spentCents),
-			transId: acc.transId || '',
-			error: acc.error || '',
-			updatedAt: acc.updatedAt || ''
-		})) : []
-	};
-}
-
-function createBuyGameTask(items, dryRun, concurrency) {
-	const createdAt = new Date().toISOString();
-	const accounts = items.map(item => ({
-		attemptId: item.attempt.id,
-		account: item.attempt.accountName,
-		status: 'queued',
-		country: item.attempt.country || item.attempt.loginGeoCountry || '',
-		currency: item.attempt.currency == null ? null : Number(item.attempt.currency),
-		currencyISO: String(item.attempt.currencyISO || currencyIdToIso(item.attempt.currency) || 'USD').toUpperCase(),
-		packageIds: item.packageIds.slice(),
-		balanceBefore: item.attempt.balance == null ? null : Number(item.attempt.balance),
-		spentCents: null,
-		transId: '',
-		error: '',
-		updatedAt: createdAt
-	}));
-	const task = {
-		id: Date.now().toString(36) + '-' + crypto.randomBytes(3).toString('hex'),
-		status: 'queued',
-		dryRun: !!dryRun,
-		concurrency: Math.max(1, Math.min(BUYGAME_MAX_CONCURRENCY, Math.round(Number(concurrency)) || BUYGAME_DEFAULT_CONCURRENCY)),
-		createdAt,
-		startedAt: '',
-		finishedAt: '',
-		totalAccounts: accounts.length,
-		processedAccounts: 0,
-		successCount: 0,
-		failCount: 0,
-		accounts,
-		_items: items
-	};
-	buyGameTasks.unshift(task);
-	buyGameTaskIndex.set(task.id, task);
-	if (buyGameTasks.length > BUYGAME_TASK_LIMIT) {
-		const removed = buyGameTasks.pop();
-		if (removed) {
-			buyGameTaskIndex.delete(removed.id);
-		}
-	}
-	emitBuyGameTask(task, 'buygame:task-created');
-	return task;
-}
-
-function startBuyGameTask(task) {
-	setTimeout(() => {
-		runBuyGameTask(task).catch(err => {
-			task.status = 'failed';
-			task.finishedAt = new Date().toISOString();
-			emitBuyGameTask(task, 'buygame:task-completed');
-			console.error('[buygame] task failed:', err && err.message);
-		});
-	}, 0);
-}
-
-async function runBuyGameTask(task) {
-	if (!task || task.status !== 'queued') {
-		return;
-	}
-	task.status = 'running';
-	task.startedAt = new Date().toISOString();
-	emitBuyGameTask(task);
-
-	// 单个账号的购买流程(各账号互不依赖,可并发执行)
-	const processAccount = async (i) => {
-		const acc = task.accounts[i];
-		const attempt = task._items[i].attempt;
-		acc.status = 'running';
-		acc.updatedAt = new Date().toISOString();
-		emitBuyGameTask(task);
-
-		try {
-			const cookies = resolveInventoryCookies(attempt);
-			if (!cookies.length) {
-				throw new Error('账号缺少 WebSession cookies,请重新登录');
-			}
-			const result = await steamStorePurchaser.purchasePackages({
-				cookies,
-				sessionid: attempt.webSessionID,
-				userAgent: attempt.userAgent,
-				country: attempt.country || attempt.loginGeoCountry || 'US',
-				currency: attempt.currency,
-				packageIds: acc.packageIds,
-				dryRun: task.dryRun
-			});
-			acc.transId = result.transId || '';
-			acc.spentCents = result.price ? Number(result.price.finalCents) : null;
-			acc.status = task.dryRun ? 'verified' : 'success';
-			if (!task.dryRun) {
-				task.successCount++;
-			}
-		} catch (err) {
-			acc.status = 'failed';
-			acc.error = err && err.message ? err.message : '购买失败';
-			task.failCount++;
-		}
-		acc.updatedAt = new Date().toISOString();
-		task.processedAccounts++;
-		emitBuyGameTask(task);
-	};
-
-	// 多线程(并发)执行:开 N 个 worker 从共享游标取账号,N = task.concurrency。
-	// JS 单线程事件循环,cursor++ 与计数自增都在 await 之间同步完成,无竞态。
-	const concurrency = Math.max(1, Math.min(BUYGAME_MAX_CONCURRENCY, Number(task.concurrency) || BUYGAME_DEFAULT_CONCURRENCY));
-	let cursor = 0;
-	const worker = async () => {
-		while (cursor < task.accounts.length) {
-			const i = cursor++;
-			await processAccount(i);
-		}
-	};
-	await Promise.all(Array.from({length: Math.min(concurrency, task.accounts.length)}, worker));
-
-	task.status = 'completed';
-	task.finishedAt = new Date().toISOString();
-	emitBuyGameTask(task, 'buygame:task-completed');
+	return findAttemptInMap(attempts, key);
 }
 
 async function fetchCommunityInventorySnapshot(attempt) {

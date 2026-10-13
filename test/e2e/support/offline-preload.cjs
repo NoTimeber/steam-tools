@@ -21,9 +21,11 @@
 // 6. 假 Steam 市场(steamcommunity.com/market/*),有状态:挂求购、手机确认、撤单、我的求购单,见 fakeMarket();
 //    场景开关在 FAKE_MARKET_FILE。steamcommunity 替身的 getConfirmations 列出待确认的求购单;
 //    steam-totp 的 getTimeOffset 换成离线版(返回 0)。
-// 7. 外网拦截:全局 fetch 只放行本机;汇率接口返回固定数据;其余外部请求直接失败。
+// 7. 假 Steam 商店结算(store / api / checkout.steampowered.com 上买游戏用到的那几个端点),有状态:
+//    每个账号钱包 10.00 美元、已拥有的包,见 fakeStore();商品可用 FAKE_STORE_PACKAGES 追加。
+// 8. 外网拦截:全局 fetch 只放行本机;汇率接口返回固定数据;其余外部请求直接失败。
 //
-// logOn / logOff / gamesPlayed / sendToGC / 下单各步 / 悠悠请求 / 报价接受 / 市场请求和确认 / 被拦的外部请求
+// logOn / logOff / gamesPlayed / sendToGC / 下单各步 / 悠悠请求 / 报价接受 / 市场请求和确认 / 商店结算请求 / 被拦的外部请求
 // 都追加一行 JSON 到 FAKE_STEAM_LOG(设置了才写)。
 
 const path = require('path');
@@ -444,6 +446,149 @@ function fakeMarket(url, init) {
 	return json({success: 8});
 }
 
+// ===== 假 Steam 商店结算 =====
+// 商品默认:10 = 4.99 美元的游戏,20 = 免费包;FAKE_STORE_PACKAGES(JSON)可追加,形如 {"30": {"name": "...", "final": 5000}}。
+// 账号按 cookie 里的 steamLoginSecure 区分,webapi_token 是 "WT-" + 它;inittransaction 的 sessionid 必须等于 cookie 里的。
+// 钱包:每个账号 1000 分,finalizetransaction 成功才扣;已拥有的包再买,交易状态回 purchaseresultdetail=9。
+const store = {seq: 0, wallets: new Map(), owned: new Map(), carts: new Map(), txns: new Map()};
+
+function storePackages() {
+	let extra = {};
+	try {
+		extra = JSON.parse(process.env.FAKE_STORE_PACKAGES || '{}');
+	} catch (_) {}
+	return {10: {name: 'Fake Game', final: 499, appid: 1010}, 20: {name: 'Free Pack', final: 0, appid: 2020, free: true}, ...extra};
+}
+
+function storeWallet(owner) {
+	if (!store.wallets.has(owner)) {
+		store.wallets.set(owner, 1000);
+	}
+	return store.wallets.get(owner);
+}
+
+function cartTotal(items, packages) {
+	return items.reduce((sum, id) => sum + Number(packages[id].final || 0), 0);
+}
+
+// 不认识的路径返回 null(交给外网拦截)
+function fakeStore(url, init) {
+	const headers = Object.fromEntries(Object.entries((init && init.headers) || {}).map(([key, value]) => [key.toLowerCase(), String(value)]));
+	const owner = cookieValue(headers.cookie, 'steamLoginSecure');
+	const body = init && init.body ? String(init.body) : '';
+	const form = body && !body.startsWith('input_json=') ? Object.fromEntries(new URLSearchParams(body)) : {};
+	const rawInput = body.startsWith('input_json=') ? decodeURIComponent(body.slice('input_json='.length)) : url.searchParams.get('input_json');
+	const input = rawInput ? JSON.parse(rawInput) : null;
+	const where = url.hostname + url.pathname;
+	const json = value => new Response(JSON.stringify(value), {status: 200, headers: {'content-type': 'application/json'}});
+	const packages = storePackages();
+	const tokenOk = !!owner && url.searchParams.get('access_token') === 'WT-' + owner;
+
+	switch (where) {
+		case 'store.steampowered.com/api/packagedetails': {
+			record({event: 'storeRequest', method: 'GET', path: where, owner, query: Object.fromEntries(url.searchParams)});
+			const ids = String(url.searchParams.get('packageids') || '').split(',');
+			return json(Object.fromEntries(ids.map(id => {
+				const pkg = packages[id];
+				if (!pkg) {
+					return [id, {success: false}];
+				}
+				const data = {name: pkg.name, apps: [{id: pkg.appid || 0, name: pkg.name}]};
+				if (pkg.free) {
+					data.is_free_license = true;
+				} else {
+					data.price = {currency: 'USD', initial: pkg.final, final: pkg.final, discount_percent: 0};
+				}
+				return [id, {success: true, data}];
+			})));
+		}
+		case 'store.steampowered.com/pointssummary/ajaxgetasyncconfig':
+			record({event: 'storeRequest', method: 'GET', path: where, owner});
+			return json(owner ? {success: 1, data: {webapi_token: 'WT-' + owner}} : {success: 1, data: {}});
+		case 'api.steampowered.com/IShoppingCartService/CreateNewShoppingCart/v1/': {
+			record({event: 'storeRequest', method: 'POST', path: where, owner});
+			if (!tokenOk) {
+				return new Response('Unauthorized', {status: 401});
+			}
+			const gid = String(8800000000 + ++store.seq);
+			store.carts.set(gid, {owner, items: []});
+			return json({response: {gidshoppingcart: gid}});
+		}
+		case 'api.steampowered.com/IShoppingCartService/AddPackages/v1/': {
+			record({event: 'storeRequest', method: 'POST', path: where, owner, input});
+			const cart = store.carts.get(String(input && input.gidshoppingcart));
+			if (!tokenOk || !cart || cart.owner !== owner) {
+				return json({response: {}});
+			}
+			for (const item of input.cart_items || []) {
+				if (packages[item.packageid]) {
+					cart.items.push(Number(item.packageid));
+				}
+			}
+			return json({response: {contents: {lineitems: cart.items.map(packageid => ({packageid}))}}});
+		}
+		case 'api.steampowered.com/ICheckoutService/ValidateCart/v1/': {
+			record({event: 'storeRequest', method: 'GET', path: where, owner});
+			const cart = store.carts.get(String(input && input.gidshoppingcart));
+			if (!tokenOk || !cart) {
+				return json({response: {}});
+			}
+			const subtotal = cartTotal(cart.items, packages);
+			const wallet = storeWallet(owner);
+			const money = cents => ({amount_in_cents: String(cents), formatted_amount: '$' + (cents / 100).toFixed(2)});
+			return json({response: {estimated_totals: {subtotal: money(subtotal), wallet_balance: money(wallet), exceeding_wallet_balance: money(Math.max(0, subtotal - wallet))}}});
+		}
+		case 'checkout.steampowered.com/checkout/inittransaction/': {
+			record({event: 'storeRequest', method: 'POST', path: where, owner, form});
+			const cart = store.carts.get(String(form.gidShoppingCart));
+			if (!owner || form.sessionid !== cookieValue(headers.cookie, 'sessionid') || !cart || cart.owner !== owner) {
+				return json({success: 2});
+			}
+			const transid = String(7700000000 + ++store.seq);
+			store.txns.set(transid, {owner, items: cart.items.slice(), done: false, detail: null});
+			return json({success: 1, transid, paymentmethod: 'steamaccount'});
+		}
+		case 'checkout.steampowered.com/checkout/getfinalprice/': {
+			record({event: 'storeRequest', method: 'GET', path: where, owner});
+			const txn = store.txns.get(String(url.searchParams.get('transid')));
+			if (!txn || txn.owner !== owner) {
+				return json({success: 2});
+			}
+			return json({success: 1, base: cartTotal(txn.items, packages), discount: 0, tax: 0, shipping: 0, importfee: 0, currencycode: 1});
+		}
+		case 'checkout.steampowered.com/checkout/finalizetransaction/': {
+			record({event: 'storeRequest', method: 'POST', path: where, owner, form});
+			const txn = store.txns.get(String(form.transid));
+			if (!txn || txn.owner !== owner) {
+				return json({success: 2});
+			}
+			const owned = store.owned.get(owner) || new Set();
+			const total = cartTotal(txn.items, packages);
+			if (txn.items.some(id => owned.has(id))) {
+				txn.detail = 9;
+			} else if (total > storeWallet(owner)) {
+				txn.detail = 2;
+			} else {
+				store.wallets.set(owner, storeWallet(owner) - total);
+				txn.items.forEach(id => owned.add(id));
+				store.owned.set(owner, owned);
+				txn.detail = 0;
+			}
+			txn.done = true;
+			return json({success: 22});
+		}
+		case 'checkout.steampowered.com/checkout/transactionstatus/': {
+			record({event: 'storeRequest', method: 'GET', path: where, owner});
+			const txn = store.txns.get(String(url.searchParams.get('transid')));
+			if (!txn || !txn.done) {
+				return json({success: 22});
+			}
+			return json({success: txn.detail === 0 ? 1 : 2, purchaseresultdetail: txn.detail});
+		}
+	}
+	return null;
+}
+
 // ===== 外网拦截 =====
 const FIXED_USD_RATES = {result: 'success', base_code: 'USD', rates: {USD: 1, EUR: 0.9, GBP: 0.78, CNY: 7.1, UYU: 40, JPY: 150, RUB: 90}};
 const realFetch = globalThis.fetch;
@@ -457,6 +602,12 @@ globalThis.fetch = async function offlineFetch(input, init) {
 	}
 	if (url.hostname === 'steamcommunity.com' && url.pathname.startsWith('/market/')) {
 		return fakeMarket(url, init);
+	}
+	if (['store.steampowered.com', 'api.steampowered.com', 'checkout.steampowered.com'].includes(url.hostname)) {
+		const reply = fakeStore(url, init);
+		if (reply) {
+			return reply;
+		}
 	}
 	if (url.origin + url.pathname === 'https://open.er-api.com/v6/latest/USD') {
 		return new Response(JSON.stringify(FIXED_USD_RATES), {status: 200, headers: {'content-type': 'application/json'}});

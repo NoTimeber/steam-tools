@@ -46,7 +46,7 @@ async function freePort(): Promise<number> {
 export interface FakeSteamEvent {
 	run: string;
 	event: 'logOn' | 'logOff' | 'gamesPlayed' | 'sendToGC' | 'blockedFetch' | 'purchaseInit' | 'microTxnAuthorize' | 'purchaseFinalize'
-		| 'uuRequest' | 'offerAccept' | 'offerConfirm' | 'marketRequest' | 'marketConfirmList' | 'marketConfirm' | 'timeOffset';
+		| 'uuRequest' | 'offerAccept' | 'offerConfirm' | 'marketRequest' | 'marketConfirmList' | 'marketConfirm' | 'timeOffset' | 'storeRequest';
 	client?: string;
 	details?: Record<string, unknown>;
 	apps?: number[];
@@ -67,7 +67,9 @@ export interface FakeSteamEvent {
 	/** offerAccept / offerConfirm */
 	offerId?: string;
 	identitySecret?: string;
-	/** marketRequest:请求方法、查询参数、表单、Referer;owner 是 cookie 里的 steamLoginSecure(区分账号) */
+	/** storeRequest:Steam WebAPI 的 input_json */
+	input?: Record<string, any>;
+	/** marketRequest / storeRequest:请求方法、查询参数、表单、Referer;owner 是 cookie 里的 steamLoginSecure(区分账号) */
 	method?: string;
 	query?: Record<string, string>;
 	form?: Record<string, string>;
