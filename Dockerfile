@@ -34,5 +34,5 @@ EXPOSE 53110
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
 	CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||53110)+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
-# 直接跑 server.js;旧版 launcher 的自更新在容器里不用,更新走重新构建镜像
-CMD ["node", "app/server.js"]
+# 直接跑入口;旧版 launcher 的自更新在容器里不用,更新走重新构建镜像
+CMD ["node", "src/main.ts"]

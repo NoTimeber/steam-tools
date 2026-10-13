@@ -1,4 +1,4 @@
-// 端到端测试工具:用临时目录 + 随机端口启动真实的 app/server.js(预加载 offline-preload.cjs:
+// 端到端测试工具:用临时目录 + 随机端口启动真实的服务端入口 src/main.ts(预加载 offline-preload.cjs:
 // 假 steam-user、最小 GC 模拟、外网拦截),
 // 外加一个带 cookie / Origin / X-Forwarded-For 的 HTTP 客户端。
 
@@ -14,7 +14,7 @@ import {openStore} from '../../../src/store/index.ts';
 import type {Store} from '../../../src/store/index.ts';
 
 export const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
-const SERVER_ENTRY = join(REPO_ROOT, 'app', 'server.js');
+const SERVER_ENTRY = join(REPO_ROOT, 'src', 'main.ts');
 const FAKE_STEAM = join(REPO_ROOT, 'test', 'e2e', 'support', 'offline-preload.cjs');
 
 // 外部环境里可能影响被测服务的变量,启动前一律去掉

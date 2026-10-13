@@ -1,5 +1,5 @@
 // 买游戏服务(从 app/server.js 移来):解析 subid、多账号购买任务(并发执行,socket.io 推进度)、调试用的单次购买。
-// app/server.js 只负责路由;会话查找、cookies、推送由它注入,单元测试用假的。
+// 路由在 ./routes.ts;会话查找、cookies、推送由 src/main.ts 注入,单元测试用假的。
 
 import {randomBytes} from 'node:crypto';
 import {currencyIdToIso} from '../steam/currencies.ts';

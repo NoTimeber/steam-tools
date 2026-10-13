@@ -24,12 +24,12 @@ export interface ItemSchema {
 	error?: string;
 }
 
+/** 用到的 ../items/schema.ts 描述字段 */
 export interface ItemDescription {
 	name?: string;
 	definitionDisplayName?: string;
 	type?: string;
 	category?: string;
-	[key: string]: unknown;
 }
 
 export type DescribeGcItem = (schema: ItemSchema, item: {def_index: number}) => ItemDescription | null | undefined;

@@ -48,7 +48,7 @@ type Protos = Record<string, ProtoType>;
 
 let storeMessages: Record<GameId, StoreMessages> | null = null;
 
-// 用到时才加载 GC 的 protobuf 定义:app/server.js 已按顺序加载过(并修好了共享根的冲突),这里拿到的是同一份缓存。
+// 用到时才加载 GC 的 protobuf 定义:启动时 src/steam/gc-libs.ts 已按顺序加载过(并修好了共享根的冲突),这里拿到的是同一份缓存。
 // 注意:两个库的生成代码共用 protobufjs 的默认根,后加载的 tf2 会覆盖同名消息类型。CS2 这边因此实际用的是
 // TF2 版的 CMsgStoreGetUserData(没有 currency 字段,请求里的钱包币种编码时被丢掉)和 TF2 版的回包
 // (字段名是 currency/country 而不是 *_deprecated,下面两种都读)。下单用的 Init/Finalize 两边字段一致,不受影响。

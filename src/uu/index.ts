@@ -1,5 +1,5 @@
 // UU(悠悠有品)发货服务(从 app/server.js 移来):token 管理、短信登录、每账号每游戏的自动发货轮询、CS2 自动上架。
-// app/server.js 只负责路由;UU 接口、Steam 报价接受、存储、推送都由这里注入,单元测试用假的。
+// 路由在 ./routes.ts;UU 接口、Steam 报价接受、存储、推送都由这里注入,单元测试用假的。
 
 import {randomBytes} from 'node:crypto';
 import type {Attempt} from '../steam/session-manager.ts';

@@ -1,5 +1,5 @@
 'use strict';
-// 端到端测试的离线环境:在 app/server.js 之前预加载(node --require),保证测试不碰任何外部服务。
+// 端到端测试的离线环境:在服务端入口 src/main.ts 之前预加载(node --require),保证测试不碰任何外部服务。
 //
 // 1. 假 steam-user:
 //    - refreshToken 以 "RT-GOOD-" 开头,或密码是 "pw-good" → 登录成功
@@ -61,7 +61,7 @@ function record(entry) {
 	}
 }
 
-// GC 消息的 protobuf 类型(在用到时才加载,不改变 server.js 自己的模块加载顺序)
+// GC 消息的 protobuf 类型(在用到时才加载,不改变服务端自己的模块加载顺序)
 function gcProtos(appid) {
 	const load = name => require(require.resolve(name, {paths: [appDir]}));
 	const store = protos => ({

@@ -1,5 +1,5 @@
 // 市场求购服务(从 app/server.js 移来):行情参考、多账号挂求购(含手机确认)、撤单、和 Steam 对账。
-// app/server.js 只负责路由;会话查找、cookies、文件读写由它注入,单元测试用假的。
+// 路由在 ./routes.ts;会话查找、cookies、文件读写由 src/main.ts 注入,单元测试用假的。
 
 import {randomUUID} from 'node:crypto';
 import {currencyIdToIso} from '../steam/currencies.ts';

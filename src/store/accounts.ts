@@ -3,7 +3,7 @@ import {bool, nowIso, num, str, strOrNull, transaction} from '../core/db.ts';
 import type {Vault} from '../core/vault.ts';
 import type {SettingsStore} from './settings.ts';
 
-// 与旧版 accounts.json 每一项的结构一致(server.js 仍按这个形状使用)。
+// 与旧版 accounts.json 每一项的结构一致(账号模块仍按这个形状使用)。
 export interface StoredAccount {
 	id: string;
 	accountName: string;

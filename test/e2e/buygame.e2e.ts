@@ -1,4 +1,4 @@
-// 买游戏:解析 subid → 试运行 → 真扣款 → 重复购买被拒 → 余额不足,走真实的 app/server.js 和 HTTP 接口。
+// 买游戏:解析 subid → 试运行 → 真扣款 → 重复购买被拒 → 余额不足,走真实的服务端和 HTTP 接口。
 // Steam 商店结算是假的(support/offline-preload.cjs 的 fakeStore):每个账号钱包 10.00 美元,10 号包 4.99 美元,30 号包 50.00 美元。
 
 import {after, before, describe, test} from 'node:test';

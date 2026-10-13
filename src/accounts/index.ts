@@ -1,6 +1,6 @@
 // 账号与登录(从 app/server.js 移来):账户名单同步、账号资料、maFile 导入、令牌验证码、
 // 登录(密码 / refreshToken)、Steam Guard、WebSession、登出、删除账号、连接/断开 GC,以及重启后自动恢复登录要的凭据。
-// app/server.js 只负责路由;会话管理、加密库、推送由它注入,单元测试用假的。
+// 路由在 ./routes.ts;会话管理、加密库、推送由 src/main.ts 注入,单元测试用假的。
 
 import {createRequire} from 'node:module';
 import {gameConfig, normalizeGame} from '../steam/games.ts';

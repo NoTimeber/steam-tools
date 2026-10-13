@@ -12,7 +12,7 @@ echo ============================================
 echo   Steam Tool  (direct mode, auto-update OFF)
 echo ============================================
 echo.
-node app\server.js
+node src\main.ts
 set ERR=%errorlevel%
 echo.
 echo Server stopped (exit code: %ERR%)

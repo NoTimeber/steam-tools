@@ -1,5 +1,4 @@
 // 凭据数据层入口:打开数据库、加载主密钥、跑迁移、导入旧版 JSON。
-// 旧代码(app/server.js,CommonJS)通过 require('../src/store/index.ts') 使用。
 
 import {join} from 'node:path';
 import {migrate, openDatabase} from '../core/db.ts';

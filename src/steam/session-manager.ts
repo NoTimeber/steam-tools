@@ -50,7 +50,7 @@ export interface GuardRequest {
 	lastCodeWrong: boolean;
 }
 
-// 字段与旧版 attempt 对象一致:server.js 里内购/库存/UU 等大量代码直接读写这些字段。
+// 字段与旧版 attempt 对象一致:内购/库存/UU 等模块直接读写这些字段。
 export interface Attempt {
 	id: string;
 	createdAt: number;

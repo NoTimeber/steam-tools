@@ -1,4 +1,4 @@
-// 市场求购:行情参考 → 挂求购(含手机确认)→ 刷新对账 → 撤单,走真实的 app/server.js 和 HTTP 接口。
+// 市场求购:行情参考 → 挂求购(含手机确认)→ 刷新对账 → 撤单,走真实的服务端和 HTTP 接口。
 // Steam 市场和手机确认是假的(support/offline-preload.cjs 的 fakeMarket),场景写在 FAKE_MARKET_FILE 里,测试随时改。
 
 import {after, before, describe, test} from 'node:test';

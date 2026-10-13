@@ -1,4 +1,4 @@
-// CS2 / TF2 游戏内购(GC 商店):商品目录 + 真实下单任务。app/server.js 只负责路由和注入依赖。
+// CS2 / TF2 游戏内购(GC 商店):商品目录 + 真实下单任务。路由在 ./routes.ts,依赖由 src/main.ts 注入。
 
 import {gameConfig} from '../steam/games.ts';
 import {currencyIdToIso} from '../steam/currencies.ts';
