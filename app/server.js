@@ -58,7 +58,6 @@ const {
 	gameConfig: getPurchaseGameConfig
 } = require('../src/steam/games.ts');
 const {
-	updateDefaultGcState: updateAttemptDefaultGcState,
 	ensureGameSession: ensureAttemptGameSession,
 	disconnectGameSession: disconnectAttemptGameSession
 } = require('../src/steam/gc-client.ts');
@@ -76,6 +75,9 @@ const {createBuyGameService} = require('../src/buygame/index.ts');
 const {createWalletService} = require('../src/wallet/index.ts');
 // 账号与登录(TypeScript):名单同步、账号资料、maFile、登录/登出/Guard、删除账号、自动恢复凭据,见 src/accounts/。
 const {createProfiles, createAccountService, resolveAccountCountry} = require('../src/accounts/index.ts');
+// 库存(TypeScript):社区库存为准、GC 库存兜底;CS2/TF2 GC 模块的挂载,见 src/inventory/、src/steam/gc-modules.ts。
+const {createInventoryService} = require('../src/inventory/index.ts');
+const {createGcModuleAttacher} = require('../src/steam/gc-modules.ts');
 const {LOCAL_CM_FALLBACKS} = require('../src/steam/cm-fallback.ts');
 
 const PORT = Number(process.env.PORT || 53110);
@@ -132,14 +134,6 @@ const CSGO_ENGLISH_FILE = path.join(SCHEMA_DIR, 'csgo_english.txt');
 const TF2_ITEMS_GAME_FILE = process.env.TF2_ITEMS_GAME_FILE ? path.resolve(process.env.TF2_ITEMS_GAME_FILE) : path.join(SCHEMA_DIR, 'tf2_items_game.txt');
 const TF2_SCHINESE_FILE = path.join(SCHEMA_DIR, 'tf2_schinese.txt');
 const TF2_ENGLISH_FILE = path.join(SCHEMA_DIR, 'tf2_english.txt');
-const INVENTORY_CACHE_TTL_MS = 15 * 1000;
-// 社区库存拉取失败后的冷却:冷却期内允许直接用 GC 兜底缓存,避免每次开库存都反复重试社区接口。
-const COMMUNITY_INV_RETRY_COOLDOWN_MS = 30 * 1000;
-const CS2_APP_ID = 730;
-const TF2_APP_ID = 440;
-const INVENTORY_APP_ID = CS2_APP_ID;
-const INVENTORY_CONTEXT_ID = 2;
-const INVENTORY_PAGE_SIZE = 2000;
 fs.mkdirSync(STEAM_USER_DIR, {recursive: true});
 fs.mkdirSync(CONFIG_COOKIES_DIR, {recursive: true});
 
@@ -279,6 +273,21 @@ const profiles = createProfiles({
 	readJson: readJsonFile
 });
 
+// 库存:CS2 物品名靠本地 schema(app/items-game-schema.js)描述 GC 物品;库存数量变了推送会话
+const inventory = createInventoryService({
+	describeGcItem: item => describeGcItem(ITEMS_GAME_SCHEMA, item),
+	cookiesFor: profiles.cookiesFor,
+	emit: attempt => sessions.emit(attempt)
+});
+// 新建 Steam 客户端时挂 CS2/TF2 GC 模块;终端机在 CS2 模块上挂抓包监听
+const gcModules = createGcModuleAttacher({
+	GlobalOffensive,
+	TeamFortress2,
+	events: {addLog: (attempt, level, message) => sessions.addLog(attempt, level, message), emit: attempt => sessions.emit(attempt)},
+	inventory,
+	onCs2Module: attempt => cs2Terminal.attach(attempt)
+});
+
 // Steam 登录会话。attempts 是会话表(id -> attempt),内购/库存/UU 等代码直接读它。
 const sessions = createSessionManager({
 	createClient(fingerprint) {
@@ -310,7 +319,7 @@ const sessions = createSessionManager({
 	sessions: store.sessions,
 	intents: store.loginIntents,
 	onChange: attempt => io.emit('attempt:update', sessions.publicAttempt(attempt)),
-	onClientCreated: attachGameCoordinators,
+	onClientCreated: (attempt, client) => gcModules.attach(attempt, client),
 	onWebSession: attempt => accountService.refreshCountry(attempt),   // 后台查真实账户国家(USD 等无法从货币推断)
 	currencyIdToIso,
 	resolveWalletCountry: attempt => resolveAccountCountry({
@@ -555,13 +564,11 @@ app.get('/api/inventory/:id', async (req, res) => {
 	}
 
 	try {
-		const inventory = await getAttemptInventory(attempt, {
-			forceRefresh: req.query.refresh === '1'
-		});
+		const snapshot = await inventory.get(attempt, {forceRefresh: req.query.refresh === '1'});
 		res.json({
 			success: true,
 			attempt: publicAttempt(attempt),
-			inventory
+			inventory: snapshot
 		});
 	} catch (err) {
 		res.status(err.statusCode || 500).json({
@@ -823,7 +830,7 @@ app.get('/api/terminal/state', async (req, res) => {
 	// 匹配不到再按 def 兜底(同 def 名字/图一样),都拿不到就用本地中文名兜底、无图。
 	const metaByAsset = new Map(), metaByDef = new Map();
 	try {
-		const snap = await getAttemptInventory(attempt, {});
+		const snap = await inventory.get(attempt, {});
 		// 只信社区源(带 schinese 中文名 + 图标);GC 源是英文名且无图,不如本地兜底,跳过。
 		if (snap && snap.source === 'community') {
 			for (const it of snap.items || []) {
@@ -1184,92 +1191,6 @@ if (SESSION_RESTORE_ENABLED) {
 	sessions.restoreAll(accountName => accountService.restoreCredentials(accountName));
 }
 
-// 给新建的 Steam 客户端挂 CS2/TF2 GC 模块(会话本身由 src/steam/session-manager.ts 管理)。
-// 尽早挂 GC 抓包(在 GC 欢迎消息到达前),这样连接时内嵌的初始 SO 缓存(含报价)也能被捕获。
-function attachGameCoordinators(attempt, client) {
-	try {
-		const csgo = new GlobalOffensive(client);
-		attempt.csgo = csgo;
-		attachCs2GcEvents(attempt, csgo);
-		cs2Terminal.attach(attempt);
-	} catch (err) {
-		addLog(attempt, 'warn', 'CS2 GC 初始化失败: ' + err.message);
-	}
-	try {
-		const tf2 = new TeamFortress2(client);
-		attempt.tf2 = tf2;
-		attachTf2GcEvents(attempt, tf2);
-	} catch (err) {
-		addLog(attempt, 'warn', 'TF2 GC 初始化失败: ' + err.message);
-	}
-}
-
-function attachCs2GcEvents(attempt, csgo) {
-	csgo.on('connectedToGC', () => {
-		attempt.cs2GcConnected = true;
-		attempt.tf2GcConnected = false;
-		attempt.activeGame = 'cs2';
-		updateAttemptDefaultGcState(attempt);
-		attempt.inventoryCount = countGcInventoryItems(csgo);
-		attempt.inventorySource = 'gc';
-		if (!attempt.inventoryCache || attempt.inventoryCache.source === 'gc') {
-			attempt.inventoryCache = buildGcInventorySnapshot(attempt);
-		}
-		// 创世终端机:附加 GC 抓包监听(捕获报价/解封结果),幂等。
-		try { cs2Terminal.attach(attempt); } catch (_) {}
-		emitAttempt(attempt);
-	});
-
-	csgo.on('disconnectedFromGC', () => {
-		attempt.cs2GcConnected = false;
-		updateAttemptDefaultGcState(attempt);
-		emitAttempt(attempt);
-	});
-
-	csgo.on('itemAcquired', () => {
-		handleGcInventoryChanged(attempt, csgo);
-	});
-
-	csgo.on('itemChanged', () => {
-		handleGcInventoryChanged(attempt, csgo);
-	});
-
-	csgo.on('itemRemoved', () => {
-		handleGcInventoryChanged(attempt, csgo);
-	});
-
-	csgo.on('error', err => {
-		attempt.cs2GcConnected = false;
-		updateAttemptDefaultGcState(attempt);
-		addLog(attempt, 'warn', 'GC 连接失败: ' + err.message);
-		emitAttempt(attempt);
-	});
-}
-
-function attachTf2GcEvents(attempt, tf2) {
-	tf2.on('connectedToGC', () => {
-		attempt.cs2GcConnected = false;
-		attempt.tf2GcConnected = true;
-		attempt.activeGame = 'tf2';
-		updateAttemptDefaultGcState(attempt);
-		emitAttempt(attempt);
-	});
-
-	tf2.on('disconnectedFromGC', () => {
-		attempt.tf2GcConnected = false;
-		updateAttemptDefaultGcState(attempt);
-		emitAttempt(attempt);
-	});
-}
-
-function handleGcInventoryChanged(attempt, csgo) {
-	attempt.inventoryCount = countGcInventoryItems(csgo);
-	if (!attempt.inventoryCache || attempt.inventoryCache.source === 'gc') {
-		attempt.inventoryCache = buildGcInventorySnapshot(attempt);
-	}
-	emitAttempt(attempt);
-}
-
 function getPurchaseGame(req) {
 	return normalizePurchaseGame(
 		req && req.query && req.query.game
@@ -1291,10 +1212,6 @@ function addLog(attempt, level, message) {
 	sessions.addLog(attempt, level, message);
 }
 
-function emitAttempt(attempt) {
-	sessions.emit(attempt);
-}
-
 function publicAttempt(attempt) {
 	return sessions.publicAttempt(attempt);
 }
@@ -1304,433 +1221,10 @@ function readJsonFile(file) {
 	return readJsonFileSafe(file);
 }
 
-function countGcInventoryItems(csgo) {
-	return getGcInventoryItems(csgo).length;
-}
-
-function hasGcAttribute(item, defIndex) {
-	return Array.isArray(item && item.attribute)
-		&& item.attribute.some(attribute => Number(attribute && attribute.def_index) === Number(defIndex));
-}
-
-function isGcDisplayInventoryItem(item) {
-	if (!item || item.casket_id) {
-		return false;
-	}
-
-	const flags = Number(item.flags || 0);
-	if ((flags & 24) === 24) {
-		return false;
-	}
-
-	if (Number(item.origin || 0) === 24 && hasGcAttribute(item, 277)) {
-		return false;
-	}
-
-	return true;
-}
-
-function getGcInventoryItems(csgo) {
-	if (!csgo || !Array.isArray(csgo.inventory)) {
-		return [];
-	}
-	return csgo.inventory.filter(isGcDisplayInventoryItem);
-}
-
-function buildGcInventoryItemMap(csgo) {
-	const map = new Map();
-	for (const item of getGcInventoryItems(csgo)) {
-		const assetid = String(item && item.id || '');
-		if (!assetid) {
-			continue;
-		}
-		map.set(assetid, item);
-	}
-	return map;
-}
-
-function buildGcInventorySnapshot(attempt) {
-	const items = getGcInventoryItems(attempt.csgo)
-		.map(item => normalizeGcInventoryItem(item))
-		.sort((left, right) => {
-			const leftPos = Number(left.position || 0);
-			const rightPos = Number(right.position || 0);
-			if (leftPos !== rightPos) {
-				return leftPos - rightPos;
-			}
-			return String(left.assetid).localeCompare(String(right.assetid));
-		});
-
-	return {
-		source: 'gc',
-		fetchedAt: new Date().toISOString(),
-		fetchedAtMs: Date.now(),
-		itemCount: items.length,
-		items,
-		raw: {
-			source: 'gc',
-			items: Array.isArray(attempt.csgo && attempt.csgo.inventory)
-				? attempt.csgo.inventory.map(item => serializeForJson(item))
-				: []
-		}
-	};
-}
-
-function normalizeGcInventoryItem(item) {
-	const details = describeGcItem(ITEMS_GAME_SCHEMA, item);
-	const tradableAfter = details.tradableAfter ? new Date(details.tradableAfter) : null;
-	return {
-		assetid: String(item.id || ''),
-		name: details.name,
-		marketHashName: details.marketHashName,
-		type: details.type || (item.def_index ? `DefIndex ${item.def_index}` : '-'),
-		category: details.category,
-		rarity: details.rarity,
-		exterior: details.exterior,
-		iconUrl: details.iconUrl,
-		tradable: !tradableAfter || tradableAfter <= new Date(),
-		marketable: null,
-		amount: 1,
-		position: Number(item.position || 0),
-		paintIndex: Number.isFinite(item.paint_index) ? item.paint_index : null,
-		paintSeed: Number.isFinite(item.paint_seed) ? item.paint_seed : null,
-		paintWear: Number.isFinite(item.paint_wear) ? item.paint_wear : null,
-		stickerCount: Array.isArray(details.stickers) ? details.stickers.length : 0,
-		kind: details.kind,
-		quality: details.quality,
-		definitionIndex: details.definitionIndex,
-		definitionInternalName: details.definitionInternalName,
-		definitionDisplayName: details.definitionDisplayName,
-		paintKit: details.paintKit,
-		sprayKit: details.sprayKit,
-		stickers: details.stickers,
-		tradableAfter: details.tradableAfter,
-		source: 'gc',
-		raw: serializeForJson(item)
-	};
-}
-
-async function getAttemptInventory(attempt, options) {
-	const forceRefresh = !!(options && options.forceRefresh);
-	if (!attempt.gcConnected) {
-		const err = new Error('当前账号尚未连接 GC');
-		err.statusCode = 409;
-		throw err;
-	}
-
-	// 只把「社区源」的新鲜缓存当作可直接返回:连接 GC 时会预建一份 GC 源快照(用本地 schema,较新饰品名字/映射不准),
-	// 若直接短路返回它,第一次开库存就会看到错误映射(要手动刷新才拉到正确的社区中文名)。所以 GC 源缓存不短路,
-	// 继续去拉社区库存拿正确数据;仅当社区刚拉【失败】且在冷却期内时,才临时用 GC 兜底,避免每次开库存都反复重试。
-	const cache = attempt.inventoryCache;
-	const communityCooldownActive = attempt.communityInvTriedAt
-		&& (Date.now() - attempt.communityInvTriedAt) < COMMUNITY_INV_RETRY_COOLDOWN_MS;
-	if (!forceRefresh && isFreshInventoryCache(cache) && (cache.source === 'community' || communityCooldownActive)) {
-		return publicInventorySnapshot(cache);
-	}
-
-	// 并发去重:同账号同一时刻只发一次社区库存请求,其余调用方(如库存页 + 终端机开箱页同时打开)
-	// 等这同一个 Promise,避免「一个在拉、另一个看到过期 GC 快照(或冷却标志)就短路返回错误映射」。
-	if (attempt.inventoryInflight) {
-		return attempt.inventoryInflight;
-	}
-
-	const runFetch = (async () => {
-		try {
-			const snapshot = await fetchCommunityInventorySnapshot(attempt);
-			attempt.inventoryCache = snapshot;
-			attempt.inventoryCount = snapshot.itemCount;
-			attempt.inventorySource = snapshot.source;
-			attempt.communityInvTriedAt = 0;   // 成功:清掉失败冷却
-			emitAttempt(attempt);
-			return publicInventorySnapshot(snapshot);
-		} catch (communityError) {
-			// 失败才记时间戳,开启冷却:冷却期内先返回 GC 兜底,不反复重试社区接口。
-			attempt.communityInvTriedAt = Date.now();
-			const gcSnapshot = buildGcInventorySnapshot(attempt);
-			if (gcSnapshot.itemCount > 0) {
-				attempt.inventoryCache = gcSnapshot;
-				attempt.inventoryCount = gcSnapshot.itemCount;
-				attempt.inventorySource = gcSnapshot.source;
-				emitAttempt(attempt);
-				return publicInventorySnapshot(gcSnapshot);
-			}
-			throw communityError;
-		}
-	})();
-
-	attempt.inventoryInflight = runFetch;
-	try {
-		return await runFetch;
-	} finally {
-		if (attempt.inventoryInflight === runFetch) attempt.inventoryInflight = null;
-	}
-}
-
-function isFreshInventoryCache(cache) {
-	return !!(cache && cache.fetchedAtMs && (Date.now() - cache.fetchedAtMs) < INVENTORY_CACHE_TTL_MS);
-}
-
-function publicInventorySnapshot(snapshot) {
-	return {
-		source: snapshot.source,
-		fetchedAt: snapshot.fetchedAt,
-		itemCount: Number(snapshot.itemCount || 0),
-		items: Array.isArray(snapshot.items) ? snapshot.items : [],
-		raw: snapshot.raw || null
-	};
-}
-
 purchase.catalog.preload();
 uu.start();
 
 // 按 attemptId 或账号名(不区分大小写)找会话,不看在线状态。
 function findAttemptByKey(key) {
 	return findAttemptInMap(attempts, key);
-}
-
-async function fetchCommunityInventorySnapshot(attempt) {
-	if (!attempt.steamID) {
-		const err = new Error('当前账号缺少 SteamID，无法读取库存');
-		err.statusCode = 409;
-		throw err;
-	}
-
-	const cookies = resolveInventoryCookies(attempt);
-	if (!cookies.length) {
-		const err = new Error('当前账号没有可用的 WebSession cookies');
-		err.statusCode = 409;
-		throw err;
-	}
-
-	const cookieHeader = cookies.join('; ');
-	const items = [];
-	const rawPages = [];
-	const gcItemsByAssetId = buildGcInventoryItemMap(attempt.csgo);
-	let startAssetId = '';
-	let pages = 0;
-
-	do {
-		const payload = await fetchCommunityInventoryPage(attempt.steamID, cookieHeader, startAssetId, attempt.userAgent);
-		rawPages.push(payload);
-		items.push(...normalizeCommunityInventoryPage(payload, gcItemsByAssetId));
-		startAssetId = payload.more_items ? String(payload.last_assetid || '') : '';
-		pages++;
-	} while (startAssetId && pages < 20);
-
-	return {
-		source: 'community',
-		fetchedAt: new Date().toISOString(),
-		fetchedAtMs: Date.now(),
-		itemCount: items.length,
-		items,
-		raw: {
-			source: 'community',
-			pages: rawPages
-		}
-	};
-}
-
-async function fetchCommunityInventoryPage(steamID, cookieHeader, startAssetId, userAgent) {
-	const url = new URL(`https://steamcommunity.com/inventory/${steamID}/${INVENTORY_APP_ID}/${INVENTORY_CONTEXT_ID}`);
-	url.searchParams.set('l', 'schinese');
-	url.searchParams.set('count', String(INVENTORY_PAGE_SIZE));
-	if (startAssetId) {
-		url.searchParams.set('start_assetid', startAssetId);
-	}
-
-	const response = await fetch(url, {
-		headers: {
-			Accept: 'application/json, text/plain, */*',
-			Cookie: cookieHeader,
-			Referer: `https://steamcommunity.com/profiles/${steamID}/inventory/`,
-			'User-Agent': userAgent || 'Mozilla/5.0'
-		}
-	});
-
-	if (!response.ok) {
-		const body = await response.text().catch(() => '');
-		const err = new Error(body && body.length < 160 ? body : `库存请求失败: HTTP ${response.status}`);
-		err.statusCode = response.status === 401 || response.status === 403 ? 409 : 502;
-		throw err;
-	}
-
-	const payload = await response.json();
-	if (!payload || (payload.success !== 1 && payload.success !== true)) {
-		const err = new Error(payload && payload.error ? payload.error : '库存响应无效');
-		err.statusCode = 502;
-		throw err;
-	}
-
-	return payload;
-}
-
-function normalizeCommunityInventoryPage(payload, gcItemsByAssetId = null) {
-	const descriptions = new Map();
-	for (const description of payload.descriptions || []) {
-		descriptions.set(`${description.classid}_${description.instanceid}`, description);
-	}
-
-	return (payload.assets || []).map(asset => {
-		const assetid = String(asset.assetid || asset.id || '');
-		const description = descriptions.get(`${asset.classid}_${asset.instanceid}`) || {};
-		const tags = Array.isArray(description.tags) ? description.tags : [];
-		const gcItem = gcItemsByAssetId instanceof Map ? gcItemsByAssetId.get(assetid) : null;
-		const gcTradableAfter = toIsoString(gcItem && gcItem.tradable_after);
-		const tradableAfter = gcTradableAfter || extractCommunityTradableAfter(description);
-		const isTradable = tradableAfter
-			? new Date(tradableAfter).getTime() <= Date.now()
-			: description.tradable !== 0;
-		return {
-			assetid,
-			name: String(description.name || description.market_name || description.market_hash_name || `Asset ${asset.assetid || ''}`),
-			marketHashName: String(description.market_hash_name || ''),
-			type: String(pickTag(tags, 'Type') || description.type || '-'),
-			category: String(pickTag(tags, 'Category') || ''),
-			rarity: String(pickTag(tags, 'Rarity') || ''),
-			exterior: String(pickTag(tags, 'Exterior') || ''),
-			iconUrl: description.icon_url ? `https://community.cloudflare.steamstatic.com/economy/image/${description.icon_url}/96fx96f` : '',
-			tradable: isTradable,
-			marketable: description.marketable !== 0,
-			tradableAfter,
-			amount: Number(asset.amount || 1),
-			position: 0,
-			source: 'community',
-			raw: {
-				asset,
-				description,
-				gcItem: gcItem ? serializeForJson(gcItem) : null
-			}
-		};
-	});
-}
-
-function extractCommunityTradableAfter(description) {
-	if (!description || typeof description !== 'object') {
-		return '';
-	}
-
-	for (const candidate of [description.cache_expiration, description.item_expiration]) {
-		const iso = toIsoString(candidate);
-		if (iso) {
-			return iso;
-		}
-	}
-
-	const fields = [
-		description.owner_descriptions,
-		description.descriptions,
-		description.fraudwarnings
-	];
-
-	for (const field of fields) {
-		if (!Array.isArray(field)) {
-			continue;
-		}
-
-		for (const entry of field) {
-			const text = stripHtml(entry && entry.value ? entry.value : entry);
-			if (!text) {
-				continue;
-			}
-
-			const direct = toIsoString(text);
-			if (direct) {
-				return direct;
-			}
-
-			const normalized = text
-				.replace(/Tradable\s*After\s*/i, '')
-				.replace(/Marketable\s*After\s*/i, '')
-				.replace(/[()]/g, ' ')
-				.replace(/\s+/g, ' ')
-				.trim();
-			const parsed = toIsoString(normalized);
-			if (parsed) {
-				return parsed;
-			}
-		}
-	}
-
-	return '';
-}
-
-function stripHtml(value) {
-	return String(value == null ? '' : value)
-		.replace(/<[^>]+>/g, ' ')
-		.replace(/\s+/g, ' ')
-		.trim();
-}
-
-function toIsoString(value) {
-	if (!value) {
-		return '';
-	}
-
-	const date = value instanceof Date ? value : new Date(value);
-	return Number.isNaN(date.getTime()) ? '' : date.toISOString();
-}
-
-function pickTag(tags, category) {
-	const tag = tags.find(item => item && (item.category === category || item.category_name === category));
-	return tag ? (tag.localized_tag_name || tag.name || tag.internal_name || '') : '';
-}
-
-// 会话的 WebSession cookies(终端机、库存还在用),见 src/accounts/profiles.ts
-function resolveInventoryCookies(attempt) {
-	return profiles.cookiesFor(attempt);
-}
-
-function serializeForJson(value, seen = new WeakSet()) {
-	if (value == null) {
-		return value;
-	}
-	if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
-		return value;
-	}
-	if (typeof value === 'bigint') {
-		return value.toString();
-	}
-	if (value instanceof Date) {
-		return value.toISOString();
-	}
-	if (Buffer.isBuffer(value)) {
-		return {
-			type: 'Buffer',
-			hex: value.toString('hex')
-		};
-	}
-	if (Array.isArray(value)) {
-		return value.map(item => serializeForJson(item, seen));
-	}
-	if (typeof value === 'object') {
-		if (seen.has(value)) {
-			return '[Circular]';
-		}
-		if (isLongLike(value)) {
-			try {
-				return value.toString();
-			} catch {}
-		}
-		seen.add(value);
-		const output = {};
-		for (const [key, item] of Object.entries(value)) {
-			if (typeof item === 'function') {
-				continue;
-			}
-			output[key] = serializeForJson(item, seen);
-		}
-		seen.delete(value);
-		return output;
-	}
-	return String(value);
-}
-
-function isLongLike(value) {
-	return !!(
-		value
-		&& typeof value === 'object'
-		&& typeof value.low === 'number'
-		&& typeof value.high === 'number'
-		&& Object.prototype.hasOwnProperty.call(value, 'unsigned')
-	);
 }

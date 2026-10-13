@@ -1,4 +1,4 @@
-// GC:连接/断开 CS2 GC、通过 GC 拉 CS2 商店价目表生成内购目录(价目表用真实样本,与解析快照对比)。
+// GC:连接/断开 CS2 GC、通过 GC 拉 CS2 商店价目表生成内购目录(价目表用真实样本,与解析快照对比)、库存。
 // GC 由 support/offline-preload.cjs 模拟;外部网络被拦截(汇率返回固定数据)。
 
 import {after, before, describe, test} from 'node:test';
@@ -50,7 +50,7 @@ describe('GC', () => {
 		appRoot = tempDir('gc');
 		mkdirSync(join(appRoot, 'data', 'config'), {recursive: true});
 		writeFileSync(join(appRoot, 'data', 'config', 'accounts.json'), JSON.stringify([{accountName: 'alpha', password: 'pw-good'}]));
-		server = await startServer({appRoot, env: {APP_PASSWORD: password}});
+		server = await startServer({appRoot, env: {APP_PASSWORD: password, FAKE_INVENTORY_FILE: join(appRoot, 'fake-inventory.json')}});
 		client = new Client(server.baseUrl);
 		await client.login(password);
 		const res = await client.post('/api/login', {accountName: 'alpha'});
@@ -105,6 +105,33 @@ describe('GC', () => {
 		const alpha = await until(() => attemptOf(client, 'alpha'), a => a?.cs2GcConnected === true);
 		assert.equal(alpha?.cs2GcConnected, true);
 		assert.equal(alpha?.gcConnected, true);
+	});
+
+	test('库存:以社区库存为准,分页拉完;中文名、标签、交易冷却都来自社区', async () => {
+		const res = await client.get(`/api/inventory/${attemptId}`);
+		assert.equal(res.status, 200, res.text.slice(0, 300));
+		const inventory = res.json.inventory;
+		assert.deepEqual([inventory.source, inventory.itemCount], ['community', 3]);
+		const [rifle, key] = inventory.items;
+		assert.deepEqual([rifle.assetid, rifle.name, rifle.type, rifle.rarity, rifle.exterior, rifle.tradable, rifle.marketable], ['101', 'AK-47 | 红线 (久经沙场)', '步枪', '保密', '久经沙场', true, true]);
+		assert.ok(rifle.iconUrl.endsWith('/economy/image/ak/96fx96f'));
+		assert.deepEqual([key.tradable, key.tradableAfter], [false, new Date('Feb 03, 2099 07:00:00 GMT').toISOString()]);
+		const requests = server.steamEvents().filter(e => e.event === 'inventoryRequest');
+		assert.deepEqual(requests.map(e => [e.query?.l, e.query?.count, e.query?.start_assetid]), [['schinese', '2000', undefined], ['schinese', '2000', '102']]);
+		const alpha = await attemptOf(client, 'alpha');
+		assert.deepEqual([alpha?.inventoryCount, alpha?.inventorySource], [3, 'community']);
+	});
+
+	test('库存:15 秒内再开直接用缓存;库存私密时强制刷新报 409(GC 库存是空的,没法兜底)', async () => {
+		const before = server.steamEvents().filter(e => e.event === 'inventoryRequest').length;
+		assert.equal((await client.get(`/api/inventory/${attemptId}`)).status, 200);
+		assert.equal(server.steamEvents().filter(e => e.event === 'inventoryRequest').length, before);
+
+		writeFileSync(join(appRoot, 'fake-inventory.json'), JSON.stringify({private: true}));
+		const res = await client.get(`/api/inventory/${attemptId}?refresh=1`);
+		assert.equal(res.status, 409);
+		assert.equal(res.json.error, 'Forbidden');
+		assert.equal((await client.get('/api/inventory/no-such-id')).status, 404);
 	});
 
 	test('外部网络全部被拦截,只有预期内的请求', () => {

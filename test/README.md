@@ -26,6 +26,7 @@ npm run typecheck   # 类型检查(src/ 和 test/)
   - **充值码兑换替身**（steamstore）：码的前缀决定结果（`GOOD-` 成功、`USED-` 已使用、`LIMIT-` 被限流）。
   - **假 Steam 市场**：挂求购、手机确认、撤单、我的求购单都有状态；开关（要不要手机确认、拒单、已成交）在 `FAKE_MARKET_FILE`。
   - **假 Steam 商店结算**：买游戏用到的 store / api / checkout 端点，每个账号钱包 10.00 美元、记住已拥有的包；商品可用 `FAKE_STORE_PACKAGES` 追加。设了 `FAKE_STORE_COUNTRY` 时还模拟商店账户页（查真实国家用）。
+  - **假社区库存**：两页共 3 件；`FAKE_INVENTORY_FILE` 可设成私密（403）。
   - **外网拦截**：`fetch` 只放行本机；汇率接口返回固定数据；其它外部请求直接失败，并记进日志供测试断言。
 
 [`support/server.ts`](e2e/support/server.ts) 提供这些工具：
@@ -41,7 +42,7 @@ npm run typecheck   # 类型检查(src/ 和 test/)
 | `security.e2e.ts` | 初始化令牌、口令限速、cookie 属性、同源校验、凭据不下发、调试端点、socket.io 握手、损坏文件备份 |
 | `store.e2e.ts` | 旧版明文数据导入与归档、加密落盘、maFile/UU token 读写、主密钥校验 |
 | `sessions.e2e.ts` | 同账号复用和强制重登、进程被杀后自动恢复（refreshToken 优先，失效回退密码）、`SESSION_RESTORE=0` |
-| `gc.e2e.ts` | 连接和断开 CS2 GC、通过 GC 拉价目表生成内购目录（与解析快照对比）、外网拦截 |
+| `gc.e2e.ts` | 连接和断开 CS2 GC、通过 GC 拉价目表生成内购目录（与解析快照对比）、库存（社区分页、缓存、私密时报错）、外网拦截 |
 | `purchase.e2e.ts` | 从 HTTP 接口下单：GC 下单 → 钱包扣款授权 → 确认，余额变化；下单载荷不合 GC 规则时被拒 |
 | `uu.e2e.ts` | UU 短信登录拿 token、按 SteamID 自动绑定、自动发货（报价严格校验后接受 + 手机确认）、fail-closed |
 | `buygame.e2e.ts` | 买游戏：解析 subid、试运行不扣款、真扣款、重复购买被拒、余额不足预检拦截 |

@@ -23,9 +23,10 @@
 //    steam-totp 的 getTimeOffset 换成离线版(返回 0)。
 // 7. 假 Steam 商店结算(store / api / checkout.steampowered.com 上买游戏用到的那几个端点),有状态:
 //    每个账号钱包 10.00 美元、已拥有的包,见 fakeStore();商品可用 FAKE_STORE_PACKAGES 追加。
-// 8. 外网拦截:全局 fetch 只放行本机;汇率接口返回固定数据;其余外部请求直接失败。
+// 8. 假社区库存(steamcommunity.com/inventory/<steamID>/730/2):两页共 3 件;FAKE_INVENTORY_FILE 可设成私密(403),见 fakeInventory()。
+// 9. 外网拦截:全局 fetch 只放行本机;汇率接口返回固定数据;其余外部请求直接失败。
 //
-// logOn / logOff / gamesPlayed / sendToGC / 下单各步 / 悠悠请求 / 报价接受 / 市场请求和确认 / 商店结算请求 / 被拦的外部请求
+// logOn / logOff / gamesPlayed / sendToGC / 下单各步 / 悠悠请求 / 报价接受 / 市场请求和确认 / 商店结算请求 / 社区库存请求 / 被拦的外部请求
 // 都追加一行 JSON 到 FAKE_STEAM_LOG(设置了才写)。
 
 const path = require('path');
@@ -654,6 +655,38 @@ function fakeStore(url, init) {
 	return null;
 }
 
+// ===== 假社区库存 =====
+// steamcommunity.com/inventory/<steamID>/730/2:两页共 3 件(第一页 2 件,带 more_items / last_assetid)。
+// FAKE_INVENTORY_FILE 里写 {"private": true} 时回 403(和库存设为私密时一样),测试随时改这个文件。
+function fakeInventory(url, init) {
+	const headers = Object.fromEntries(Object.entries((init && init.headers) || {}).map(([key, value]) => [key.toLowerCase(), String(value)]));
+	const owner = cookieValue(headers.cookie, 'steamLoginSecure');
+	record({event: 'inventoryRequest', path: url.pathname, query: Object.fromEntries(url.searchParams), owner});
+	let scenario = {};
+	try {
+		scenario = process.env.FAKE_INVENTORY_FILE ? JSON.parse(fs.readFileSync(process.env.FAKE_INVENTORY_FILE, 'utf8')) : {};
+	} catch (_) {}
+	if (!owner || scenario.private) {
+		return new Response('Forbidden', {status: 403});
+	}
+	const json = value => new Response(JSON.stringify(value), {status: 200, headers: {'content-type': 'application/json'}});
+	const rifle = {
+		classid: '1', instanceid: '0', name: 'AK-47 | 红线 (久经沙场)', market_hash_name: 'AK-47 | Redline (Field-Tested)', tradable: 1, marketable: 1, icon_url: 'ak',
+		tags: [{category: 'Type', localized_tag_name: '步枪'}, {category: 'Rarity', localized_tag_name: '保密'}, {category: 'Exterior', localized_tag_name: '久经沙场'}]
+	};
+	const key = {
+		classid: '2', instanceid: '0', name: '武器箱钥匙', market_hash_name: 'CS:GO Case Key', tradable: 0, marketable: 0,
+		owner_descriptions: [{value: 'Tradable After Feb 03, 2099 (7:00:00) GMT'}], tags: [{category: 'Type', localized_tag_name: '钥匙'}]
+	};
+	if (!url.searchParams.get('start_assetid')) {
+		return json({
+			success: 1, more_items: 1, last_assetid: '102', total_inventory_count: 3, descriptions: [rifle, key],
+			assets: [{assetid: '101', classid: '1', instanceid: '0', amount: '1'}, {assetid: '102', classid: '2', instanceid: '0', amount: '1'}]
+		});
+	}
+	return json({success: 1, total_inventory_count: 3, descriptions: [rifle], assets: [{assetid: '103', classid: '1', instanceid: '0', amount: '1'}]});
+}
+
 // ===== 外网拦截 =====
 const FIXED_USD_RATES = {result: 'success', base_code: 'USD', rates: {USD: 1, EUR: 0.9, GBP: 0.78, CNY: 7.1, UYU: 40, JPY: 150, RUB: 90}};
 const realFetch = globalThis.fetch;
@@ -667,6 +700,9 @@ globalThis.fetch = async function offlineFetch(input, init) {
 	}
 	if (url.hostname === 'steamcommunity.com' && url.pathname.startsWith('/market/')) {
 		return fakeMarket(url, init);
+	}
+	if (url.hostname === 'steamcommunity.com' && /^\/inventory\/\d+\/730\/2$/.test(url.pathname)) {
+		return fakeInventory(url, init);
 	}
 	if (['store.steampowered.com', 'api.steampowered.com', 'checkout.steampowered.com'].includes(url.hostname)) {
 		const reply = fakeStore(url, init);
