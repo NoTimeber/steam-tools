@@ -163,8 +163,7 @@
         });
         const data = await resp.json().catch(() => ({}));
         if (resp.ok && data.success) {
-          // 从新版前端(/next/)跳过来的,登录后回新版;只认这一个地址,防开放跳转
-          window.location.href = new URLSearchParams(window.location.search).get('next') === '/next/' ? '/next/' : '/';
+          window.location.href = '/';
           return;
         }
         err.textContent = data.error || ((setupMode ? '设置失败' : '登录失败') + ' (HTTP ' + resp.status + ')');

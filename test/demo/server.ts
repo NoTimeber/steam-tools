@@ -8,7 +8,7 @@
 //   charlie  要移动令牌验证码,填 24680
 //   delta    密码错误,登录失败
 // UU 发货:「获取 Token」用短信登录,手机号随便填 11 位、验证码随便填,拿到的演示 token 在 UU 侧绑定的是 alpha 的 SteamID。
-// 删掉那个目录就回到初始状态。端口 PORT、口令 APP_PASSWORD 可改。新版前端构建后在 /next/,开发时用 web/ 下的 npm run dev。
+// 删掉那个目录就回到初始状态。端口 PORT、口令 APP_PASSWORD 可改。前端要先在 web/ 下构建(npm run build),开发时用 web/ 下的 npm run dev。
 
 import {spawn} from 'node:child_process';
 import {existsSync, mkdirSync, writeFileSync} from 'node:fs';

@@ -12,7 +12,7 @@ test('缺省:数据在安装根 data/,schema 在 app/schema/,端口 53110,自动
 	assert.equal(config.legacy.accountsFile, join(dirs.appRoot, 'data', 'config', 'accounts.json'));
 	assert.equal(config.legacy.uuTokensFile, join(dirs.appRoot, 'data', 'uu', 'tokens.json'));
 	assert.equal(config.defaultKeyFile, join(dirs.appRoot, 'secrets', 'master.key'));
-	assert.equal(config.publicDir, join(dirs.appDir, 'public'));
+	assert.equal(config.webDir, dirs.webDir);
 	assert.equal(config.schema.cs2ItemsGame, join(dirs.appDir, 'schema', 'items_game.txt'));
 	assert.equal(config.schema.tf2Schinese, join(dirs.appDir, 'schema', 'tf2_schinese.txt'));
 	assert.deepEqual([config.host, config.port], ['0.0.0.0', 53110]);

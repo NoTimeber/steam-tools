@@ -11,9 +11,9 @@ export class ApiError extends Error {
 	}
 }
 
-/** 会话失效时回登录页(登录页在服务端,不在前端路由里);登录后回到新版界面 */
+/** 会话失效时回登录页(登录页在服务端,不在前端路由里);登录后回到首页 */
 export function redirectToLogin(): void {
-	window.location.href = '/login?next=%2Fnext%2F';
+	window.location.href = '/login';
 }
 
 async function request<T>(method: string, url: string, body?: unknown): Promise<T> {

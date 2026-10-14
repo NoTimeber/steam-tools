@@ -296,7 +296,6 @@ const app = createWebApp({
 	auth,
 	isAllowedOrigin,
 	trustProxy: parseTrustProxy(config.http.trustProxy),
-	publicDir: config.publicDir,
 	webDir: config.webDir,
 	routes: [
 		router => systemRoutes(router, {sessionCount: () => attempts.size, launcher}),

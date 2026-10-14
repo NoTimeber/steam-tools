@@ -1,8 +1,8 @@
-# 新版前端
+# 前端
 
-Vue 3 + Naive UI + TypeScript，用 Vite 构建。构建产物 `web/dist` 由服务端挂在 **`/next/`** 下，和旧版界面（`app/public`，挂在 `/`）并存。模块一个一个迁过来，全部迁完后再把 `/` 换成新版。
+Vue 3 + Naive UI + TypeScript，用 Vite 构建。构建产物 `web/dist` 由服务端挂在 `/`。登录页不在这里：它是服务端自带的独立页面（[src/web/login.html](../src/web/login.html)），前端没构建也能登录。
 
-9 个模块已全部迁完：账户管理、库存管理、内购任务、买游戏、市场求购、UU 发货、终端机开箱、充值码兑换、运行设置。旧版界面暂时保留在 `/`(侧边栏底部有入口)，确认新版没问题后再把 `/` 换成新版、删掉 `app/public`。
+9 个模块：账户管理、库存管理、内购任务、买游戏、市场求购、UU 发货、终端机开箱、充值码兑换、运行设置。原来的旧版界面（`app/public`，原生 JS）已经删掉；新版迁移期间挂过的 `/next/` 现在跳回 `/`。
 
 ## 开发
 
@@ -12,7 +12,7 @@ Vue 3 + Naive UI + TypeScript，用 Vite 构建。构建产物 `web/dist` 由服
 cd web
 npm install
 npm run dev         # http://127.0.0.1:5173 ,接口和 socket.io 转给 127.0.0.1:53110
-npm run build       # 产物在 web/dist,服务端在 /next/ 下提供
+npm run build       # 产物在 web/dist,服务端在 / 下提供
 npm run typecheck   # vue-tsc
 npm test            # src/**/*.test.ts(纯逻辑,node:test)
 ```
@@ -23,7 +23,7 @@ npm test            # src/**/*.test.ts(纯逻辑,node:test)
 node test/demo/server.ts
 ```
 
-先打开 `http://127.0.0.1:53110/login` 登录（演示口令见那个文件开头），再打开 `http://127.0.0.1:5173`：cookie 按主机名共享、不分端口，开发服务器转发的请求带着它。
+然后打开 `http://127.0.0.1:5173`，会跳到登录页（开发服务器把 `/login` 转给服务端，演示口令见那个文件开头），登录后回到开发服务器的首页。
 
 ## 结构
 
@@ -36,9 +36,9 @@ node test/demo/server.ts
 | `src/views/` | 各模块页面(大的模块在同名子目录里拆组件) |
 | `src/modules.ts` | 侧边栏模块列表，路由按它生成 |
 
-和旧版的区别：
+和旧版界面的区别：
 
-- 账户名单以服务端为准，浏览器里不再存账号和密码（旧版存在 localStorage）。导入走 `/api/accounts/upsert` 按账号名合并，不会和旧版界面互相覆盖整份名单。
+- 账户名单以服务端为准，浏览器里不再存账号和密码（旧版存在 localStorage）。导入走 `/api/accounts/upsert` 按账号名合并。
 - 删除账户前会确认。
 - 内购：购物车每个账号可展开逐件改数量；有「最近任务」列表。
 - 买游戏：有「试运行」开关(只验证到最终价、不扣款，默认关)。

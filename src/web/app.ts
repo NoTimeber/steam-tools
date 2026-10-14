@@ -35,10 +35,8 @@ export interface WebAppOptions {
 	isAllowedOrigin(headers: Record<string, unknown>): boolean;
 	/** 反代信任设置(Express 的 trust proxy) */
 	trustProxy: string | number | boolean;
-	/** 旧版前端静态资源目录(app/public),挂在 / */
-	publicDir: string;
-	/** 新版前端构建产物(web/dist),挂在 /next/;没构建时目录不存在,访问 404 */
-	webDir?: string;
+	/** 前端构建产物(web/dist),挂在 /;没构建时首页给提示 */
+	webDir: string;
 	/** 登录之后才能访问的路由,按顺序注册 */
 	routes: ReadonlyArray<(router: Router) => void>;
 	logger?: Pick<Console, 'error'>;
@@ -81,9 +79,11 @@ export function createWebApp(options: WebAppOptions): ExpressApp {
 	});
 
 	// ===== 鉴权(公开端点,先于网关注册) =====
+	// 登录页是服务端自带的独立页面(和本文件同目录),不依赖前端构建
 	app.get('/login', (req, res) => {
+		noStore(res);
 		// 用 root 传目录:否则 send 会检查整条绝对路径,安装目录里有点开头的目录(如 ~/.local)时直接 404
-		res.sendFile('login.html', {root: options.publicDir});
+		res.sendFile('login.html', {root: import.meta.dirname});
 	});
 	app.post('/api/auth/login', (req, res) => auth.login(req, res));
 	app.post('/api/auth/logout', (req, res) => auth.logout(req, res));
@@ -95,31 +95,27 @@ export function createWebApp(options: WebAppOptions): ExpressApp {
 	const gateway: Handler = (req, res, next) => auth.middleware(req, res, next);
 	app.use(gateway);
 
-	if (options.webDir) {
-		// Vite 产物:assets/ 下文件名带内容哈希,可以长缓存;入口 index.html 每次都要新的
-		app.use('/next', express.static(options.webDir, {
-			etag: false,
-			lastModified: false,
-			maxAge: 0,
-			setHeaders(res, filePath) {
-				if (/[\\/]assets[\\/]/u.test(String(filePath || ''))) {
-					res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
-				} else {
-					noStore(res);
-				}
-			}
-		}));
-	}
-	app.use(express.static(options.publicDir, {
+	// 新版前端在 /next/ 下试用过一阵,老书签跳回首页(# 后面的前端路由浏览器会自己带上)
+	app.use('/next', (req, res) => {
+		res.redirect('/');
+	});
+	// Vite 产物:assets/ 下文件名带内容哈希,可以长缓存;入口 index.html 每次都要新的
+	app.use(express.static(options.webDir, {
 		etag: false,
 		lastModified: false,
 		maxAge: 0,
 		setHeaders(res, filePath) {
-			if (/\.(?:html|js|css)$/iu.test(String(filePath || ''))) {
+			if (/[\\/]assets[\\/]/u.test(String(filePath || ''))) {
+				res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+			} else {
 				noStore(res);
 			}
 		}
 	}));
+	// 走到这里说明 web/dist 里没有 index.html:从源码直接跑、没构建前端
+	app.get('/', (req, res) => {
+		res.status(503).json({success: false, error: '前端还没构建:在 web/ 目录下运行 npm install && npm run build 后刷新'});
+	});
 
 	for (const register of options.routes) {
 		register(app);

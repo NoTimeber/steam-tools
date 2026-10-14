@@ -34,7 +34,6 @@ const activeKey = computed(() => String(route.name || 'accounts'));
 				</NTag>
 			</div>
 			<NMenu :options="menuOptions" :value="activeKey" @update:value="(key: string) => router.push('/' + key)" />
-			<a class="legacy-link muted" href="/">切换到旧版界面</a>
 		</aside>
 		<main class="shell-content">
 			<UpdateBanner />
@@ -78,17 +77,6 @@ const activeKey = computed(() => String(route.name || 'accounts'));
 
 .brand-version {
 	font-size: 12px;
-}
-
-.legacy-link {
-	margin-top: auto;
-	padding: 0 12px;
-	font-size: 12px;
-	text-decoration: none;
-}
-
-.legacy-link:hover {
-	color: var(--accent);
 }
 
 .shell-content {

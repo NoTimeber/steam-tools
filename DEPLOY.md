@@ -102,7 +102,7 @@ docker compose logs steam-tools | grep 初始化令牌
 
 口令至少 8 位。同一 IP 连续输错 5 次锁定 15 分钟。
 
-新版界面（Vue，逐个模块迁移中）在 `https://你的域名/next/`，镜像构建时一起打包；旧版界面仍在 `/`，两个可以同时用。详见 [web/README.md](web/README.md)。
+界面（Vue，源码在 `web/`）镜像构建时一起打包，打开 `https://你的域名/` 即可。以前试用新版用的 `/next/` 会跳回首页。详见 [web/README.md](web/README.md)。
 
 ## 7. 更新
 

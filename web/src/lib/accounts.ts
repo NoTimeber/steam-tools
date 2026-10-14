@@ -1,5 +1,5 @@
 // 账户列表的纯逻辑(不依赖 Vue,单元测试直接用 node 跑):登录状态归并、导入文本解析、余额显示、按序号勾选。
-// 规则照搬旧版前端(app/public/app.js)。
+// 规则照搬旧版前端。
 
 export type LoginStatus = '未登录' | '登录中' | '登录成功' | '登录失败';
 export type AccountGroup = 'gc' | 'online' | 'offline';

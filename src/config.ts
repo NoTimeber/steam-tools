@@ -8,10 +8,9 @@ type Env = Readonly<Record<string, string | undefined>>;
 export interface Config {
 	/** 安装根:存放 data/、.env、secrets/,不随代码更新动 */
 	appRoot: string;
-	/** 随代码发布的目录(app/):前端、物品 schema、随包皮肤库、社区 nameid 库 */
+	/** 随代码发布的目录(app/):物品 schema、随包皮肤库、社区 nameid 库 */
 	appDir: string;
-	publicDir: string;
-	/** 新版前端(Vue,web/ 构建产物),先挂在 /next/ 下和旧版并存 */
+	/** 前端(Vue,web/ 的构建产物),挂在 / */
 	webDir: string;
 	host: string;
 	port: number;
@@ -110,7 +109,6 @@ export function loadConfig(env: Env, dirs: ConfigDirs): Config {
 	return {
 		appRoot,
 		appDir,
-		publicDir: join(appDir, 'public'),
 		webDir,
 		host: env.HOST || '0.0.0.0',
 		port: Number(env.PORT || 53110),

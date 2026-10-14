@@ -134,13 +134,13 @@ test('鉴权:网关放行健康检查/鉴权端点/登录页/socket.io,未登录
 		h.auth.middleware({path, headers: cookie ? {cookie} : {}}, res, () => void (nexted = true));
 		return nexted;
 	};
-	for (const path of ['/healthz', '/api/auth/status', '/login', '/login.html', '/socket.io/?EIO=4']) {
+	for (const path of ['/healthz', '/api/auth/status', '/login', '/socket.io/?EIO=4']) {
 		assert.equal(pass(path), true, path);
 	}
 	assert.equal(pass('/api/attempts'), false);
+	assert.equal(pass('/login.html'), false, '登录页只有 /login 一个地址');
 	assert.equal(h.call(h.auth.middleware as never, {}, {path: '/api/x'}).status, 401);
 	assert.deepEqual(h.call(h.auth.middleware as never, {}, {path: '/'}).body, {redirect: '/login'});
-	assert.deepEqual(h.call(h.auth.middleware as never, {}, {path: '/next/'}).body, {redirect: '/login?next=%2Fnext%2F'});
 	const secure = h.call(h.auth.login, {password: 'env-password'}, {secure: true});
 	assert.match(secure.headers['Set-Cookie'] ?? '', /; Secure$/);
 	assert.equal(pass('/api/attempts', 'sid=' + h.cookie()), true);

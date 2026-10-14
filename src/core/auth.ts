@@ -339,7 +339,7 @@ export function createAuth(options: AuthOptions = {}) {
 	/** Express 网关:放行健康检查、鉴权端点、登录页;socket.io 交给 socketAuth;其余未登录 API 401、页面跳登录 */
 	function middleware(req: AuthRequest, res: AuthResponse, next: () => void): unknown {
 		const path = req.path || '';
-		if (path === '/healthz' || path.startsWith('/api/auth/') || path === '/login' || path === '/login.html' || path.startsWith('/socket.io/')) {
+		if (path === '/healthz' || path.startsWith('/api/auth/') || path === '/login' || path.startsWith('/socket.io/')) {
 			return next();
 		}
 		if (isAuthed(req)) {
@@ -348,8 +348,7 @@ export function createAuth(options: AuthOptions = {}) {
 		if (path.startsWith('/api/')) {
 			return res.status(401).json({success: false, error: 'unauthorized'});
 		}
-		// 新版前端(/next/)登录后回到新版;只认这一个固定地址,不接受任意跳转
-		return res.redirect(path === '/next' || path.startsWith('/next/') ? '/login?next=%2Fnext%2F' : '/login');
+		return res.redirect('/login');
 	}
 
 	function socketAuth(socket: {handshake?: {headers?: Record<string, unknown>}}, next: (err?: Error) => void): void {

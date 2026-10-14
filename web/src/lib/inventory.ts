@@ -1,4 +1,4 @@
-// 库存页的纯逻辑(不依赖 Vue):物品分类、副标题、时间显示。规则照搬旧版前端(app/public/app.js)。
+// 库存页的纯逻辑(不依赖 Vue):物品分类、副标题、时间显示。规则照搬旧版前端。
 
 /** 后端 /api/inventory/:id 返回的物品(src/inventory/community.ts 的 InventoryItem,只列用到的) */
 export interface InventoryItem {

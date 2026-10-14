@@ -8,7 +8,7 @@ const backend = process.env.BACKEND_URL || 'http://127.0.0.1:53110';
 
 export default defineConfig({
 	plugins: [vue()],
-	// 相对路径:同一份产物挂在 /next/ 还是 / 都能用(路由用 hash 模式)
+	// 相对路径:产物不绑死挂载位置(路由用 hash 模式)
 	base: './',
 	build: {
 		outDir: 'dist',

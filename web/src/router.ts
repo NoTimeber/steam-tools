@@ -1,4 +1,4 @@
-// 前端路由:hash 模式(/next/#/accounts),服务端不用为前端路由做回退。
+// 前端路由:hash 模式(/#/accounts),服务端不用为前端路由做回退。
 
 import {createRouter, createWebHashHistory} from 'vue-router';
 import type {RouteRecordRaw} from 'vue-router';

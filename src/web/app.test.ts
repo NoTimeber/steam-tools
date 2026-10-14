@@ -29,25 +29,29 @@ const fakeAuth = {
 
 const json = (res: globalThis.Response): Promise<any> => res.json();
 
+async function listen(app: (req: unknown, res: unknown) => void): Promise<{server: Server; base: string}> {
+	const server = createServer((req, res) => app(req, res));
+	await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+	const address = server.address();
+	return {server, base: `http://127.0.0.1:${typeof address === 'object' && address ? address.port : 0}`};
+}
+
 describe('Web 外壳', () => {
-	let publicDir: string;
+	let webDir: string;
 	let server: Server;
 	let base: string;
 	const logged: unknown[] = [];
 
 	before(async () => {
-		publicDir = mkdtempSync(join(tmpdir(), 'steam-tools-web-'));
-		writeFileSync(join(publicDir, 'login.html'), '<p>login</p>');
-		writeFileSync(join(publicDir, 'index.html'), '<p>app</p>');
-		mkdirSync(join(publicDir, 'next', 'assets'), {recursive: true});
-		writeFileSync(join(publicDir, 'next', 'index.html'), '<p>next</p>');
-		writeFileSync(join(publicDir, 'next', 'assets', 'main-abc123.js'), 'console.log(1)');
+		webDir = mkdtempSync(join(tmpdir(), 'steam-tools-web-'));
+		writeFileSync(join(webDir, 'index.html'), '<p>app</p>');
+		mkdirSync(join(webDir, 'assets'));
+		writeFileSync(join(webDir, 'assets', 'main-abc123.js'), 'console.log(1)');
 		const app = createWebApp({
 			auth: fakeAuth,
 			isAllowedOrigin: headers => !headers.origin || headers.origin === 'http://ok.example',
 			trustProxy: false,
-			publicDir,
-			webDir: join(publicDir, 'next'),
+			webDir,
 			logger: {error: (...args: unknown[]) => logged.push(args)},
 			routes: [
 				router => router.post('/api/echo', spreadRoute(req => ({body: req.body, game: requestGame(req)}), '回显失败')),
@@ -67,15 +71,12 @@ describe('Web 外壳', () => {
 				}
 			]
 		});
-		server = createServer((req, res) => app(req, res));
-		await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
-		const address = server.address();
-		base = `http://127.0.0.1:${typeof address === 'object' && address ? address.port : 0}`;
+		({server, base} = await listen(app));
 	});
 
 	after(() => {
 		server?.close();
-		rmSync(publicDir, {recursive: true, force: true});
+		rmSync(webDir, {recursive: true, force: true});
 	});
 
 	const authed = {'x-test-auth': '1'};
@@ -88,27 +89,32 @@ describe('Web 外壳', () => {
 		assert.equal(health.headers.get('x-content-type-options'), 'nosniff');
 		assert.equal(health.headers.get('referrer-policy'), 'same-origin');
 		assert.equal(health.headers.get('x-powered-by'), null);
-		assert.equal(await (await send('/login')).text(), '<p>login</p>');
+		const login = await send('/login');
+		assert.match(await login.text(), /<form class="card" id="login-form">/, '服务端自带的登录页,不在前端构建产物里');
+		assert.match(login.headers.get('cache-control') ?? '', /no-store/);
 	});
 
-	test('网关:没登录时 API 401、页面跳登录;登录后静态资源不缓存', async () => {
+	test('网关:没登录时 API 401、页面跳登录', async () => {
 		assert.equal((await send('/api/keyed')).status, 401);
-		const page = await send('/');
-		assert.equal(page.status, 302);
-		assert.equal(page.headers.get('location'), '/login');
+		for (const path of ['/', '/assets/main-abc123.js', '/next/']) {
+			const page = await send(path);
+			assert.equal(page.status, 302, path);
+			assert.equal(page.headers.get('location'), '/login', path);
+		}
+	});
+
+	test('前端挂在 /:带哈希的 assets 长缓存,入口不缓存;老的 /next/ 跳回首页', async () => {
 		const index = await send('/', {headers: authed});
 		assert.equal(await index.text(), '<p>app</p>');
 		assert.match(index.headers.get('cache-control') ?? '', /no-store/);
-	});
-
-	test('新版前端挂在 /next/:要登录;带哈希的 assets 长缓存,入口不缓存', async () => {
-		assert.equal((await send('/next/')).headers.get('location'), '/login');
-		const index = await send('/next/', {headers: authed});
-		assert.equal(await index.text(), '<p>next</p>');
-		assert.match(index.headers.get('cache-control') ?? '', /no-store/);
-		const asset = await send('/next/assets/main-abc123.js', {headers: authed});
+		const asset = await send('/assets/main-abc123.js', {headers: authed});
 		assert.equal(asset.status, 200);
 		assert.equal(asset.headers.get('cache-control'), 'public, max-age=31536000, immutable');
+		for (const path of ['/next', '/next/', '/next/index.html']) {
+			const old = await send(path, {headers: authed});
+			assert.equal(old.status, 302, path);
+			assert.equal(old.headers.get('location'), '/', path);
+		}
 	});
 
 	test('同源校验:跨站写请求 403(鉴权端点也拦),GET 不拦', async () => {
@@ -161,4 +167,23 @@ describe('Web 外壳', () => {
 		assert.equal(res.status, 413);
 		assert.equal((await json(res)).success, false);
 	});
+});
+
+test('前端没构建:首页 503 并提示怎么构建,登录页照常', async () => {
+	const app = createWebApp({
+		auth: fakeAuth,
+		isAllowedOrigin: () => true,
+		trustProxy: false,
+		webDir: join(tmpdir(), 'steam-tools-web-missing-dist'),
+		routes: []
+	});
+	const {server, base} = await listen(app);
+	try {
+		const res = await fetch(base + '/', {headers: {'x-test-auth': '1'}});
+		assert.equal(res.status, 503);
+		assert.match((await json(res)).error, /npm run build/);
+		assert.equal((await fetch(base + '/login')).status, 200);
+	} finally {
+		server.close();
+	}
 });
