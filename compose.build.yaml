@@ -1,0 +1,6 @@
+# 不用 GitHub 上的现成镜像、在服务器上从源码构建时叠加这个文件(比如服务器拉不到 ghcr.io):
+#   git pull && docker compose -f docker-compose.yml -f compose.build.yaml up -d --build
+services:
+  steam-tools:
+    build: .
+    image: steam-tools:local

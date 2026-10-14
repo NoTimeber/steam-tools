@@ -1,11 +1,11 @@
 // 新版本提示:后端查 GitHub 上的最新 Release,有新版就在顶部提示。只提示不自动更新——
-// 部署是 Docker 从源码构建,更新要在服务器上执行 UPDATE_COMMAND。
+// 镜像由 GitHub Actions 发版时构建,更新要在服务器上执行 UPDATE_COMMAND(拉新镜像、重建容器)。
 
 import {reactive} from 'vue';
 import {api} from '../api/http.ts';
 import type {UpdateStatus} from '../api/types.ts';
 
-export const UPDATE_COMMAND = 'git pull && docker compose up -d --build';
+export const UPDATE_COMMAND = 'git pull && docker compose pull && docker compose up -d';
 /** 页面开着时隔多久再问一次后端(后端自己 6 小时才真去查 GitHub) */
 const POLL_MS = 60 * 60 * 1000;
 const DISMISSED_KEY = 'steam-tools.update.dismissed';

@@ -1,7 +1,8 @@
 services:
   steam-tools:
-    build: .
-    image: steam-tools:latest
+    # 镜像由 GitHub Actions 在发版时构建好,服务器只拉不建。默认跟最新版;要固定版本,在 .env 里设 STEAM_TOOLS_TAG=1.6.1。
+    # 拉不到 ghcr.io 时改在服务器上从源码构建,见 compose.build.yaml。
+    image: ghcr.io/notimeber/steam-tools:${STEAM_TOOLS_TAG:-latest}
     container_name: steam-tools
     restart: unless-stopped
     # tini 做 PID 1,docker stop 的 SIGTERM 能传到 node,让它先登出 Steam 会话再退出

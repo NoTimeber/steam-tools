@@ -14,6 +14,7 @@ app/data/*
 
 # 开发用,不进镜像(web/ 在镜像里重新装依赖、重新构建)
 .git/
+.github/
 node_modules/
 web/node_modules/
 web/dist/

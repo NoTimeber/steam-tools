@@ -7,7 +7,8 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --no-audit --no-fund
 
 # ---- 新版前端(web/,Vue 3 + Naive UI):构建出静态文件,运行层只要 web/dist ----
-FROM node:24-bookworm-slim AS web
+# 产物和平台无关,多平台构建时只在构建机的原生平台上跑一次,不经 QEMU 模拟
+FROM --platform=$BUILDPLATFORM node:24-bookworm-slim AS web
 WORKDIR /srv/web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci --no-audit --no-fund
@@ -43,5 +44,5 @@ EXPOSE 53110
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
 	CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||53110)+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
-# 更新走 git pull 后重新构建镜像(面板只提示有新版)
+# 镜像由 GitHub Actions 在发版时构建(.github/workflows/image.yml);服务器上 docker compose pull 拉新镜像(面板只提示有新版)
 CMD ["node", "src/main.ts"]

@@ -11,6 +11,7 @@
 - 一台 Linux 服务器，装好 Docker 和 compose 插件（`docker compose version` 能输出版本）。
 - 反代和 HTTPS 证书自己配（Nginx、Caddy 等都行），要求见第 5 节。
 - 服务器能直连 `steamcommunity.com`、`store.steampowered.com`、Steam CM 节点和 `youpin898.com`；用 C5 扫货的话还要能连 `openapi.c5game.com`。
+- 服务器能拉 `ghcr.io` 的镜像。镜像在发版时由 GitHub Actions 构建好（amd64 和 arm64 都有），服务器上不用构建；拉不到时见第 7 节最后。
 
 ## 2. 拉代码、写配置
 
@@ -71,8 +72,10 @@ sudo rm -rf data/_migrated_plaintext
 ## 5. 启动和反代
 
 ```bash
-docker compose up -d --build
+docker compose up -d
 ```
+
+第一次启动会先从 `ghcr.io/notimeber/steam-tools` 拉镜像。
 
 查看日志：
 
@@ -100,7 +103,7 @@ docker compose logs steam-tools | grep 初始化令牌
 
 口令至少 8 位。同一 IP 连续输错 5 次锁定 15 分钟。
 
-界面（Vue，源码在 `web/`）镜像构建时一起打包，打开 `https://你的域名/` 即可。以前试用新版用的 `/next/` 会跳回首页。详见 [web/README.md](web/README.md)。
+界面（Vue，源码在 `web/`）已经构建好打包在镜像里，打开 `https://你的域名/` 即可。以前试用新版用的 `/next/` 会跳回首页。详见 [web/README.md](web/README.md)。
 
 ## 7. 更新
 
@@ -108,10 +111,22 @@ docker compose logs steam-tools | grep 初始化令牌
 
 ```bash
 git pull
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 ```
 
+- `git pull` 拿到新的 `docker-compose.yml` 和文档，`docker compose pull` 拉新镜像，`up -d` 用新镜像重建容器。镜像没变时 `up -d` 什么都不做。
+- 发版后 GitHub Actions 构建镜像要几分钟，Release 页面出来后马上拉可能还是旧镜像，等一会儿再拉。
+- 默认跟最新版（`latest`）。要固定在某个版本，在 `.env` 里设 `STEAM_TOOLS_TAG=1.6.1` 这样的版本号；回退也是改这个再 `docker compose up -d`。
+- 旧镜像不会自动删，攒多了用 `docker image prune -f` 清掉。
+
 服务器连不上 GitHub 或者不想让它访问外网，在 `.env` 里设 `UPDATE_CHECK=0` 关掉检查。
+
+服务器拉不到 `ghcr.io`（或者太慢）时，可以改在服务器上从源码构建，以后更新也用这条：
+
+```bash
+git pull && docker compose -f docker-compose.yml -f compose.build.yaml up -d --build
+```
 
 容器停止时会先登出所有 Steam 会话。重启后会自动恢复上次在线的账号：
 

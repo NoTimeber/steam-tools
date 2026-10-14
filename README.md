@@ -28,8 +28,10 @@ git clone https://github.com/NoTimeber/steam-tools.git steam-tools && cd steam-t
 cp .env.example .env
 mkdir -p secrets && openssl rand -base64 32 > secrets/master.key
 sudo chown 1000:1000 secrets/master.key && chmod 400 secrets/master.key
-docker compose up -d --build
+docker compose up -d
 ```
+
+镜像在发版时由 GitHub Actions 构建好（`ghcr.io/notimeber/steam-tools`，amd64 / arm64），服务器只拉镜像、不用构建。
 
 然后打开 `https://你的域名/login` 设置访问口令，页面要的「初始化令牌」在启动日志里：
 
@@ -37,7 +39,7 @@ docker compose up -d --build
 docker compose logs steam-tools | grep 初始化令牌
 ```
 
-更新：`git pull && docker compose up -d --build`。有新版本时面板顶部会提示（查的是 GitHub 上的最新 Release）。
+更新：`git pull && docker compose pull && docker compose up -d`。有新版本时面板顶部会提示（查的是 GitHub 上的最新 Release）。固定版本、回退、服务器拉不到镜像时从源码构建，见 [DEPLOY.md 第 7 节](DEPLOY.md#7-更新)。
 
 迁移旧版数据、备份和恢复，见 **[DEPLOY.md](DEPLOY.md)**。
 
@@ -90,5 +92,6 @@ cd web && npm test && npm run typecheck
 | `web/` | 前端（Vue 3 + Naive UI），构建产物 `web/dist` 由服务端挂在 `/` |
 | `app/` | 随代码发布的静态资料：物品 schema、皮肤中文名库、市场 nameid 库，以及几个一次性命令行脚本 |
 | `test/` | 端到端测试、离线替身、演示服务 |
-| `Dockerfile`、`docker-compose.yml` | 镜像和部署编排 |
+| `Dockerfile`、`docker-compose.yml` | 镜像和部署编排；`compose.build.yaml` 是在服务器上从源码构建时叠加用的 |
+| `.github/workflows/image.yml` | 推 `v*` 标签时构建镜像，推到 `ghcr.io` |
 | `module-development/`、`re-tools/` | 早期的模块设计笔记和 GC 抓包工具 |
