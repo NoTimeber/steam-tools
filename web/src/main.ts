@@ -7,6 +7,7 @@ import {startBuyGame} from './stores/buygame.ts';
 import {startMarket} from './stores/market.ts';
 import {startPurchase} from './stores/purchase.ts';
 import {loadUpdateStatus} from './stores/update.ts';
+import {startUu} from './stores/uu.ts';
 import './styles.css';
 
 createApp(App).use(router).mount('#app');
@@ -16,4 +17,5 @@ startAccounts();
 startPurchase();
 startBuyGame();
 startMarket();
+startUu();
 loadUpdateStatus();
