@@ -3,27 +3,24 @@
 部署形态：服务端跑在 Docker 里，所有数据存在服务器的 `data/` 目录；本地用浏览器打开反代后的 HTTPS 地址访问。
 
 ```
-浏览器(本地) ──HTTPS──> 反代(Caddy/Nginx) ──> 127.0.0.1:53110 ──> 容器 steam-tools ──> ./data
+浏览器(本地) ──HTTPS──> 你的反代 ──> 127.0.0.1:53110 ──> 容器 steam-tools ──> ./data
 ```
 
 ## 1. 准备
 
 - 一台 Linux 服务器，装好 Docker 和 compose 插件（`docker compose version` 能输出版本）。
-- 一个域名，A 记录指向服务器。
+- 反代和 HTTPS 证书自己配（Nginx、Caddy 等都行），要求见第 5 节。
 - 服务器能直连 `steamcommunity.com`、`store.steampowered.com`、Steam CM 节点和 `youpin898.com`。
 
 ## 2. 拉代码、写配置
 
 ```bash
-git clone <你的私有仓库地址> steam-tools
+git clone https://github.com/NoTimeber/steam-tools.git steam-tools
 cd steam-tools
 cp .env.example .env
 ```
 
-按需修改 `.env`。Docker 部署一般只需要改这两项：
-
-- `DOMAIN=tools.example.com`：用自带 Caddy 时必填。
-- `UU_POLL_INTERVAL_MS`、`INSPECT_SERVICE_URL` 等业务参数。
+按需修改 `.env`，Docker 部署一般只用改 `UU_POLL_INTERVAL_MS`、`INSPECT_SERVICE_URL` 这类业务参数。
 
 `DATA_DIR`、`HOST`、`PORT`、`TRUST_PROXY` 已在 `docker-compose.yml` 里设好，不用再改。
 
@@ -71,15 +68,7 @@ sudo rm -rf data/_migrated_plaintext
 
 - 数据库里已有某类数据时，同类旧文件只归档、不导入，防止旧备份覆盖新数据。
 
-## 5. 启动
-
-自带 Caddy（自动申请 HTTPS 证书）：
-
-```bash
-docker compose --profile caddy up -d --build
-```
-
-已有 Nginx 时，只启动应用，再按 `deploy/nginx.conf.example` 配反代：
+## 5. 启动和反代
 
 ```bash
 docker compose up -d --build
@@ -90,6 +79,15 @@ docker compose up -d --build
 ```bash
 docker compose logs -f steam-tools
 ```
+
+应用只监听宿主机的 `127.0.0.1:53110`，再用你自己的反代把 HTTPS 转进来。反代要满足这几点：
+
+- **转发到 `http://127.0.0.1:53110`**，并且支持 WebSocket 升级：实时日志和任务进度走 socket.io。长连接的读写超时调大，比如 1 小时。
+- **Host 头保留浏览器访问的域名**，或者另外传 `X-Forwarded-Host`。服务端会拿它和浏览器 `Origin` 里的域名比对，对不上的写请求一律 403。
+- **传 `X-Forwarded-For` 和 `X-Forwarded-Proto`**。登录失败锁定按真实客户端 IP 算；经 HTTPS 访问时登录 cookie 才会带 `Secure`。
+- **请求体上限不低于 1 MB**（服务端自己的上限）。批量导入 maFile 时请求比较大，Nginx 可以设 `client_max_body_size 2m`。
+
+反代跑在宿主机上就行。`docker-compose.yml` 已经设好信任经 Docker 网桥（`172.16.0.0/12` 等内网段）转发进来的 `X-Forwarded-*`。
 
 ## 6. 首次登录
 

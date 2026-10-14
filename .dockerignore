@@ -31,7 +31,6 @@ web/dist/
 tools/
 re-tools/
 module-development/
-deploy/
 *.md
 **/*.test.ts
 test/

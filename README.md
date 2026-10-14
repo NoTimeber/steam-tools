@@ -20,14 +20,14 @@
 
 ## 部署
 
-需要一台装好 Docker（含 compose 插件）的 Linux 服务器和一个指向它的域名。
+需要一台装好 Docker（含 compose 插件）的 Linux 服务器。反代和 HTTPS 自己配：应用只监听宿主机的 `127.0.0.1:53110`，反代要满足的几点（WebSocket、Host 头等）见 [DEPLOY.md 第 5 节](DEPLOY.md#5-启动和反代)。
 
 ```bash
 git clone https://github.com/NoTimeber/steam-tools.git steam-tools && cd steam-tools
-cp .env.example .env            # 用自带 Caddy 时填 DOMAIN=你的域名
+cp .env.example .env
 mkdir -p secrets && openssl rand -base64 32 > secrets/master.key
 sudo chown 1000:1000 secrets/master.key && chmod 400 secrets/master.key
-docker compose --profile caddy up -d --build
+docker compose up -d --build
 ```
 
 然后打开 `https://你的域名/login` 设置访问口令，页面要的「初始化令牌」在启动日志里：
@@ -38,7 +38,7 @@ docker compose logs steam-tools | grep 初始化令牌
 
 更新：`git pull && docker compose up -d --build`。
 
-迁移旧版数据、用已有的 Nginx 反代、备份和恢复，见 **[DEPLOY.md](DEPLOY.md)**。
+迁移旧版数据、备份和恢复，见 **[DEPLOY.md](DEPLOY.md)**。
 
 ## 数据和安全
 
@@ -89,7 +89,6 @@ cd web && npm test && npm run typecheck
 | `web/` | 前端（Vue 3 + Naive UI），构建产物 `web/dist` 由服务端挂在 `/` |
 | `app/` | 随代码发布的静态资料：物品 schema、皮肤中文名库、市场 nameid 库，以及几个一次性命令行脚本 |
 | `test/` | 端到端测试、离线替身、演示服务 |
-| `deploy/` | Caddy 配置、Nginx 反代示例 |
 | `Dockerfile`、`docker-compose.yml` | 镜像和部署编排 |
 | `launcher.js`、`start.bat`、`tools/` | 旧版 Windows 启动器和发版工具，已不再发布更新 |
 | `module-development/`、`re-tools/` | 早期的模块设计笔记和 GC 抓包工具 |

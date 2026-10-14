@@ -1,9 +1,0 @@
-# 由 docker-compose 的 caddy 服务使用。DOMAIN 来自 .env。
-# Caddy 会自动申请/续期 HTTPS 证书,自动处理 WebSocket(socket.io)和 X-Forwarded-* 头。
-{$DOMAIN} {
-	encode gzip
-	request_body {
-		max_size 2MB
-	}
-	reverse_proxy steam-tools:53110
-}

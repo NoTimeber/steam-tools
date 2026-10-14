@@ -26,29 +26,6 @@ services:
       # 只绑本机,公网只能经反代(HTTPS)访问
       - "127.0.0.1:53110:53110"
 
-  # 可选:自带 Caddy 反代,自动申请 HTTPS 证书。
-  # 用法:.env 里设 DOMAIN=tools.example.com,然后 docker compose --profile caddy up -d
-  # 已有 Nginx 的话不用启它,参考 deploy/nginx.conf.example。
-  caddy:
-    image: caddy:2
-    profiles: ["caddy"]
-    restart: unless-stopped
-    depends_on:
-      - steam-tools
-    environment:
-      DOMAIN: ${DOMAIN:-}
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
-
 secrets:
   master_key:
     file: ./secrets/master.key
-
-volumes:
-  caddy_data:
-  caddy_config:
