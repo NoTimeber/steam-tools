@@ -15,7 +15,7 @@ const router = useRouter();
 
 const menuOptions = computed<MenuOption[]>(() => MODULES.map(module => ({
 	key: module.key,
-	label: module.view ? module.label : `${module.label}(旧版)`
+	label: module.label
 })));
 
 const activeKey = computed(() => String(route.name || 'accounts'));

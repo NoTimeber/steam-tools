@@ -10,7 +10,7 @@ const routes: RouteRecordRaw[] = [
 		path: `/${module.key}`,
 		name: module.key,
 		meta: {label: module.label},
-		component: module.view ?? (() => import('./views/LegacyView.vue'))
+		component: module.view
 	})),
 	{path: '/:pathMatch(.*)*', redirect: '/accounts'}
 ];
