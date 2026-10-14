@@ -1,6 +1,6 @@
 # Steam 工具台
 
-多账号 Steam 工具的 Web 服务。部署在服务器上（Docker），用浏览器访问：统一管理一批 Steam 账号的登录和库存，批量做 CS2 / TF2 游戏内购、买游戏、市场求购、悠悠有品自动发货和充值码兑换。
+多账号 Steam 工具的 Web 服务。部署在服务器上（Docker），用浏览器访问：统一管理一批 Steam 账号的登录和库存，批量做 CS2 / TF2 游戏内购、买游戏、市场求购、悠悠有品自动发货、C5 到价扫货和充值码兑换。
 
 当前版本 **v1.5.0**，更新说明见 [Releases](https://github.com/NoTimeber/steam-tools/releases)。
 
@@ -14,6 +14,7 @@
 | 买游戏 | 按 subid 走 Steam 商店结算，多账号并发购买；可以试运行（只验证到最终价，不扣款） |
 | 市场求购 | 社区市场行情参考，多账号挂求购单（含手机确认）、撤单、和 Steam 对账 |
 | UU 发货 | 悠悠有品短信登录拿 token，按账号、按游戏轮询自动发货（自动接受报价），CS2 自动上架 |
+| C5 扫货 | 填好目标价，轮询 C5GAME 开放平台的在售最低价，到价自动买，买满数量或用完预算为止；模拟 / 实盘、只看行情不下单，下单结果未知的自动对账，运行状态重启后恢复 |
 | 终端机开箱 | CS2 终端机：解封、读取和推进报价、状态查看（解封和推进不可逆） |
 | 充值码兑换 | 「账号----密码」和充值码按行配对，并发兑换，可以只重试失败的 |
 | 运行设置 | 查看当前版本和检查新版本、修改访问口令、退出登录 |
@@ -42,13 +43,13 @@ docker compose logs steam-tools | grep 初始化令牌
 
 ## 数据和安全
 
-- 账号密码、shared_secret、maFile、Steam 会话、UU token 都以 AES-256-GCM 密文存在 `data/steam-tools.db`，解密靠 `secrets/master.key`。**主密钥丢了数据就解不开**，要和 `data/` 分开备份。
-- 浏览器拿不到 Steam 密码、shared_secret 和 UU token 原文；账号名单只存在服务端。
+- 账号密码、shared_secret、maFile、Steam 会话、UU token、C5 app-key 都以 AES-256-GCM 密文存在 `data/steam-tools.db`，解密靠 `secrets/master.key`。**主密钥丢了数据就解不开**，要和 `data/` 分开备份。
+- 浏览器拿不到 Steam 密码、shared_secret、UU token 和 C5 app-key 原文；账号名单只存在服务端。
 - 应用端口只绑定宿主机 `127.0.0.1`，公网只能经反代的 HTTPS 访问。
 - 访问口令至少 8 位，同一 IP 连续输错 5 次锁定 15 分钟；写请求和 WebSocket 都校验来源。
 - 会返回 Steam cookies、能真实下单的调试端点默认关闭（`ENABLE_DEBUG_ENDPOINTS`）。
 
-所有账号都会从服务器的 IP 登录 Steam 和悠悠有品。服务器所在地区和账号平时的登录地区差得远时，可能触发风控或邮件提醒。
+所有账号都会从服务器的 IP 登录 Steam 和悠悠有品。服务器所在地区和账号平时的登录地区差得远时，可能触发风控或邮件提醒。C5 扫货要在 C5 官网 API 管理里把服务器的公网 IP 加进白名单。
 
 ## 本地运行和开发
 
@@ -85,7 +86,7 @@ cd web && npm test && npm run typecheck
 
 | 路径 | 内容 |
 |---|---|
-| `src/` | 服务端。`main.ts` 是入口，各模块一个目录（`accounts/`、`inventory/`、`purchase/`、`buygame/`、`market/`、`uu/`、`terminal/`、`wallet/`），`steam/` 是 Steam 会话和 GC，`store/` 是加密数据库，`web/` 是 HTTP 外壳和登录页 |
+| `src/` | 服务端。`main.ts` 是入口，各模块一个目录（`accounts/`、`inventory/`、`purchase/`、`buygame/`、`market/`、`uu/`、`c5/`、`terminal/`、`wallet/`），`steam/` 是 Steam 会话和 GC，`store/` 是加密数据库，`web/` 是 HTTP 外壳和登录页 |
 | `web/` | 前端（Vue 3 + Naive UI），构建产物 `web/dist` 由服务端挂在 `/` |
 | `app/` | 随代码发布的静态资料：物品 schema、皮肤中文名库、市场 nameid 库，以及几个一次性命令行脚本 |
 | `test/` | 端到端测试、离线替身、演示服务 |

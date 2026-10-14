@@ -1,0 +1,255 @@
+// C5 扫货的纯逻辑(不依赖 Vue):后端状态的类型、状态文案、监控列表草稿(改价、添加、删除、改动检测、提交前检查)。
+
+export type C5Mode = 'dry' | 'live';
+export type C5RunState = 'stopped' | 'watching' | 'sweeping';
+export type C5ItemStatus = 'done' | 'cooldown' | 'noquote' | 'hit' | 'watch';
+export type C5PurchaseStatus = 'unknown' | 'ok' | 'failed' | 'cancelled';
+export type Tone = 'default' | 'success' | 'warning' | 'error' | 'info';
+
+/** 后端 src/c5/config.ts 的 C5Settings */
+export interface C5Settings {
+	mode: C5Mode;
+	strategy: 'listing' | 'quick';
+	tradeUrl: string;
+	maxTotalSpend: number;
+	maxBuyPerCycle: number;
+	minBalanceReserve: number;
+	errorCooldownSec: number;
+	pollIntervalSec: number;
+	timeoutSec: number;
+}
+
+export interface C5WatchItem {
+	name: string;
+	maxPrice: number;
+	maxQty: number;
+	maxSpend: number;
+	appId: number;
+	delivery: number;
+	assetType: number;
+}
+
+export interface C5ItemView extends C5WatchItem {
+	status: C5ItemStatus;
+	pauseUntil: number | null;
+	lowest: number | null;
+	sellCount: number | null;
+	purchaseMax: number | null;
+	bought: number;
+	spent: number;
+}
+
+export interface C5Purchase {
+	outTradeNo: string;
+	ts: number;
+	mode: C5Mode;
+	name: string;
+	productId: string;
+	price: number;
+	status: C5PurchaseStatus;
+	orderId: string | null;
+	actualPay: number | null;
+	orderStatus: number | null;
+	orderStatusName: string | null;
+	checkedAt: number;
+	error: string | null;
+	cost: number;
+}
+
+export interface C5LogLine {
+	time: number;
+	level: 'debug' | 'info' | 'success' | 'warn' | 'error';
+	message: string;
+}
+
+/** 后端 src/c5/index.ts 的 C5State */
+export interface C5State {
+	configured: boolean;
+	appKeyMasked: string;
+	settings: C5Settings;
+	settingsError: string | null;
+	run: C5RunState;
+	cycle: {n: number; at: number | null; error: string | null; errors: number; done: boolean};
+	budget: {total: number; spent: number; qty: number};
+	balance: {value: number; at: number} | null;
+	items: C5ItemView[];
+	purchases: C5Purchase[];
+	unknown: number;
+	logs: C5LogLine[];
+}
+
+export interface C5CheckResult {
+	balance: {money: number | null; settle: number | null; deposit: number | null};
+	steamAccounts: Array<{steamId: string; nickname: string; status: string}>;
+}
+
+export interface C5Listing {
+	productId: string;
+	price: number;
+	amount: number;
+}
+
+// ===== 文案 =====
+
+export const RUN_LABELS: Record<C5RunState, string> = {stopped: '停止', watching: '只看行情', sweeping: '自动扫货'};
+
+export const DELIVERY_OPTIONS = [
+	{value: 0, label: '不限'},
+	{value: 1, label: '人工发货'},
+	{value: 2, label: '自动发货'}
+];
+
+export const ASSET_TYPE_OPTIONS = [
+	{value: 1, label: '普通在售'},
+	{value: 2, label: '冷却期在售'}
+];
+
+export function itemStatus(status: C5ItemStatus | 'new'): {label: string; tone: Tone} {
+	switch (status) {
+		case 'done': return {label: '已买满', tone: 'default'};
+		case 'cooldown': return {label: '冷却中', tone: 'warning'};
+		case 'noquote': return {label: '无行情', tone: 'default'};
+		case 'hit': return {label: '到价', tone: 'success'};
+		case 'watch': return {label: '监控中', tone: 'info'};
+		default: return {label: '未保存', tone: 'warning'};
+	}
+}
+
+export function purchaseStatus(status: C5PurchaseStatus): {label: string; tone: Tone} {
+	switch (status) {
+		case 'ok': return {label: '已成交', tone: 'success'};
+		case 'unknown': return {label: '结果未知', tone: 'warning'};
+		case 'failed': return {label: '未成交', tone: 'error'};
+		default: return {label: '已取消', tone: 'default'};
+	}
+}
+
+export function money(value: number | null | undefined): string {
+	return value == null || !Number.isFinite(value) ? '-' : value.toFixed(2);
+}
+
+/** 今天的只显示时分秒,别的日子带上月日 */
+export function formatTime(ms: number | null | undefined, now: number = Date.now()): string {
+	if (!ms) {
+		return '-';
+	}
+	const date = new Date(ms);
+	const time = date.toLocaleTimeString('zh-CN', {hour12: false});
+	if (date.toDateString() === new Date(now).toDateString()) {
+		return time;
+	}
+	return `${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')} ${time}`;
+}
+
+export function budgetText(budget: C5State['budget']): string {
+	return `${money(budget.spent)} / ${budget.total > 0 ? money(budget.total) : '不限'}`;
+}
+
+// ===== 监控列表草稿 =====
+
+/** 表格里正在编辑的一行。origName 为空的是新加的(还没保存) */
+export interface DraftRow {
+	uid: string;
+	origName: string | null;
+	name: string;
+	maxPrice: number | null;
+	maxQty: number | null;
+	maxSpend: number | null;
+	appId: number;
+	delivery: number;
+	assetType: number;
+}
+
+export type DraftField = 'name' | 'maxPrice' | 'maxQty' | 'maxSpend' | 'delivery' | 'assetType';
+const FIELDS: readonly DraftField[] = ['name', 'maxPrice', 'maxQty', 'maxSpend', 'delivery', 'assetType'];
+
+/** 服务端列表 → 草稿;previous 里同名的行沿用原来的 uid(表格不重建行,输入框不丢焦点) */
+export function toDrafts(items: readonly C5WatchItem[], newUid: () => string, previous: readonly DraftRow[] = []): DraftRow[] {
+	return items.map(item => ({
+		uid: previous.find(row => row.origName === item.name)?.uid ?? newUid(),
+		origName: item.name,
+		name: item.name,
+		maxPrice: item.maxPrice,
+		maxQty: item.maxQty,
+		maxSpend: item.maxSpend,
+		appId: item.appId,
+		delivery: item.delivery,
+		assetType: item.assetType
+	}));
+}
+
+function sameValue(field: DraftField, draft: DraftRow, item: C5WatchItem): boolean {
+	if (field === 'maxSpend') {
+		return (draft.maxSpend ?? 0) === item.maxSpend;
+	}
+	return draft[field] === item[field];
+}
+
+/** 这一行和服务端不一样的格子;新加的行全部算改过 */
+export function dirtyFields(draft: DraftRow, items: readonly C5WatchItem[]): Set<DraftField> {
+	const item = draft.origName == null ? undefined : items.find(entry => entry.name === draft.origName);
+	return new Set(item ? FIELDS.filter(field => !sameValue(field, draft, item)) : FIELDS);
+}
+
+/** 草稿里删掉了的服务端饰品 */
+export function removedNames(drafts: readonly DraftRow[], items: readonly C5WatchItem[]): string[] {
+	return items.map(item => item.name).filter(name => !drafts.some(row => row.origName === name));
+}
+
+export function draftsDirty(drafts: readonly DraftRow[], items: readonly C5WatchItem[]): boolean {
+	return drafts.length !== items.length
+		|| drafts.some((row, index) => row.origName !== items[index]?.name || dirtyFields(row, items).size > 0);
+}
+
+export function newDraft(newUid: () => string, init: Partial<Pick<DraftRow, 'name' | 'maxPrice' | 'maxQty' | 'maxSpend'>> = {}): DraftRow {
+	return {
+		uid: newUid(),
+		origName: null,
+		name: String(init.name ?? '').trim(),
+		maxPrice: init.maxPrice ?? null,
+		maxQty: init.maxQty ?? null,
+		maxSpend: init.maxSpend ?? 0,
+		appId: 730,
+		delivery: 0,
+		assetType: 1
+	};
+}
+
+/** 提交前在浏览器先查一遍(服务端还会再校验),错了返回原因 */
+export function draftPayload(drafts: readonly DraftRow[]): {items: C5WatchItem[]; error: string} {
+	const items: C5WatchItem[] = [];
+	for (const [index, row] of drafts.entries()) {
+		const where = `第 ${index + 1} 行`;
+		const name = row.name.trim();
+		if (!name) {
+			return {items: [], error: `${where}:饰品名不能为空`};
+		}
+		if (!(Number(row.maxPrice) > 0)) {
+			return {items: [], error: `${name}:目标价要大于 0`};
+		}
+		if (!Number.isInteger(row.maxQty) || Number(row.maxQty) < 1) {
+			return {items: [], error: `${name}:数量上限至少 1`};
+		}
+		if (Number(row.maxSpend ?? 0) < 0) {
+			return {items: [], error: `${name}:花费上限不能是负数`};
+		}
+		if (items.some(item => item.name === name)) {
+			return {items: [], error: `${name} 重复了`};
+		}
+		items.push({
+			name, maxPrice: Number(row.maxPrice), maxQty: Number(row.maxQty), maxSpend: Number(row.maxSpend ?? 0),
+			appId: row.appId, delivery: row.delivery, assetType: row.assetType
+		});
+	}
+	return {items, error: ''};
+}
+
+/** 开实盘扫货前的确认文字 */
+export function liveConfirmText(settings: C5Settings, itemCount: number): string {
+	return [
+		'实盘自动扫货:监控列表里的饰品跌到目标价以内会真实下单,花 C5 账户余额。',
+		`总预算 ${money(settings.maxTotalSpend)},每轮最多 ${settings.maxBuyPerCycle} 单,余额保留 ${money(settings.minBalanceReserve)}。`,
+		`策略:${settings.strategy === 'quick' ? '快速购买(平台挑最低价,一次一件)' : '按在售列表批量买'};监控 ${itemCount} 个饰品。`,
+		'确定开始?'
+	].join('\n');
+}

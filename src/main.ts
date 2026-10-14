@@ -46,6 +46,8 @@ import {createBuyGameService} from './buygame/index.ts';
 import {buyGameRoutes} from './buygame/routes.ts';
 import {createWalletService} from './wallet/index.ts';
 import {walletRoutes} from './wallet/routes.ts';
+import {createC5Service} from './c5/index.ts';
+import {c5Routes} from './c5/routes.ts';
 import {createWebApp} from './web/app.ts';
 import {debugOnly} from './web/http.ts';
 import {systemRoutes} from './web/system-routes.ts';
@@ -101,7 +103,7 @@ const auth = createAuth({
 });
 
 // ===== 加密数据库 =====
-// 账户名单、maFile、Steam session、UU token/发货配置都存在这里(敏感字段 AES-256-GCM)。
+// 账户名单、maFile、Steam session、UU token/发货配置、C5 app-key/扫货流水都存在这里(敏感字段 AES-256-GCM)。
 // 首次启动时把旧版明文 JSON 导入,原文件挪到 data/_migrated_plaintext/ 下等你确认后删除。
 // 主密钥:MASTER_KEY 环境变量 > MASTER_KEY_FILE > <安装根>/secrets/master.key(开发环境缺失时自动生成)。
 let store: Store;
@@ -287,6 +289,12 @@ const wallet = createWalletService({
 	emit: payload => io.emit('wallet:redeem', payload)
 });
 
+// C5 扫货:app-key、设置、监控列表、购买流水在加密库(store.c5);到价自动买,运行状态重启后恢复
+const c5 = createC5Service({
+	store: store.c5,
+	emit: (event, payload) => io.emit(event, payload)
+});
+
 // 新版本提示:启动时先查一次,之后前端来问时过期了再查
 const versionCheck = createVersionCheck({current: (require('../package.json') as {version: string}).version, repo: config.updateRepo});
 void versionCheck.check();
@@ -307,7 +315,8 @@ const app = createWebApp({
 		router => buyGameRoutes(router, {buyGame, listAccounts: cookieFlowAccounts, debug}),
 		router => marketRoutes(router, {market, listAccounts: cookieFlowAccounts}),
 		router => uuRoutes(router, {uu}),
-		router => walletRoutes(router, {wallet})
+		router => walletRoutes(router, {wallet}),
+		router => c5Routes(router, {c5})
 	]
 });
 
@@ -336,6 +345,7 @@ function shutdown(signal: string): void {
 	console.log(`[shutdown] 收到 ${signal},登出 ${attempts.size} 个会话并关闭服务`);
 	sessions.shutdown();   // 不改登录意图:下次启动照常自动恢复
 	uu.stop();
+	c5.stop();
 	io.close();
 	httpServer.close(() => process.exit(0));
 	httpServer.closeAllConnections();
@@ -351,3 +361,4 @@ if (config.sessions.restoreEnabled) {
 }
 purchase.catalog.preload();
 uu.start();
+c5.start();

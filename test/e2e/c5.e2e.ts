@@ -1,0 +1,179 @@
+// C5 扫货:网页设置 app-key / 监控列表 → 检查连接、查在售 → 实盘自动扫货(批量下单)→ 对账 → 重启后恢复。
+// C5GAME 开放平台是假的(support/offline-preload.cjs 的 fakeC5):在售 id 是 19 位整数,下单按 id 扣在售和余额。
+
+import {after, before, describe, test} from 'node:test';
+import assert from 'node:assert/strict';
+import {randomBytes} from 'node:crypto';
+import {readFileSync, writeFileSync} from 'node:fs';
+import {join} from 'node:path';
+import {Client, removeDir, sleep, SocketListener, startServer, tempDir} from './support/server.ts';
+import type {TestServer} from './support/server.ts';
+
+const APP_KEY = 'e2e-c5-app-key-123456';
+const TRADE_URL = 'https://steamcommunity.com/tradeoffer/new/?partner=123456&token=abcdefgh';
+
+describe('C5 扫货', () => {
+	const password = randomBytes(9).toString('base64url');
+	let appRoot: string;
+	let scenarioFile: string;
+	let server: TestServer;
+	let client: Client;
+	let socket: SocketListener;
+
+	const c5Requests = (path?: string) => server.steamEvents().filter(event => event.event === 'c5Request' && (!path || event.path === path));
+
+	async function start(run: string): Promise<void> {
+		server = await startServer({appRoot, run, env: {APP_PASSWORD: password, FAKE_C5_FILE: scenarioFile}});
+		client = new Client(server.baseUrl);
+		await client.login(password);
+		socket = await SocketListener.connect(client);
+	}
+
+	async function state(): Promise<any> {
+		const res = await client.get('/api/c5/state');
+		assert.equal(res.status, 200, res.text);
+		return res.json.state;
+	}
+
+	async function waitState(ok: (value: any) => boolean, timeoutMs = 15000): Promise<any> {
+		const deadline = Date.now() + timeoutMs;
+		for (;;) {
+			const value = await state();
+			if (ok(value)) {
+				return value;
+			}
+			if (Date.now() > deadline) {
+				assert.fail('等待超时,最后状态: ' + JSON.stringify({run: value.run, cycle: value.cycle, items: value.items, purchases: value.purchases}));
+			}
+			await sleep(150);
+		}
+	}
+
+	before(async () => {
+		appRoot = tempDir('c5');
+		scenarioFile = join(appRoot, 'fake-c5.json');
+		writeFileSync(scenarioFile, JSON.stringify({
+			balance: 20,
+			items: {
+				'Kilowatt Case': {listings: [0.6, 0.62, 0.9], purchaseMax: 0.55},
+				'Recoil Case': {listings: [1.6], purchaseMax: 1.2}
+			}
+		}));
+		await start('1');
+	});
+
+	after(async () => {
+		socket?.close();
+		await server?.kill();
+		removeDir(appRoot);
+	});
+
+	test('没填 app-key:不能开;填了只回后 4 位,库里是密文', async () => {
+		assert.equal((await state()).configured, false);
+		const run = await client.post('/api/c5/run', {state: 'watching'});
+		assert.equal(run.status, 409, run.text);
+
+		const saved = await client.post('/api/c5/settings', {appKey: APP_KEY, pollIntervalSec: 1});
+		assert.equal(saved.status, 200, saved.text);
+		assert.deepEqual([saved.json.state.configured, saved.json.state.appKeyMasked], [true, '****3456']);
+		assert.ok(!saved.text.includes(APP_KEY));
+
+		const dbText = ['steam-tools.db', 'steam-tools.db-wal']
+			.map(file => {
+				try {
+					return readFileSync(join(server.dataDir, file)).toString('latin1');
+				} catch {
+					return '';
+				}
+			}).join('');
+		assert.ok(!dbText.includes(APP_KEY), 'app-key 明文不落盘');
+	});
+
+	test('监控列表校验;检查连接;查在售时 64 位 id 不丢精度', async () => {
+		const bad = await client.post('/api/c5/watchlist', {items: [{name: 'Kilowatt Case', maxPrice: 0, maxQty: 1}]});
+		assert.equal(bad.status, 400);
+		assert.match(bad.json.error, /目标价必须大于 0/);
+
+		const saved = await client.post('/api/c5/watchlist', {items: [
+			{name: 'Kilowatt Case', maxPrice: 0.65, maxQty: 5},
+			{name: 'Recoil Case', maxPrice: 1.5, maxQty: 1}
+		]});
+		assert.equal(saved.status, 200, saved.text);
+		assert.deepEqual(saved.json.state.items.map((item: any) => [item.name, item.maxPrice, item.maxQty, item.delivery]), [
+			['Kilowatt Case', 0.65, 5, 0], ['Recoil Case', 1.5, 1, 0]
+		]);
+
+		const check = await client.post('/api/c5/check');
+		assert.equal(check.status, 200, check.text);
+		assert.deepEqual(check.json.result, {
+			balance: {money: 20, settle: 0, deposit: 0},
+			steamAccounts: [{steamId: '76561190100005555', nickname: '演示收货号', status: '正常'}]
+		});
+
+		const listings = await client.post('/api/c5/listings', {name: 'Kilowatt Case'});
+		assert.equal(listings.status, 200, listings.text);
+		assert.deepEqual(listings.json.listings, [
+			{productId: '1444544795338000001', price: 0.6, amount: 1},
+			{productId: '1444544795338000002', price: 0.62, amount: 1}
+		]);
+
+		const requests = c5Requests();
+		assert.ok(requests.length >= 3);
+		for (const request of requests) {
+			assert.equal(request.query?.['app-key'], APP_KEY);
+			assert.equal(request.acceptEncoding, 'gzip, br, zstd, deflate');
+		}
+	});
+
+	test('实盘要交易链接和总预算;自动扫货按在售 id 下单,对账拿到平台订单状态', async () => {
+		const noUrl = await client.post('/api/c5/settings', {mode: 'live', maxTotalSpend: 10});
+		assert.equal(noUrl.status, 400);
+		assert.match(noUrl.json.error, /交易链接/);
+		const live = await client.post('/api/c5/settings', {mode: 'live', tradeUrl: TRADE_URL, maxTotalSpend: 10});
+		assert.equal(live.status, 200, live.text);
+
+		const run = await client.post('/api/c5/run', {state: 'sweeping'});
+		assert.equal(run.status, 200, run.text);
+		// 买完下一轮行情里最低价变成 0.9
+		const bought = await waitState(value => value.purchases.length === 2 && value.purchases.every((p: any) => p.status === 'ok') && value.items[0].lowest === 0.9);
+		assert.deepEqual(bought.purchases.map((p: any) => [p.mode, p.name, p.productId, p.cost]).reverse(), [
+			['live', 'Kilowatt Case', '1444544795338000001', 0.6],
+			['live', 'Kilowatt Case', '1444544795338000002', 0.62]
+		]);
+		assert.ok(bought.purchases.every((p: any) => /^9000000000000000\d{3}$/.test(p.orderId)), '订单号也是 64 位整数');
+		assert.deepEqual(bought.items.map((item: any) => [item.name, item.status, item.bought]), [['Kilowatt Case', 'watch', 2], ['Recoil Case', 'watch', 0]]);
+
+		const buys = c5Requests('/merchant/trade/v1/batch/buy');
+		assert.equal(buys.length, 1);
+		assert.equal(buys[0]!.body?.tradeUrl, TRADE_URL);
+		assert.deepEqual((buys[0]!.body?.productList as any[]).map(p => [p.productId, p.buyPrice]), [
+			['1444544795338000001', 0.6], ['1444544795338000002', 0.62]
+		]);
+		await socket.waitFor('c5:log', payload => payload.level === 'success' && payload.message.startsWith('买入 Kilowatt Case 0.60'));
+
+		const refreshed = await client.post('/api/c5/orders/refresh');
+		assert.equal(refreshed.status, 200, refreshed.text);
+		assert.equal(refreshed.json.checked, 2);
+		assert.deepEqual(refreshed.json.state.purchases.map((p: any) => [p.orderStatus, p.orderStatusName]), [[1, '待发货'], [1, '待发货']]);
+	});
+
+	test('重启后运行状态、设置、流水都在,接着跑', async () => {
+		socket.close();
+		await server.kill();
+		await start('2');
+		const resumed = await state();
+		assert.deepEqual([resumed.run, resumed.settings.mode, resumed.purchases.length, resumed.budget.qty], ['sweeping', 'live', 2, 2]);
+		await waitState(value => value.cycle.n >= 1 && value.items[0].lowest === 0.6);
+		assert.match(server.output(), /\[c5\] 恢复上次的运行状态:自动扫货\(实盘\)/);
+
+		const stopped = await client.post('/api/c5/run', {state: 'stopped'});
+		assert.equal(stopped.json.state.run, 'stopped');
+	});
+
+	test('app-key 不对:检查连接回 502,带平台的错误码', async () => {
+		await client.post('/api/c5/settings', {appKey: 'bad-key-000000'});
+		const check = await client.post('/api/c5/check');
+		assert.equal(check.status, 502);
+		assert.match(check.json.error, /400001/);
+	});
+});

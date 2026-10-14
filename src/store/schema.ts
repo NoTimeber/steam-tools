@@ -1,7 +1,7 @@
 import type {Migration} from '../core/db.ts';
 
 // 敏感列(密码、shared_secret、maFile、session、UU token)存的都是 vault 密文,
-// 其余列明文,方便查询和排查。
+// 其余列明文,方便查询和排查。C5 app-key 是 settings 表里的一条 vault 密文(见 ./c5.ts)。
 export const MIGRATIONS: readonly Migration[] = [
 	{
 		version: 1,
@@ -83,6 +83,43 @@ export const MIGRATIONS: readonly Migration[] = [
 				want_online  INTEGER NOT NULL,
 				updated_at   TEXT NOT NULL
 			);
+		`
+	},
+	{
+		version: 3,
+		name: 'c5-sweeper',
+		sql: `
+			-- C5 扫货的监控列表(原 c5 项目的 watchlist.toml)。整表替换,position 保持顺序。
+			CREATE TABLE c5_watch_items (
+				name       TEXT PRIMARY KEY,
+				position   INTEGER NOT NULL,
+				max_price  REAL NOT NULL,
+				max_qty    INTEGER NOT NULL,
+				max_spend  REAL NOT NULL DEFAULT 0,
+				app_id     INTEGER NOT NULL DEFAULT 730,
+				delivery   INTEGER NOT NULL DEFAULT 0,
+				asset_type INTEGER NOT NULL DEFAULT 1,
+				updated_at TEXT NOT NULL
+			);
+
+			-- C5 购买流水(原 c5 项目的 data/c5bot.sqlite)。数量和预算上限都从这里累计,重启不清零。
+			-- 时间都是毫秒;product_id / order_id 是 64 位整数,按文本存(JS 数字放不下)。
+			CREATE TABLE c5_purchases (
+				out_trade_no      TEXT PRIMARY KEY,
+				ts                INTEGER NOT NULL,
+				mode              TEXT NOT NULL,
+				name              TEXT NOT NULL,
+				product_id        TEXT NOT NULL DEFAULT '',
+				price             REAL NOT NULL,
+				status            TEXT NOT NULL,
+				order_id          TEXT,
+				actual_pay        REAL,
+				order_status      INTEGER,
+				order_status_name TEXT,
+				checked_at        INTEGER NOT NULL DEFAULT 0,
+				error             TEXT
+			);
+			CREATE INDEX idx_c5_purchases_mode_status ON c5_purchases (mode, status);
 		`
 	}
 ];

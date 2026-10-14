@@ -24,10 +24,12 @@
 // 7. 假 Steam 商店结算(store / api / checkout.steampowered.com 上买游戏用到的那几个端点),有状态:
 //    每个账号钱包 10.00 美元、已拥有的包,见 fakeStore();商品可用 FAKE_STORE_PACKAGES 追加。
 // 8. 假社区库存(steamcommunity.com/inventory/<steamID>/730/2):两页共 3 件;FAKE_INVENTORY_FILE 可设成私密(403),见 fakeInventory()。
-// 9. 外网拦截:全局 fetch 只放行本机;汇率接口返回固定数据;其余外部请求直接失败。
+// 9. 假 C5GAME 开放平台(openapi.c5game.com),有状态:余额、在售(64 位 id)、批量购买 / 快速购买、订单详情,
+//    初始场景在 FAKE_C5_FILE,见 fakeC5()。app-key 以 bad 开头的一律拒绝,以 ip 开头的查在售时报不在白名单。
+// 10. 外网拦截:全局 fetch 只放行本机;汇率接口返回固定数据;其余外部请求直接失败。
 //
-// logOn / logOff / gamesPlayed / sendToGC / 下单各步 / 悠悠请求 / 报价接受 / 市场请求和确认 / 商店结算请求 / 社区库存请求 / 被拦的外部请求
-// 都追加一行 JSON 到 FAKE_STEAM_LOG(设置了才写)。
+// logOn / logOff / gamesPlayed / sendToGC / 下单各步 / 悠悠请求 / 报价接受 / 市场请求和确认 / 商店结算请求 / 社区库存请求 / C5 请求 /
+// 被拦的外部请求都追加一行 JSON 到 FAKE_STEAM_LOG(设置了才写)。
 
 const path = require('path');
 const fs = require('fs');
@@ -687,6 +689,152 @@ function fakeInventory(url, init) {
 	return json({success: 1, total_inventory_count: 3, descriptions: [rifle], assets: [{assetid: '103', classid: '1', instanceid: '0', amount: '1'}]});
 }
 
+// ===== 假 C5GAME 开放平台 =====
+// 场景文件 FAKE_C5_FILE(启动时读一次,之后状态都在内存里):
+// {balance: 20, steamId, items: {<marketHashName>: {listings: [价格, ...], purchaseMax}}, restock: false}
+// 在售 id 是 19 位整数(JS 数字放不下),回包里按原样的数字写,收到的请求体也按原文解析,方便测试核对没丢精度。
+// restock: true 时每次查行情都可能在原价附近补一件新在售(演示服务用,让页面有东西可看)。
+const c5 = {loaded: false, balance: 0, steamId: '', items: new Map(), orders: new Map(), seq: 0, restock: false};
+
+function c5State() {
+	if (!c5.loaded) {
+		c5.loaded = true;
+		let scenario = {};
+		try {
+			scenario = process.env.FAKE_C5_FILE ? JSON.parse(fs.readFileSync(process.env.FAKE_C5_FILE, 'utf8')) : {};
+		} catch (_) {}
+		c5.balance = Number(scenario.balance ?? 100);
+		c5.steamId = String(scenario.steamId || '76561190100005555');
+		c5.restock = !!scenario.restock;
+		for (const [name, item] of Object.entries(scenario.items || {})) {
+			const prices = item.listings || [];
+			c5.items.set(name, {
+				base: prices.length ? Math.min(...prices) : 1,
+				purchaseMax: item.purchaseMax ?? null,
+				listings: prices.map(price => ({productId: c5ProductId(), price}))
+			});
+		}
+	}
+	return c5;
+}
+
+function c5ProductId() {
+	c5.seq += 1;
+	return String(1444544795338000000n + BigInt(c5.seq));
+}
+
+function c5Restock() {
+	if (!c5.restock) {
+		return;
+	}
+	for (const item of c5.items.values()) {
+		if (item.listings.length < 25 && Math.random() < 0.35) {
+			const price = Math.round(item.base * (0.92 + Math.random() * 0.16) * 100) / 100;
+			item.listings.push({productId: c5ProductId(), price});
+		}
+	}
+}
+
+function c5Buy(item, listing) {
+	item.listings.splice(item.listings.indexOf(listing), 1);
+	c5.balance = Math.round((c5.balance - listing.price) * 100) / 100;
+	return String(9000000000000000000n + BigInt(++c5.seq));
+}
+
+function fakeC5(url, init) {
+	const state = c5State();
+	const headers = Object.fromEntries(Object.entries((init && init.headers) || {}).map(([key, value]) => [key.toLowerCase(), String(value)]));
+	const parse = text => JSON.parse(text, (key, value, context) =>
+		typeof value === 'number' && !Number.isSafeInteger(value) && context && /^-?\d+$/.test(context.source) ? context.source : value);
+	const body = init && init.body ? parse(String(init.body)) : {};
+	const appKey = url.searchParams.get('app-key') || '';
+	record({event: 'c5Request', method: (init && init.method) || 'GET', path: url.pathname, query: Object.fromEntries(url.searchParams), acceptEncoding: headers['accept-encoding'] || '', body});
+	const raw = id => JSON.rawJSON(id);
+	const ok = data => new Response(JSON.stringify({success: true, data, errorCode: 0, errorMsg: null}), {status: 200, headers: {'content-type': 'application/json'}});
+	const fail = (errorCode, errorMsg) => new Response(JSON.stringify({success: false, data: null, errorCode, errorMsg}), {status: 200, headers: {'content-type': 'application/json'}});
+	if (!appKey || appKey.startsWith('bad')) {
+		return fail(400001, '请输入正确的 app-Key');
+	}
+	const findListing = productId => {
+		for (const item of state.items.values()) {
+			const listing = item.listings.find(entry => entry.productId === String(productId));
+			if (listing) {
+				return {item, listing};
+			}
+		}
+		return null;
+	};
+	const placeOrder = (outTradeNo, name, item, listing) => {
+		const orderId = c5Buy(item, listing);
+		state.orders.set(String(outTradeNo), {orderId, productId: listing.productId, name, price: listing.price});
+		return orderId;
+	};
+	switch (url.pathname) {
+		case '/merchant/account/v2/balance':
+			return ok({moneyAmount: state.balance, tradeSettleAmount: 0, depositAmount: 0});
+		case '/merchant/account/v1/steamInfo':
+			return ok({steamList: [{steamId: state.steamId, nickname: '演示收货号', accountStatus: 1}]});
+		case '/merchant/market/v2/item/stat/hash/name': {
+			c5Restock();
+			const out = {};
+			for (const name of body.marketHashNames || []) {
+				const item = state.items.get(name);
+				if (item) {
+					const prices = item.listings.map(listing => listing.price);
+					out[name] = {sellPrice: prices.length ? Math.min(...prices) : null, sellCount: prices.length, purchaseMaxPrice: item.purchaseMax};
+				}
+			}
+			return ok(out);
+		}
+		case '/merchant/market/v2/products/search': {
+			if (appKey.startsWith('ip')) {
+				return fail(403, '当前 IP 不在白名单');
+			}
+			const item = state.items.get(body.marketHashName);
+			const list = (item ? item.listings : []).filter(listing => listing.price <= Number(body.priceMax))
+				.map(listing => ({productId: raw(listing.productId), price: listing.price, delivery: 2, assetInfo: {amount: 1}}));
+			return ok({list, total: list.length});
+		}
+		case '/merchant/trade/v1/batch/buy': {
+			const successList = [];
+			const failedList = [];
+			for (const product of body.productList || []) {
+				const found = findListing(product.productId);
+				if (!found || found.listing.price > Number(product.buyPrice)) {
+					failedList.push({productId: raw(String(product.productId)), outTradeNo: product.outTradeNo, failReason: '商品已售出或价格已变'});
+				} else if (state.balance < found.listing.price) {
+					failedList.push({productId: raw(String(product.productId)), outTradeNo: product.outTradeNo, failReason: '余额不足'});
+				} else {
+					const name = [...state.items].find(([, item]) => item === found.item)[0];
+					const orderId = placeOrder(product.outTradeNo, name, found.item, found.listing);
+					successList.push({productId: raw(found.listing.productId), outTradeNo: product.outTradeNo, orderId: raw(orderId), actualPay: found.listing.price});
+				}
+			}
+			return ok({successList, failedList});
+		}
+		case '/merchant/trade/v2/quick-buy': {
+			const item = state.items.get(body.marketHashName);
+			const listing = item && item.listings.filter(entry => entry.price <= Number(body.maxPrice)).sort((a, b) => a.price - b.price)[0];
+			if (!listing) {
+				return fail(500102, '没有符合条件的在售');
+			}
+			if (state.balance < listing.price) {
+				return fail(500103, '余额不足');
+			}
+			const orderId = placeOrder(body.outTradeNo, body.marketHashName, item, listing);
+			return ok({orderId: raw(orderId), actualPay: listing.price, payStatus: 1});
+		}
+		case '/merchant/order/v2/buy/detail': {
+			const order = state.orders.get(url.searchParams.get('outTradeNo') || '');
+			if (!order) {
+				return fail(500404, '订单不存在');
+			}
+			return ok({orderId: raw(order.orderId), productId: raw(order.productId), status: 1, statusName: '待发货', marketHashName: order.name});
+		}
+	}
+	return new Response('not found', {status: 404});
+}
+
 // ===== 外网拦截 =====
 const FIXED_USD_RATES = {result: 'success', base_code: 'USD', rates: {USD: 1, EUR: 0.9, GBP: 0.78, CNY: 7.1, UYU: 40, JPY: 150, RUB: 90}};
 const realFetch = globalThis.fetch;
@@ -697,6 +845,9 @@ globalThis.fetch = async function offlineFetch(input, init) {
 	}
 	if (url.hostname.endsWith('.youpin898.com')) {
 		return fakeUu(url, init);
+	}
+	if (url.hostname === 'openapi.c5game.com') {
+		return fakeC5(url, init);
 	}
 	if (url.hostname === 'steamcommunity.com' && url.pathname.startsWith('/market/')) {
 		return fakeMarket(url, init);

@@ -7,6 +7,8 @@ import {createVault, loadMasterKey, VaultError} from '../core/vault.ts';
 import type {Vault} from '../core/vault.ts';
 import {createAccountStore} from './accounts.ts';
 import type {AccountStore} from './accounts.ts';
+import {createC5Store} from './c5.ts';
+import type {C5Store} from './c5.ts';
 import {importLegacyFiles} from './legacy-import.ts';
 import {createLoginIntentStore} from './login-intents.ts';
 import type {LoginIntentStore} from './login-intents.ts';
@@ -51,6 +53,7 @@ export interface Store {
 	mafiles: MaFileStore;
 	sessions: SteamSessionStore;
 	uu: UuStore;
+	c5: C5Store;
 	loginIntents: LoginIntentStore;
 	legacyImport: ImportReport | null;
 	close(): void;
@@ -85,6 +88,7 @@ export function openStore(options: OpenStoreOptions): Store {
 		const mafiles = createMaFileStore(db, vault);
 		const sessions = createSteamSessionStore(db, vault);
 		const uu = createUuStore(db, vault, settings);
+		const c5 = createC5Store(db, vault, settings);
 		const loginIntents = createLoginIntentStore(db);
 		const legacyImport = options.legacy
 			? importLegacyFiles({db, accounts, mafiles, sessions, uu}, options.legacy, options.dataDir, logger)
@@ -99,6 +103,7 @@ export function openStore(options: OpenStoreOptions): Store {
 			mafiles,
 			sessions,
 			uu,
+			c5,
 			loginIntents,
 			legacyImport,
 			close: () => db.close()

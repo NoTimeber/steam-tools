@@ -15,6 +15,7 @@ export const MODULES: readonly ModuleEntry[] = [
 	{key: 'buygame', label: '买游戏', view: () => import('./views/BuyGameView.vue')},
 	{key: 'market', label: '市场求购', view: () => import('./views/MarketView.vue')},
 	{key: 'uu', label: 'UU发货', view: () => import('./views/UuView.vue')},
+	{key: 'c5', label: 'C5扫货', view: () => import('./views/C5View.vue')},
 	{key: 'terminal', label: '终端机开箱', view: () => import('./views/TerminalView.vue')},
 	{key: 'wallet', label: '充值码兑换', view: () => import('./views/WalletView.vue')},
 	{key: 'settings', label: '运行设置', view: () => import('./views/SettingsView.vue')}
