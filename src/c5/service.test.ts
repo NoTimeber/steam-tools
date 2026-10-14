@@ -156,6 +156,8 @@ test('app-key 加密存库,状态里只给后 4 位;留空不改,clearAppKey 删
 	service.saveSettings({appKey: '', pollIntervalSec: 5});
 	assert.equal(service.state().configured, true, '留空不改');
 	service.setRun('watching');
+	assert.throws(() => service.saveSettings({appKey: 'another-key-0000', clearAppKey: true, pollIntervalSec: 7}), err => statusOf(err) === 400);
+	assert.deepEqual([service.state().appKeyMasked, service.state().run, service.state().settings.pollIntervalSec], ['****6789', 'watching', 5], '既填新 key 又勾删除:报错,什么都不改');
 	service.saveSettings({clearAppKey: true});
 	assert.deepEqual([service.state().configured, service.state().run], [false, 'stopped']);
 	assert.throws(() => service.saveSettings({appKey: 'has space'}), /空白/);

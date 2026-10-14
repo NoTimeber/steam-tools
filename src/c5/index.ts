@@ -324,6 +324,9 @@ export function createC5Service(options: C5ServiceOptions) {
 		if (keyText && /\s/.test(keyText)) {
 			throw c5Error(400, 'app-key 里不能有空白字符');
 		}
+		if (keyText && clearAppKey === true) {
+			throw c5Error(400, '不能同时填新 app-key 又删除 app-key,二选一');
+		}
 		const switchedToLive = settings.mode !== 'live' && next.mode === 'live';
 		store.saveSettings(next);
 		const changes: string[] = [];

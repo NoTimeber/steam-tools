@@ -70,7 +70,9 @@ test('失败分类:没连上 / 4xx 肯定没生效,超时 / 断连 / 5xx 结果�
 		[fetchFailed('UND_ERR_SOCKET'), true],
 		[Object.assign(new Error('The operation was aborted due to timeout'), {name: 'TimeoutError'}), true],
 		[new Response('<html>bad gateway</html>', {status: 502}), true],
-		[new Response('forbidden', {status: 403}), false]
+		[new Response(JSON.stringify({success: false, errorCode: 500, errorMsg: '系统异常'}), {status: 500}), true],
+		[new Response('forbidden', {status: 403}), false],
+		[new Response(JSON.stringify({success: false, errorCode: 429, errorMsg: '请求过于频繁'}), {status: 429}), false]
 	];
 	for (const [result, ambiguous] of cases) {
 		const {client} = make(result);

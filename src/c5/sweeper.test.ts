@@ -252,6 +252,28 @@ test('下单被拒:释放额度,这个饰品暂停一会', async () => {
 	assert.equal(client.count('batchBuy'), 2);
 });
 
+test('查在售失败(如没加 IP 白名单):只暂停这个饰品,别的饰品这一轮照常扫', async () => {
+	const OTHER: C5WatchItem = {...CASE, name: 'Recoil Case'};
+	const {sweeper, client, store, clock, logs} = env({items: [CASE, OTHER]});
+	client.stats[OTHER.name] = {sellPrice: 5.0, sellCount: 3};
+	client.listings = [listing(1, 5.0)];
+	const searched: string[] = [];
+	const search = client.searchProducts.bind(client);
+	client.searchProducts = async (options: {priceMax: number; name?: string}) => {
+		searched.push(options.name!);
+		if (options.name === CASE.name) {
+			throw new C5Error('IP 不在白名单');
+		}
+		return search(options);
+	};
+	assert.equal(await sweeper.runCycle(), true, '这一轮没有整轮失败');
+	assert.deepEqual(store.selectPurchases('live').map(p => p.name), [OTHER.name]);
+	assert.ok((sweeper.view().pauseUntil[CASE.name] ?? 0) > clock.now);
+	assert.ok(logs.some(line => line.startsWith('warn') && line.includes('查在售失败')), logs.join('\n'));
+	await sweeper.runCycle();
+	assert.deepEqual(searched.filter(name => name === CASE.name).length, 1, '暂停中不再查');
+});
+
 // ===== 结果未知与对账 =====
 
 test('超时的单先按已花费占额度,对账后转成交或释放', async () => {
@@ -354,6 +376,24 @@ test('快速购买:支付失败暂停', async () => {
 	await sweeper.runCycle();
 	assert.deepEqual(store.selectPurchases('live').map(r => [r.status, r.error]), [['failed', '支付失败']]);
 	assert.equal(client.count('quickBuy'), 1);
+});
+
+test('快速购买:平台返回支付中,先按结果未知占额度;对账查到转成交,查不到也不释放', async () => {
+	const {sweeper, client, store, clock} = env({strategy: 'quick', items: [{...CASE, maxQty: 2}]});
+	client.quickResults = [{actualPay: 5.0, orderId: '1444545588167143424', payStatus: 0}, {actualPay: 5.1, orderId: 2, payStatus: 0}];
+	await sweeper.runCycle();
+	const rows = store.selectPurchases('live');
+	assert.deepEqual(rows.map(r => [r.status, r.orderId, r.actualPay]), [['unknown', '1444545588167143424', 5.0], ['unknown', '2', 5.1]]);
+	assert.equal(store.totals('live').get(CASE.name)!.qty, 2, '照样占数量');
+	assert.equal(client.count('quickBuy'), 2);
+
+	// 一笔查到 -> 成交;另一笔平台给过订单号,一直查不到也不按未成交释放
+	client.orders = {[rows[0]!.outTradeNo]: {orderId: '1444545588167143424', productId: 9, status: '1', statusName: '待发货'}};
+	clock.now += UNKNOWN_GIVEUP_MS + 1;
+	await sweeper.refreshOrders();
+	assert.equal(store.getPurchase(rows[0]!.outTradeNo)!.status, 'ok');
+	assert.equal(store.getPurchase(rows[1]!.outTradeNo)!.status, 'unknown');
+	assert.equal(store.totals('live').get(CASE.name)!.qty, 2);
 });
 
 // ===== 监控列表在运行中被换掉 =====

@@ -49,7 +49,8 @@ async function doSave(): Promise<void> {
 	try {
 		const before = c5.state?.run;
 		const state = await saveSettings({
-			appKey: form.appKey.trim() || undefined,
+			// 勾了删除就不带输入框里的 key(输入框只是禁用,原来填的值还在)
+			appKey: form.clearAppKey ? undefined : form.appKey.trim() || undefined,
 			clearAppKey: form.clearAppKey || undefined,
 			mode: form.mode,
 			strategy: form.strategy,
@@ -135,7 +136,7 @@ function save(): void {
 					<NFormItem label="余额至少留(不动)">
 						<NInputNumber v-model:value="form.minBalanceReserve" :min="0" :step="10" />
 					</NFormItem>
-					<NFormItem label="下单被拒后暂停(秒)">
+					<NFormItem label="下单被拒 / 查在售失败后暂停(秒)">
 						<NInputNumber v-model:value="form.errorCooldownSec" :min="0" :max="3600" />
 					</NFormItem>
 					<NFormItem label="轮询间隔(秒)">

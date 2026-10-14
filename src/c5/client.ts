@@ -2,7 +2,7 @@
 //
 // - 所有请求在 query 里带 app-key,请求头带 Accept-Encoding: gzip, br, zstd, deflate(官方要求,Node 的 fetch 都能解)。
 // - 在售 id、订单 id 是 64 位整数,超出 JS 数字精度:响应里的大整数按原文转成字符串,下单时再按原样的数字写回请求体。
-// - 错误分两种:C5Error = 平台明确拒绝 / 根本没连上,请求肯定没生效;C5NetworkError = 超时、断连、5xx,结果未知。
+// - 错误分两种:C5Error = 平台明确拒绝 / 根本没连上,请求肯定没生效;C5NetworkError = 超时、断连、5xx(带不带 JSON 都算),结果未知。
 //   报错文字里不带 URL(URL 里有 app-key)。
 
 export const C5_BASE_URL = 'https://openapi.c5game.com';
@@ -186,10 +186,13 @@ export function createC5Client(options: C5ClientOptions): C5Api {
 			throw status >= 400 && status < 500 ? new C5Error(message, {code: status}) : new C5NetworkError(message, {code: status});
 		}
 		if (!payload.success) {
-			throw new C5Error(`${where} 失败: [${payload.errorCode ?? ''}] ${payload.errorMsg ?? ''}`, {
+			const message = `${where} 失败: [${payload.errorCode ?? ''}] ${payload.errorMsg ?? ''}`;
+			const codes = {
 				code: typeof payload.errorCode === 'number' ? payload.errorCode : Number(payload.errorCode) || null,
 				codeStr: payload.errorCodeStr == null ? null : String(payload.errorCodeStr)
-			});
+			};
+			// 5xx 带 JSON(如「系统异常」)也可能是处理到一半出的错,下单可能已经生效,按结果未知
+			throw status >= 500 ? new C5NetworkError(message, codes) : new C5Error(message, codes);
 		}
 		return payload.data;
 	}

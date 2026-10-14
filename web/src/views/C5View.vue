@@ -58,9 +58,6 @@ async function doRun(next: C5RunState): Promise<void> {
 	runBusy.value = true;
 	try {
 		await setRun(next);
-		if (next === 'sweeping' && dirty.value) {
-			message.warning('监控列表有改动还没保存,扫货按已保存的列表进行');
-		}
 	} catch (err) {
 		message.error('操作失败:' + errorText(err));
 	} finally {
@@ -74,6 +71,11 @@ function changeRun(next: C5RunState): void {
 	if (next !== 'stopped' && !value.configured) {
 		message.warning('先在「设置」里填 C5 app-key');
 		settingsOpen.value = true;
+		return;
+	}
+	// 扫货按已保存的列表下单:页面上改了价没保存就开扫,会按旧价买
+	if (next === 'sweeping' && dirty.value) {
+		message.warning('监控列表有改动还没保存,先「保存」或「放弃修改」再开始自动扫货');
 		return;
 	}
 	if (next === 'sweeping' && value.settings.mode === 'live') {
@@ -165,7 +167,7 @@ const columns: DataTableColumns<DraftRow> = [
 		render: row => {
 			const view = row.origName == null ? null : viewByName.value.get(row.origName);
 			const status = itemStatus(view ? view.status : 'new');
-			const title = view?.status === 'cooldown' && view.pauseUntil ? `下单被拒,${formatTime(view.pauseUntil)} 前不再下单` : undefined;
+			const title = view?.status === 'cooldown' && view.pauseUntil ? `下单被拒或查在售失败,${formatTime(view.pauseUntil)} 前不再下单` : undefined;
 			return h(NTag, {size: 'small', bordered: false, type: status.tone, title}, () => status.label);
 		}
 	},

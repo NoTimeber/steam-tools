@@ -21,7 +21,7 @@ export interface C5Settings {
 	maxBuyPerCycle: number;
 	/** 账户余额至少留这么多不动 */
 	minBalanceReserve: number;
-	/** 某个饰品下单被拒后暂停多少秒 */
+	/** 某个饰品下单被拒、查在售失败后暂停多少秒 */
 	errorCooldownSec: number;
 	/** 轮询间隔(秒)。平台默认限流 50 qps,每轮只发 1 个行情请求,到价才会多发 */
 	pollIntervalSec: number;

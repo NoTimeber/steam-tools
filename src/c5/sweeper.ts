@@ -13,7 +13,7 @@ export const EPS = 1e-6;
 export const FAILED_SKIP_MS = 60_000;
 /** 结果未知的单多久查一次 */
 export const UNKNOWN_RECHECK_MS = 5_000;
-/** 结果未知的单超过这么久平台仍查不到,按未成交处理 */
+/** 结果未知、平台也没给过订单号的单,超过这么久仍查不到,按未成交处理 */
 export const UNKNOWN_GIVEUP_MS = 120_000;
 /** 未完结订单多久刷新一次状态 */
 export const ORDER_RECHECK_MS = 300_000;
@@ -141,10 +141,10 @@ export function createSweeper(deps: SweeperDeps) {
 		}
 	}
 
-	function pause(item: C5WatchItem, reason: unknown): void {
+	function pause(item: C5WatchItem, reason: unknown, what = '下单被拒'): void {
 		const cooldown = deps.settings().errorCooldownSec;
 		pauseUntil.set(item.name, now() + cooldown * 1000);
-		log('warn', `${item.name} 下单被拒,暂停 ${cooldown} 秒: ${reason instanceof Error ? reason.message : String(reason)}`);
+		log('warn', `${item.name} ${what},暂停 ${cooldown} 秒: ${reason instanceof Error ? reason.message : String(reason)}`);
 	}
 
 	// ===== 主循环的一轮 =====
@@ -208,9 +208,19 @@ export function createSweeper(deps: SweeperDeps) {
 	// ===== listing 策略:查在售列表,按在售 id 批量买 =====
 
 	async function sweepListing(item: C5WatchItem, qty: number, money: number, settings: C5Settings): Promise<[number, number]> {
-		const raw = await deps.client().searchProducts({
-			appId: item.appId, name: item.name, priceMax: item.maxPrice, delivery: item.delivery, assetType: item.assetType
-		});
+		let raw: unknown[];
+		try {
+			raw = await deps.client().searchProducts({
+				appId: item.appId, name: item.name, priceMax: item.maxPrice, delivery: item.delivery, assetType: item.assetType
+			});
+		} catch (err) {
+			// 只是查询,没下单。只暂停这一个饰品,别的饰品这一轮照常扫(没加 IP 白名单时每个都会这样)
+			if (!(err instanceof C5Error)) {
+				throw err;
+			}
+			pause(item, err, '查在售失败');
+			return [0, 0];
+		}
 		const at = now();
 		skipUntil = new Map([...skipUntil].filter(([, until]) => until > at));
 		const skipIds = new Set([...store.productIds(settings.mode), ...skipUntil.keys()]);
@@ -330,14 +340,23 @@ export function createSweeper(deps: SweeperDeps) {
 				}
 				throw err;
 			}
-			if (toNumber(data.payStatus) === 2) {
+			// payStatus:0 支付中 / 1 支付成功 / 2 支付失败
+			const payStatus = toNumber(data.payStatus);
+			if (payStatus === 2) {
 				store.updatePurchase(outTradeNo, {status: 'failed', error: '支付失败'});
 				pause(item, '支付失败');
 				break;
 			}
 			const pay = toNumber(data.actualPay) || target;
-			store.updatePurchase(outTradeNo, {status: 'ok', orderId: String(data.orderId ?? ''), actualPay: pay});
-			log('success', `买入 ${item.name} ${pay.toFixed(2)},订单 ${data.orderId ?? '-'}`);
+			const orderId = String(data.orderId ?? '');
+			if (payStatus === 1) {
+				store.updatePurchase(outTradeNo, {status: 'ok', orderId, actualPay: pay});
+				log('success', `买入 ${item.name} ${pay.toFixed(2)},订单 ${orderId || '-'}`);
+			} else {
+				// 支付中(或没给支付状态):成没成交还不知道,保持未知、照样占额度,交给对账
+				store.updatePurchase(outTradeNo, {orderId, actualPay: pay});
+				log('info', `${item.name} 已下单,平台${payStatus === 0 ? '支付中' : '没返回支付状态'},先按 ${pay.toFixed(2)} 计入预算,稍后自动对账`);
+			}
 			bought += 1;
 			cost += pay;
 		}
@@ -374,7 +393,8 @@ export function createSweeper(deps: SweeperDeps) {
 			return;
 		}
 		if (detail == null) {
-			if (purchase.status === 'unknown' && at - purchase.ts > UNKNOWN_GIVEUP_MS) {
+			// 平台已经给过订单号的(快速购买支付中)确实下了单,查不到是查询的问题,不按未成交释放,留给手工核对
+			if (purchase.status === 'unknown' && !purchase.orderId && at - purchase.ts > UNKNOWN_GIVEUP_MS) {
 				store.updatePurchase(purchase.outTradeNo, {status: 'failed', error: '对账:平台没有这笔订单', checkedAt: at});
 				log('info', `对账:${purchase.name} 单号 ${purchase.outTradeNo} 平台没有订单,按未成交处理`);
 			} else {
