@@ -14,7 +14,7 @@ export const MODULES: readonly ModuleEntry[] = [
 	{key: 'inventory', label: '库存管理', view: () => import('./views/InventoryView.vue')},
 	{key: 'purchase', label: '内购任务', view: () => import('./views/PurchaseView.vue')},
 	{key: 'buygame', label: '买游戏', view: () => import('./views/BuyGameView.vue')},
-	{key: 'market', label: '市场求购'},
+	{key: 'market', label: '市场求购', view: () => import('./views/MarketView.vue')},
 	{key: 'uu', label: 'UU发货'},
 	{key: 'terminal', label: '终端机开箱'},
 	{key: 'wallet', label: '充值码兑换'},
