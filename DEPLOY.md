@@ -11,7 +11,7 @@
 - 一台 Linux 服务器，装好 Docker 和 compose 插件（`docker compose version` 能输出版本）。
 - 反代和 HTTPS 证书自己配（Nginx、Caddy 等都行），要求见第 5 节。
 - 服务器能直连 `steamcommunity.com`、`store.steampowered.com`、Steam CM 节点和 `youpin898.com`；用 C5 扫货的话还要能连 `openapi.c5game.com`。
-- 服务器能拉 `ghcr.io` 的镜像。镜像在发版时由 GitHub Actions 构建好（amd64 和 arm64 都有），服务器上不用构建；拉不到时见第 7 节最后。
+- 服务器能拉 `ghcr.io` 的镜像。镜像在发版时由 GitHub Actions 构建好（只有 amd64，ARM 服务器跑不了），服务器上不用构建；拉不到时见第 7 节最后。
 
 ## 2. 拉代码、写配置
 

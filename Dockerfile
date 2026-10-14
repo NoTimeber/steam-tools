@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1
 
-# ---- 依赖层:唯一的原生模块 lzma-native 自带 linux-x64/arm64 预编译包,不需要编译工具 ----
+# ---- 依赖层:唯一的原生模块 lzma-native 自带 linux-x64 预编译包,不需要编译工具 ----
+# (它 8.0.6 版里的 linux-arm64 预编译文件其实是 x86-64 的,arm64 上会退回源码编译而失败,所以只支持 amd64)
 FROM node:24-bookworm-slim AS deps
 WORKDIR /srv/steam-tools
 COPY package.json package-lock.json ./

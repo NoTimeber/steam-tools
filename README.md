@@ -31,7 +31,7 @@ sudo chown 1000:1000 secrets/master.key && chmod 400 secrets/master.key
 docker compose up -d
 ```
 
-镜像在发版时由 GitHub Actions 构建好（`ghcr.io/notimeber/steam-tools`，amd64 / arm64），服务器只拉镜像、不用构建。
+镜像在发版时由 GitHub Actions 构建好（`ghcr.io/notimeber/steam-tools`，只有 amd64），服务器只拉镜像、不用构建。
 
 然后打开 `https://你的域名/login` 设置访问口令，页面要的「初始化令牌」在启动日志里：
 
