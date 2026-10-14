@@ -10,7 +10,7 @@ import {readJsonFileSafe, writeJsonAtomic} from './atomic-file.ts';
 import {createAuth, parseCookies} from './auth.ts';
 import type {AuthRequest, AuthResponse} from './auth.ts';
 import {createOriginCheck, parseCookieSecure, parseTrustProxy} from './http.ts';
-import {createLauncherBridge, RESTART_EXIT_CODE} from './launcher.ts';
+import {compareVersions, createVersionCheck} from './version-check.ts';
 
 function tempDir(t: {after(fn: () => void): void}, prefix: string): string {
 	const dir = mkdtempSync(join(tmpdir(), prefix));
@@ -166,32 +166,46 @@ test('反代 / cookie / 同源设置', () => {
 	assert.equal(check({origin: 'null', host: 'x'}), false);
 });
 
-test('启动器:没经启动器运行直接返回本地状态;IPC 回包后返回;同时只允许一个检查;重启用特殊退出码', async t => {
-	const dir = tempDir(t, 'launcher-');
-	const statusFile = join(dir, 'update-status.json');
-	const proc = Object.assign(new EventEmitter(), {exits: [] as number[], sent: [] as unknown[], exit(code: number) {
-		this.exits.push(code);
-	}}) as EventEmitter & {exits: number[]; sent: unknown[]; exit(code: number): void; send?: (message: unknown) => void};
-	const timers: Array<() => void> = [];
-	const bridge = createLauncherBridge({statusFile, process: proc, setTimer: callback => {
-		timers.push(callback);
-		return {cancel() {}};
-	}});
-	assert.deepEqual(bridge.status(), {pending: false});
-	assert.deepEqual(await bridge.check(), {checked: false, status: {pending: false}, message: '当前未通过启动器运行,无法联网检查更新'});
+test('版本检查:查 GitHub 最新 Release 比版本号;同时只发一个请求;过期才在后台重查;失败记原因', async () => {
+	assert.ok(compareVersions('1.10.0', '1.9.9') > 0);
+	assert.equal(compareVersions('1.5', '1.5.0'), 0);
+	assert.ok(compareVersions('1.5.0', '1.5.1') < 0);
 
-	proc.send = message => void proc.sent.push(message);
-	const checking = bridge.check();
-	assert.deepEqual(await bridge.check(), {busy: true});
-	writeFileSync(statusFile, JSON.stringify({pending: true, version: '1.2.3'}));
-	proc.emit('message', {type: 'check-update-done'});
-	assert.deepEqual(await checking, {checked: true, status: {pending: true, version: '1.2.3'}});
-	assert.deepEqual(proc.sent, [{type: 'check-update'}]);
+	let clock = 1_000_000;
+	const urls: string[] = [];
+	let reply: () => Response = () => Response.json({tag_name: 'v1.6.0', body: ' 修了点东西 ', html_url: 'https://github.com/o/r/releases/tag/v1.6.0'});
+	const fetchStub = (async (url: string) => {
+		urls.push(url);
+		return reply();
+	}) as typeof fetch;
+	const versions = createVersionCheck({current: '1.5.0', repo: 'o/r', fetch: fetchStub, now: () => clock});
 
-	bridge.restart();
-	timers.at(-1)?.();
-	assert.deepEqual(proc.exits, [RESTART_EXIT_CODE]);
-	assert.equal(existsSync(statusFile), true);
+	const [first, second] = await Promise.all([versions.check(), versions.check()]);
+	assert.deepEqual(urls, ['https://api.github.com/repos/o/r/releases/latest']);
+	assert.deepEqual(first, second);
+	assert.deepEqual(first, {
+		current: '1.5.0', disabled: false, hasUpdate: true, latest: '1.6.0', notes: '修了点东西',
+		url: 'https://github.com/o/r/releases/tag/v1.6.0', checkedAt: new Date(clock).toISOString()
+	});
+
+	clock += 60 * 60 * 1000;
+	versions.status();
+	assert.equal(urls.length, 1, '没过期不重查');
+	clock += 6 * 60 * 60 * 1000;
+	reply = () => new Response('', {status: 404});
+	versions.status();
+	assert.equal(urls.length, 2, '过期了后台重查');
+	const failed = await versions.check();
+	assert.equal(failed.error, 'o/r 还没有发布 Release');
+	assert.equal(failed.latest, '1.6.0', '查失败时保留上次查到的版本');
+
+	reply = () => Response.json({tag_name: '1.5.0'});
+	assert.equal((await versions.check()).hasUpdate, false);
+	assert.equal(versions.status().error, undefined);
+
+	const off = createVersionCheck({current: '1.5.0', repo: '', fetch: fetchStub});
+	assert.deepEqual(await off.check(), {current: '1.5.0', disabled: true, hasUpdate: false});
+	assert.equal(urls.length, 3, '关了不发请求');
 });
 
 test('指纹:按账号名(不区分大小写)稳定复用并落盘;匿名一次性;UA 表为空时跳过 UA', t => {

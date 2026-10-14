@@ -1,82 +1,92 @@
-// 远程更新(旧版启动器):启动时读一次状态,有暂存的新版本就在顶部提示;「运行设置」里可手动检查。
-// Docker 部署不经启动器,这里一直是「没有更新」。
+// 新版本提示:后端查 GitHub 上的最新 Release,有新版就在顶部提示。只提示不自动更新——
+// 部署是 Docker 从源码构建,更新要在服务器上执行 UPDATE_COMMAND。
 
 import {reactive} from 'vue';
 import {api} from '../api/http.ts';
 import type {UpdateStatus} from '../api/types.ts';
 
+export const UPDATE_COMMAND = 'git pull && docker compose up -d --build';
+/** 页面开着时隔多久再问一次后端(后端自己 6 小时才真去查 GitHub) */
+const POLL_MS = 60 * 60 * 1000;
+const DISMISSED_KEY = 'steam-tools.update.dismissed';
+
+function readDismissed(): string {
+	try {
+		return localStorage.getItem(DISMISSED_KEY) || '';
+	} catch {
+		return '';
+	}
+}
+
 export const update = reactive({
 	current: '',
-	/** 待生效的新版本;空 = 没有 */
-	available: '',
+	/** 服务端关了检查(UPDATE_CHECK=0) */
+	disabled: false,
+	latest: '',
+	hasUpdate: false,
 	notes: '',
-	dismissed: '',
-	restarting: false,
-	restartMessage: ''
+	url: '',
+	error: '',
+	/** 点过「忽略这个版本」的版本号 */
+	dismissed: readDismissed()
 });
 
+function setDismissed(version: string): void {
+	update.dismissed = version;
+	try {
+		localStorage.setItem(DISMISSED_KEY, version);
+	} catch {
+		// 存储不可用时只是刷新后会再提示
+	}
+}
+
+export function dismissUpdate(): void {
+	setDismissed(update.latest);
+}
+
 function apply(status: UpdateStatus): void {
-	update.current = status.current ? String(status.current) : '';
-	update.available = status.pending && status.available ? String(status.available) : '';
-	update.notes = status.notes ? String(status.notes).trim() : '';
+	update.current = status.current || '';
+	update.disabled = !!status.disabled;
+	update.latest = status.latest || '';
+	update.hasUpdate = !!status.hasUpdate;
+	update.notes = (status.notes || '').trim();
+	update.url = status.url && status.url.startsWith('https://') ? status.url : '';
+	update.error = status.error || '';
 }
 
 export async function loadUpdateStatus(): Promise<void> {
 	try {
-		const data = await api.get<{status?: UpdateStatus}>('/api/update/status');
-		apply(data.status || {});
+		const data = await api.get<{status: UpdateStatus}>('/api/update/status');
+		apply(data.status);
 	} catch {
 		// 拿不到就不提示
 	}
 }
 
+/** 打开页面时读一次,之后每小时再读一次(页面常开几天不关) */
+export function startUpdateStatus(): void {
+	loadUpdateStatus();
+	window.setInterval(loadUpdateStatus, POLL_MS);
+}
+
 export interface CheckOutcome {
-	kind: 'available' | 'background' | 'latest';
+	kind: 'available' | 'latest' | 'failed';
 	message: string;
 }
 
-/** 手动检查:后端经 IPC 让启动器联网检查;大包还在后台下载时之后每 10 秒补查一次,共 1 分钟 */
+/** 手动检查:后端现查 GitHub;有新版时即使之前忽略过也重新提示 */
 export async function checkForUpdate(): Promise<CheckOutcome> {
-	const data = await api.post<{checked?: boolean; message?: string; status?: UpdateStatus}>('/api/update/check');
-	apply(data.status || {});
-	if (update.available) {
-		update.dismissed = '';
-		return {kind: 'available', message: `发现新版本 v${update.available},可在顶部横幅点「立即重启生效」`};
+	const data = await api.post<{status: UpdateStatus}>('/api/update/check');
+	apply(data.status);
+	if (update.disabled) {
+		return {kind: 'failed', message: '服务端关了版本检查(UPDATE_CHECK=0)'};
 	}
-	if (data.checked === false) {
-		let count = 0;
-		const timer = window.setInterval(() => {
-			loadUpdateStatus();
-			if (++count >= 6) {
-				window.clearInterval(timer);
-			}
-		}, 10000);
-		return {kind: 'background', message: data.message || '正在后台检查,稍后将自动提示'};
+	if (update.error) {
+		return {kind: 'failed', message: '检查更新失败:' + update.error};
 	}
-	return {kind: 'latest', message: '已是最新版本' + (update.current ? `(v${update.current})` : '')};
-}
-
-/** 重启应用更新:服务端会退出,等它回来再刷新页面(最多等 1 分钟) */
-export async function restartForUpdate(): Promise<void> {
-	update.restarting = true;
-	update.restartMessage = '正在重启以应用更新,请稍候…';
-	try {
-		await api.post('/api/update/restart');
-	} catch {
-		// 服务端可能已经退出,响应中断属正常
+	if (update.hasUpdate) {
+		setDismissed('');
+		return {kind: 'available', message: `发现新版本 v${update.latest},更新方法见顶部提示`};
 	}
-	await new Promise(resolve => window.setTimeout(resolve, 1500));
-	for (let attempt = 0; attempt <= 60; attempt++) {
-		try {
-			const res = await fetch('/api/health', {cache: 'no-store'});
-			if (res.ok) {
-				window.location.reload();
-				return;
-			}
-		} catch {
-			// 还没起来
-		}
-		await new Promise(resolve => window.setTimeout(resolve, 1000));
-	}
-	update.restartMessage = '重启耗时较久,请稍后手动刷新页面。';
+	return {kind: 'latest', message: `已是最新版本(v${update.current})`};
 }

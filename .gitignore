@@ -8,24 +8,8 @@ inspect_key.txt
 # 数据库主密钥(和 data/ 分开保管、分开备份)
 /secrets/
 
-# 发布签名/加密密钥。私钥已移到 ~/.steam-tools-keys/,这里兜底再拦一次。
-/tools/keys/
+# 证书/私钥
 *.pem
-!/public-key.pem
-update-key.bin
-
-# ===== 旧 launcher 自更新产生的安装态 =====
-/app.prev/
-/app.next/
-/app.broken/
-/app/.ready
-/version.json
-/.cache/
-/release/
-
-# app/ 内的 package 文件是发布包副本,依赖以根目录 package.json 为准
-/app/package.json
-/app/package-lock.json
 
 # app/data 只保留随代码分发的 cs2-skin-db.json,其余(一次性脚本写的 session/token)不入库
 /app/data/*

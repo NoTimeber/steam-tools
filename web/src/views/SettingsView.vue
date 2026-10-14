@@ -1,6 +1,6 @@
 <script setup lang="ts">
-// 运行设置:检查更新(旧版启动器)、修改访问口令、退出登录。
-import {reactive, ref} from 'vue';
+// 运行设置:当前版本和检查新版本、修改访问口令、退出登录。
+import {computed, reactive, ref} from 'vue';
 import {NAlert, NButton, NCard, NForm, NFormItem, NInput, NModal, NSpace, useMessage} from 'naive-ui';
 import {api, errorText} from '../api/http.ts';
 import {addLog} from '../stores/logs.ts';
@@ -9,11 +9,21 @@ import {checkForUpdate, update} from '../stores/update.ts';
 const message = useMessage();
 const checking = ref(false);
 
+const latestText = computed(() => {
+	if (update.disabled) {
+		return '版本检查已关闭';
+	}
+	if (update.latest) {
+		return `最新版本:v${update.latest}` + (update.hasUpdate ? '' : '(已是最新)');
+	}
+	return update.error ? '最新版本:检查失败' : '';
+});
+
 async function check(): Promise<void> {
 	checking.value = true;
 	try {
 		const outcome = await checkForUpdate();
-		message[outcome.kind === 'background' ? 'info' : 'success'](outcome.message);
+		message[outcome.kind === 'failed' ? 'error' : outcome.kind === 'available' ? 'info' : 'success'](outcome.message);
 	} catch (err) {
 		message.error('检查更新失败:' + errorText(err));
 	} finally {
@@ -65,12 +75,13 @@ async function logout(): Promise<void> {
 			<div>
 				<h1>运行设置</h1>
 				<div class="module-counts">
-					<span>当前版本:{{ update.current ? 'v' + update.current : '未知(Docker 部署不经启动器)' }}</span>
+					<span>当前版本:{{ update.current ? 'v' + update.current : '读取中' }}</span>
+					<span v-if="latestText">{{ latestText }}</span>
 				</div>
 			</div>
 		</header>
 		<NSpace>
-			<NButton :loading="checking" @click="check">检查更新</NButton>
+			<NButton :loading="checking" :disabled="update.disabled" @click="check">检查更新</NButton>
 			<NButton @click="openPassword">修改口令</NButton>
 			<NButton @click="logout">退出登录</NButton>
 		</NSpace>

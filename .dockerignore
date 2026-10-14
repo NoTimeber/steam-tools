@@ -7,18 +7,8 @@ logs/
 inspect_key.txt
 secrets/
 *.pem
-update-key.bin
 
-# 旧 launcher 安装态 / 发布产物
-app.prev/
-app.next/
-app.broken/
-app/.ready
-version.json
-.cache/
-release/
-app/package.json
-app/package-lock.json
+# app/data 只有 cs2-skin-db.json 随代码分发,其余是一次性脚本写的 session/token
 app/data/*
 !app/data/cs2-skin-db.json
 
@@ -28,7 +18,6 @@ node_modules/
 web/node_modules/
 web/dist/
 .claude/
-tools/
 re-tools/
 module-development/
 *.md

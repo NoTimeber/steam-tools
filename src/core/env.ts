@@ -2,7 +2,7 @@
 // 必须先于其它模块执行,因为有的模块在加载时就读环境变量(如 src/steam/community.ts 的 STEAM_WEB_USER_AGENT)。
 //
 // 安装根(install root)存放 data/、.env、secrets/、node_modules,不随代码更新动;
-// 旧版 launcher 启动时注入 APP_ROOT,Docker 里也设了;没设时就是仓库根(src/ 的上一级)。
+// Docker 里设了 APP_ROOT;没设时就是仓库根(src/ 的上一级)。
 
 import {join, resolve} from 'node:path';
 

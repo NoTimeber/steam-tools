@@ -1,7 +1,7 @@
 // Steam 工具台服务端入口:读配置、打开加密库、组装各业务模块、挂 HTTP 路由和 socket.io、监听端口、优雅关机。
 // 业务逻辑都在各模块里(src/<模块>/index.ts),路由在 src/<模块>/routes.ts;这里只做组装。
 //
-// 运行:node src/main.ts(Node 24 直接跑 TypeScript,不需要构建)。旧版 launcher 仍启动 app/server.js,它只转到这里。
+// 运行:node src/main.ts(Node 24 直接跑 TypeScript,不需要构建)。
 
 // 这两个 import 必须在最前面:先加载 .env,再加载 GC 库并修好 protobuf 共享根(见各自文件头)
 import {APP_DIR, APP_ROOT, WEB_DIST_DIR} from './core/env.ts';
@@ -16,7 +16,7 @@ import {loadConfig} from './config.ts';
 import {readJsonFileSafe, writeFileAtomic, writeJsonAtomic} from './core/atomic-file.ts';
 import {createAuth} from './core/auth.ts';
 import {createOriginCheck, parseCookieSecure, parseTrustProxy} from './core/http.ts';
-import {createLauncherBridge} from './core/launcher.ts';
+import {createVersionCheck} from './core/version-check.ts';
 import {openStore} from './store/index.ts';
 import type {Store} from './store/index.ts';
 import {describeGcItem, loadItemsGameSchema} from './items/schema.ts';
@@ -287,8 +287,9 @@ const wallet = createWalletService({
 	emit: payload => io.emit('wallet:redeem', payload)
 });
 
-// 远程更新(旧版启动器);Docker 部署不经启动器
-const launcher = createLauncherBridge({statusFile: config.updateStatusFile});
+// 新版本提示:启动时先查一次,之后前端来问时过期了再查
+const versionCheck = createVersionCheck({current: (require('../package.json') as {version: string}).version, repo: config.updateRepo});
+void versionCheck.check();
 
 // ===== 路由 =====
 const debug = debugOnly(config.http.debugEndpoints);
@@ -298,7 +299,7 @@ const app = createWebApp({
 	trustProxy: parseTrustProxy(config.http.trustProxy),
 	webDir: config.webDir,
 	routes: [
-		router => systemRoutes(router, {sessionCount: () => attempts.size, launcher}),
+		router => systemRoutes(router, {sessionCount: () => attempts.size, versionCheck}),
 		router => accountRoutes(router, {accounts, debug}),
 		router => inventoryRoutes(router, {inventory, getAttempt: id => attempts.get(id), publicAttempt: sessions.publicAttempt}),
 		router => terminalRoutes(router, {terminal}),

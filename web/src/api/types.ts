@@ -55,10 +55,16 @@ export interface AccountProfile {
 	balance: number | null;
 }
 
-/** 远程更新状态(旧版启动器写的 update-status.json) */
+/** 当前版本和 GitHub 上的最新 Release(后端 src/core/version-check.ts) */
 export interface UpdateStatus {
-	pending?: boolean;
-	current?: string;
-	available?: string;
+	current: string;
+	/** 服务端关了检查(UPDATE_CHECK=0) */
+	disabled: boolean;
+	latest?: string;
+	hasUpdate: boolean;
 	notes?: string;
+	url?: string;
+	checkedAt?: string;
+	/** 最近一次检查失败的原因 */
+	error?: string;
 }

@@ -16,7 +16,7 @@
 | UU 发货 | 悠悠有品短信登录拿 token，按账号、按游戏轮询自动发货（自动接受报价），CS2 自动上架 |
 | 终端机开箱 | CS2 终端机：解封、读取和推进报价、状态查看（解封和推进不可逆） |
 | 充值码兑换 | 「账号----密码」和充值码按行配对，并发兑换，可以只重试失败的 |
-| 运行设置 | 修改访问口令、退出登录 |
+| 运行设置 | 查看当前版本和检查新版本、修改访问口令、退出登录 |
 
 ## 部署
 
@@ -36,7 +36,7 @@ docker compose up -d --build
 docker compose logs steam-tools | grep 初始化令牌
 ```
 
-更新：`git pull && docker compose up -d --build`。
+更新：`git pull && docker compose up -d --build`。有新版本时面板顶部会提示（查的是 GitHub 上的最新 Release）。
 
 迁移旧版数据、备份和恢复，见 **[DEPLOY.md](DEPLOY.md)**。
 
@@ -90,5 +90,4 @@ cd web && npm test && npm run typecheck
 | `app/` | 随代码发布的静态资料：物品 schema、皮肤中文名库、市场 nameid 库，以及几个一次性命令行脚本 |
 | `test/` | 端到端测试、离线替身、演示服务 |
 | `Dockerfile`、`docker-compose.yml` | 镜像和部署编排 |
-| `launcher.js`、`start.bat`、`tools/` | 旧版 Windows 启动器和发版工具，已不再发布更新 |
 | `module-development/`、`re-tools/` | 早期的模块设计笔记和 GC 抓包工具 |

@@ -22,8 +22,6 @@ export interface Config {
 	catalogCacheDir: string;
 	/** 加密库主密钥文件的缺省位置(MASTER_KEY / MASTER_KEY_FILE 都没给时用) */
 	defaultKeyFile: string;
-	/** launcher 在检测到新版本时写这个文件;前端据此提示"重启生效" */
-	updateStatusFile: string;
 	/** 共享配置目录(CONFIG_DIR):口令、旧版 cookies、account_cache.json */
 	configDir: string;
 	cookiesDir: string;
@@ -85,6 +83,8 @@ export interface Config {
 		inspectUrl: string;
 		inspectKey: string;
 	};
+	/** 新版本提示查这个 GitHub 仓库(owner/repo)的最新 Release;UPDATE_CHECK=0 时为空,不检查 */
+	updateRepo: string;
 }
 
 /** 数字型环境变量:没给或不是数字用缺省值,再夹到下限 */
@@ -118,7 +118,6 @@ export function loadConfig(env: Env, dirs: ConfigDirs): Config {
 		priceSheetDir: join(dataDir, 'price-sheets'),
 		catalogCacheDir: join(dataDir, 'purchase-catalogs'),
 		defaultKeyFile: join(appRoot, 'secrets', 'master.key'),
-		updateStatusFile: join(dataDir, 'update-status.json'),
 		configDir,
 		cookiesDir: join(configDir, 'cookies'),
 		accountCacheFile: join(configDir, 'account_cache.json'),
@@ -166,6 +165,7 @@ export function loadConfig(env: Env, dirs: ConfigDirs): Config {
 			pollIntervalMs: Number(env.UU_POLL_INTERVAL_MS) || undefined,
 			inspectUrl: env.INSPECT_SERVICE_URL || '',
 			inspectKey: env.INSPECT_KEY || ''
-		}
+		},
+		updateRepo: String(env.UPDATE_CHECK || '1') === '0' ? '' : (env.GITHUB_REPO || '').trim() || 'NoTimeber/steam-tools'
 	};
 }

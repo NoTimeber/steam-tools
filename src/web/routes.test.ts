@@ -6,7 +6,7 @@ import {accountRoutes} from '../accounts/routes.ts';
 import type {AccountService} from '../accounts/index.ts';
 import {buyGameRoutes} from '../buygame/routes.ts';
 import type {BuyGameService} from '../buygame/index.ts';
-import type {LauncherBridge} from '../core/launcher.ts';
+import type {VersionCheck} from '../core/version-check.ts';
 import {inventoryRoutes} from '../inventory/routes.ts';
 import {marketRoutes} from '../market/routes.ts';
 import type {MarketService} from '../market/index.ts';
@@ -82,13 +82,13 @@ function registerAll(overrides: {
 	purchase?: Partial<Record<keyof PurchaseService, unknown>>;
 	market?: Partial<Record<keyof MarketService, unknown>>;
 	uu?: Partial<Record<keyof UuService, unknown>>;
-	launcher?: Partial<LauncherBridge>;
+	versionCheck?: Partial<VersionCheck>;
 	getAttempt?: (id: string) => Attempt | undefined;
 	debug?: boolean;
 } = {}) {
 	const {router, table} = recordingRouter();
 	const debug = debugOnly(!!overrides.debug);
-	systemRoutes(router, {sessionCount: () => 3, launcher: stub<LauncherBridge>(overrides.launcher ?? {}), uptime: () => 12});
+	systemRoutes(router, {sessionCount: () => 3, versionCheck: stub<VersionCheck>(overrides.versionCheck ?? {}), uptime: () => 12});
 	accountRoutes(router, {accounts: stub<AccountService>({cookies: async (id: string) => ({id, cookies: ['c']})}), debug});
 	inventoryRoutes(router, {
 		inventory: {get: async () => ({source: 'community', items: []}) as never},
@@ -112,7 +112,7 @@ test('路由表:拆分前 app/server.js 注册的全部保留,另加新版前端
 		`${prefix === 'purchase' ? 'POST' : 'GET'} /api/${prefix}/refresh-rates`
 	]);
 	const expected = [
-		'GET /api/health', 'GET /api/update/status', 'POST /api/update/check', 'POST /api/update/restart',
+		'GET /api/health', 'GET /api/update/status', 'POST /api/update/check',
 		'GET /api/attempts', 'GET /api/accounts/list', 'POST /api/accounts/list', 'POST /api/accounts/upsert', 'POST /api/accounts/meta', 'POST /api/mafile/import',
 		'POST /api/auth-code', 'POST /api/login', 'POST /api/login-refresh', 'POST /api/guard/:id', 'POST /api/web-session/:id',
 		'POST /api/logout/:id', 'POST /api/accounts/cleanup', 'POST /api/gc/connect/:id', 'POST /api/gc/disconnect/:id', 'GET /api/cookies/:id',
@@ -205,10 +205,10 @@ test('UU:删 token 时解绑了账号才回 account;同步方法抛的错按 sta
 	assert.deepEqual([failed.status, failed.body], [400, {success: false, error: '未绑定 token'}]);
 });
 
-test('系统:运行状态;启动器忙时检查更新 409', async () => {
+test('系统:运行状态;版本状态和手动检查', async () => {
 	assert.deepEqual((await call(registerAll(), 'GET /api/health')).body, {success: true, uptime: 12, attempts: 3});
-	const busy = await call(registerAll({launcher: {check: async () => ({busy: true})}}), 'POST /api/update/check');
-	assert.equal(busy.status, 409);
-	const done = await call(registerAll({launcher: {check: async () => ({checked: true, status: {pending: true}})}}), 'POST /api/update/check');
-	assert.deepEqual(done.body, {success: true, checked: true, status: {pending: true}});
+	const status = {current: '1.5.0', disabled: false, hasUpdate: true, latest: '1.6.0'};
+	const table = registerAll({versionCheck: {status: () => status, check: async () => ({...status, error: '连接 GitHub 超时'})}});
+	assert.deepEqual((await call(table, 'GET /api/update/status')).body, {success: true, status});
+	assert.deepEqual((await call(table, 'POST /api/update/check')).body, {success: true, status: {...status, error: '连接 GitHub 超时'}});
 });

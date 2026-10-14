@@ -58,7 +58,8 @@ const child = spawn(process.execPath, ['--require', join(REPO_ROOT, 'test', 'e2e
 		APP_PASSWORD: password,
 		FAKE_STORE_COUNTRY: process.env.FAKE_STORE_COUNTRY || 'US',
 		FAKE_STEAM_LOG: join(root, 'fake-steam.log'),
-		FAKE_UU_FILE: uuScenarioFile
+		FAKE_UU_FILE: uuScenarioFile,
+		UPDATE_CHECK: '0'
 	}
 });
 console.log(`[demo] 离线演示服务 http://127.0.0.1:${port} 口令 ${password} 数据 ${root}`);

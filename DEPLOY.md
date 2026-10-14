@@ -104,10 +104,14 @@ docker compose logs steam-tools | grep 初始化令牌
 
 ## 7. 更新
 
+有新版本时，面板顶部会提示（服务端每 6 小时查一次 GitHub 上的最新 Release，「运行设置 → 检查更新」可以手动查）。面板只提示，不会自己更新，更新在服务器上执行：
+
 ```bash
 git pull
 docker compose up -d --build
 ```
+
+服务器连不上 GitHub 或者不想让它访问外网，在 `.env` 里设 `UPDATE_CHECK=0` 关掉检查。
 
 容器停止时会先登出所有 Steam 会话。重启后会自动恢复上次在线的账号：
 

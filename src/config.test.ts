@@ -23,6 +23,7 @@ test('缺省:数据在安装根 data/,schema 在 app/schema/,端口 53110,自动
 		reconnectMaxAttempts: 6, restoreEnabled: true, restoreIntervalMs: 3000
 	});
 	assert.deepEqual(config.uu, {pollIntervalMs: undefined, inspectUrl: '', inspectKey: ''});
+	assert.equal(config.updateRepo, 'NoTimeber/steam-tools');
 });
 
 test('环境变量覆盖目录;CONFIG_DIR 独立于 DATA_DIR', () => {
@@ -44,6 +45,8 @@ test('环境变量覆盖目录;CONFIG_DIR 独立于 DATA_DIR', () => {
 	assert.deepEqual([config.auth.envPassword, config.auth.setupToken], ['pw', 'tok']);
 	assert.equal(config.sessions.restoreEnabled, false);
 	assert.equal(config.uu.pollIntervalMs, 120000);
+	assert.equal(loadConfig({GITHUB_REPO: ' me/fork '}, dirs).updateRepo, 'me/fork');
+	assert.equal(loadConfig({GITHUB_REPO: 'me/fork', UPDATE_CHECK: '0'}, dirs).updateRepo, '', 'UPDATE_CHECK=0 关掉检查');
 });
 
 test('超时类数值有下限;不是数字时用缺省值', () => {

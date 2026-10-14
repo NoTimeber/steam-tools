@@ -196,7 +196,8 @@ export async function startServer(options: StartOptions = {}): Promise<TestServe
 		PORT: String(port),
 		HOST: '127.0.0.1',
 		FAKE_STEAM_LOG: steamLogFile,
-		FAKE_STEAM_RUN: run
+		FAKE_STEAM_RUN: run,
+		UPDATE_CHECK: '0'
 	}, options.env);
 	const child = spawn(process.execPath, ['--require', FAKE_STEAM, SERVER_ENTRY], {cwd: REPO_ROOT, env, stdio: ['ignore', 'pipe', 'pipe']});
 	const server = new TestServer(child, port, appRoot, dataDir, steamLogFile, run);
@@ -213,7 +214,7 @@ export async function startExpectingExit(options: StartOptions): Promise<{code: 
 			env[key] = value;
 		}
 	}
-	Object.assign(env, {APP_ROOT: appRoot, DATA_DIR: options.dataDir ?? join(appRoot, 'data'), PORT: String(await freePort()), HOST: '127.0.0.1'}, options.env);
+	Object.assign(env, {APP_ROOT: appRoot, DATA_DIR: options.dataDir ?? join(appRoot, 'data'), PORT: String(await freePort()), HOST: '127.0.0.1', UPDATE_CHECK: '0'}, options.env);
 	const child = spawn(process.execPath, ['--require', FAKE_STEAM, SERVER_ENTRY], {cwd: REPO_ROOT, env, stdio: ['ignore', 'pipe', 'pipe']});
 	const chunks: string[] = [];
 	child.stdout.on('data', chunk => chunks.push(String(chunk)));
