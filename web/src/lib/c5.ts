@@ -74,6 +74,8 @@ export interface C5State {
 	cycle: {n: number; at: number | null; error: string | null; errors: number; done: boolean};
 	budget: {total: number; spent: number; qty: number};
 	balance: {value: number; at: number} | null;
+	/** 收货账号;没填交易链接为 null */
+	receiver: C5Receiver | null;
 	items: C5ItemView[];
 	purchases: C5Purchase[];
 	unknown: number;
@@ -82,7 +84,40 @@ export interface C5State {
 
 export interface C5CheckResult {
 	balance: {money: number | null; settle: number | null; deposit: number | null};
-	steamAccounts: Array<{steamId: string; nickname: string; status: string}>;
+	steamAccounts: C5BoundAccount[];
+}
+
+/** C5 账户上绑定的 Steam 账号 */
+export interface C5BoundAccount {
+	steamId: string;
+	nickname: string;
+	status: string;
+}
+
+/** 后端 src/c5/index.ts 的 C5Receiver:交易链接对应的账号 */
+export interface C5Receiver {
+	steamId: string;
+	account: string | null;
+	personaName: string | null;
+	c5: C5BoundAccount | null;
+	/** false = 还没查过 C5 上绑定了哪些账号 */
+	c5Checked: boolean;
+}
+
+/** 收货账号下拉:本工具里登录着的账号;c5Bound 为 null 是没查 C5(没填 app-key 或查失败) */
+export interface C5ReceiverAccount {
+	account: string;
+	steamId: string;
+	personaName: string;
+	c5Bound: boolean | null;
+}
+
+export interface C5Receivers {
+	accounts: C5ReceiverAccount[];
+	/** 查到了 C5 上绑定的账号 */
+	checked: boolean;
+	bound: C5BoundAccount[];
+	boundError: string | null;
 }
 
 export interface C5Listing {
@@ -95,11 +130,85 @@ export interface C5Listing {
 export interface C5NameOption {
 	name: string;
 	zh: string | null;
+	/** C5 在售最低价、在售数;没查价(没填 app-key、查价失败)或没在售为 null */
+	lowest: number | null;
+	sellCount: number | null;
+}
+
+export interface C5NameSearch {
+	options: C5NameOption[];
+	priced: boolean;
+	priceError: string | null;
 }
 
 /** 显示用的饰品名:有中文用中文 */
 export function itemLabel(item: {name: string; zh?: string | null}): string {
 	return item.zh || item.name;
+}
+
+/** 搜索结果里的价格:「¥0.66 · 在售 4」;查过价但没在售时「C5 无在售」;没查价为空 */
+export function priceText(option: C5NameOption, priced: boolean): string {
+	if (option.lowest != null) {
+		return `¥${money(option.lowest)} · 在售 ${option.sellCount ?? '-'}`;
+	}
+	return priced ? 'C5 无在售' : '';
+}
+
+// ===== 收货账号 =====
+
+/** 交易链接里的 partner(账号 id = SteamID64 的低 32 位);不是交易链接返回 null */
+export function partnerOf(tradeUrl: string): string | null {
+	try {
+		const url = new URL(tradeUrl);
+		const partner = url.searchParams.get('partner') ?? '';
+		return url.hostname === 'steamcommunity.com' && /^\d{1,10}$/.test(partner) ? String(BigInt(partner)) : null;
+	} catch {
+		return null;
+	}
+}
+
+function isTradeUrlOf(tradeUrl: string, steamId: string): boolean {
+	const partner = partnerOf(tradeUrl);
+	return partner != null && /^\d{17}$/.test(steamId) && String(BigInt(steamId) & 0xFFFFFFFFn) === partner;
+}
+
+/** 设置里填的交易链接是谁的(页面上手改链接时即时显示;保存后以后端 state.receiver 为准) */
+export function describeTradeUrl(tradeUrl: string, receivers: C5Receivers | null): C5Receiver | null {
+	const partner = partnerOf(tradeUrl);
+	if (partner == null) {
+		return null;
+	}
+	const local = receivers?.accounts.find(account => isTradeUrlOf(tradeUrl, account.steamId)) ?? null;
+	const c5 = receivers?.bound.find(account => isTradeUrlOf(tradeUrl, account.steamId)) ?? null;
+	return {
+		steamId: local?.steamId ?? c5?.steamId ?? String(76561197960265728n + BigInt(partner)),
+		account: local?.account ?? null,
+		personaName: local?.personaName || null,
+		c5,
+		c5Checked: !!receivers?.checked
+	};
+}
+
+/** 收货账号一行字:「alpha(昵称) · SteamID 7656…」;不是本工具的账号只给 SteamID */
+export function receiverText(receiver: C5Receiver | null): string {
+	if (!receiver) {
+		return '未设置';
+	}
+	const name = receiver.account ? `${receiver.account}${receiver.personaName ? `(${receiver.personaName})` : ''} · ` : '';
+	return `${name}SteamID ${receiver.steamId}`;
+}
+
+/** 收货账号在 C5 上的情况:没查过返回 null */
+export function receiverC5Note(receiver: C5Receiver | null): {text: string; ok: boolean} | null {
+	if (!receiver || !receiver.c5Checked) {
+		return null;
+	}
+	if (!receiver.c5) {
+		return {text: 'C5 上没绑定这个账号', ok: false};
+	}
+	return receiver.c5.status === '正常'
+		? {text: `C5 已绑定(${receiver.c5.nickname || receiver.c5.steamId})`, ok: true}
+		: {text: `C5 上状态:${receiver.c5.status}`, ok: false};
 }
 
 // ===== 文案 =====
@@ -273,9 +382,11 @@ export function sweepBlocker(settings: C5Settings): string | null {
 }
 
 /** 开始自动扫货前的确认文字 */
-export function sweepConfirmText(settings: C5Settings, itemCount: number): string {
+export function sweepConfirmText(settings: C5Settings, itemCount: number, receiver: C5Receiver | null): string {
+	const note = receiverC5Note(receiver);
 	return [
 		'自动扫货:监控列表里的饰品跌到目标价以内会真实下单,花 C5 账户余额(没有模拟)。',
+		`收货账号:${receiverText(receiver)}${note ? `,${note.text}` : ''}。`,
 		`总预算 ${money(settings.maxTotalSpend)},每轮最多 ${settings.maxBuyPerCycle} 单,余额保留 ${money(settings.minBalanceReserve)}。`,
 		`策略:${settings.strategy === 'quick' ? '快速购买(平台挑最低价,一次一件)' : '按在售列表批量买'};监控 ${itemCount} 个饰品。`,
 		'确定开始?'

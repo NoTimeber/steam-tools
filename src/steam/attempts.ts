@@ -107,3 +107,21 @@ export function listCookieFlowAccounts(attempts: Iterable<Attempt>, cookiesFor: 
 			balance: attempt.balance == null ? null : Number(attempt.balance)
 		}));
 }
+
+export interface SteamAccountRef {
+	account: string;
+	steamId: string;
+	personaName: string;
+}
+
+/**
+ * 知道 SteamID 的账号(C5 扫货认收货账号用),按账号名排序。
+ * withWebSession 时只要登录着、有网页会话 cookie 的(能取交易链接)
+ */
+export function listSteamAccounts(attempts: Iterable<Attempt>, cookiesFor: (attempt: Attempt) => readonly string[], withWebSession: boolean): SteamAccountRef[] {
+	return Array.from(attempts)
+		.filter(attempt => attempt.accountName && /^\d{17}$/.test(String(attempt.steamID || '')))
+		.filter(attempt => !withWebSession || (isAttemptUsableForCookieFlow(attempt) && cookiesFor(attempt).length > 0))
+		.sort((left, right) => String(left.accountName).localeCompare(String(right.accountName), 'zh-CN'))
+		.map(attempt => ({account: attempt.accountName, steamId: String(attempt.steamID), personaName: attempt.personaName || ''}));
+}

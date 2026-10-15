@@ -8,8 +8,8 @@ import type {DataTableColumns, SelectOption} from 'naive-ui';
 import type {VNodeChild} from 'vue';
 import {errorText} from '../api/http.ts';
 import {
-	ASSET_TYPE_OPTIONS, budgetText, DELIVERY_OPTIONS, dirtyFields, formatTime, itemLabel, itemStatus, money, purchaseStatus, removedNames, RUN_LABELS,
-	sweepBlocker, sweepConfirmText
+	ASSET_TYPE_OPTIONS, budgetText, DELIVERY_OPTIONS, dirtyFields, formatTime, itemLabel, itemStatus, money, priceText, purchaseStatus, receiverC5Note,
+	receiverText, removedNames, RUN_LABELS, sweepBlocker, sweepConfirmText
 } from '../lib/c5.ts';
 import type {C5NameOption, C5Purchase, C5RunState, DraftField, DraftRow} from '../lib/c5.ts';
 import {
@@ -44,6 +44,7 @@ const labelOf = (name: string) => itemLabel(viewByName.value.get(name) ?? {name}
 const removed = computed(() => removedNames(c5.drafts, serverItems.value).map(labelOf));
 
 const settingsOpen = ref(false);
+const receiverNote = computed(() => receiverC5Note(state.value?.receiver ?? null));
 const listingsName = ref('');
 
 const cycleText = computed(() => {
@@ -87,7 +88,7 @@ function changeRun(next: C5RunState): void {
 	}
 	dialog.warning({
 		title: '开始自动扫货(真实下单)',
-		content: () => h('div', {class: 'pre'}, sweepConfirmText(value.settings, serverItems.value.length)),
+		content: () => h('div', {class: 'pre'}, sweepConfirmText(value.settings, serverItems.value.length, value.receiver)),
 		positiveText: '开始',
 		negativeText: '取消',
 		onPositiveClick: () => {
@@ -233,9 +234,11 @@ const columns: DataTableColumns<DraftRow> = [
 	}
 ];
 
-// ===== 添加饰品:输中文或英文,停 200 毫秒后向后端搜,从下拉里选 =====
+// ===== 添加饰品:输中文或英文,停 300 毫秒后向后端搜(带 C5 在售最低价),从下拉里选 =====
 const newItem = reactive({maxPrice: null as number | null, maxQty: null as number | null});
-const nameSearch = reactive({query: '', loading: false, options: [] as C5NameOption[], picked: null as C5NameOption | null});
+const nameSearch = reactive({
+	query: '', loading: false, options: [] as C5NameOption[], picked: null as C5NameOption | null, priced: false, priceError: null as string | null
+});
 let searchSeq = 0;
 let searchTimer: number | undefined;
 
@@ -258,9 +261,9 @@ function onSearch(query: string): void {
 	nameSearch.loading = true;
 	searchTimer = window.setTimeout(async () => {
 		try {
-			const options = await searchNames(q);
+			const result = await searchNames(q);
 			if (seq === searchSeq) {
-				nameSearch.options = options;
+				Object.assign(nameSearch, {options: result.options, priced: result.priced, priceError: result.priceError});
 			}
 		} catch (err) {
 			if (seq === searchSeq) {
@@ -272,20 +275,41 @@ function onSearch(query: string): void {
 				nameSearch.loading = false;
 			}
 		}
-	}, 200);
+	}, 300);
 }
 
 function pickName(value: string | null, option: SelectOption | null): void {
 	nameSearch.picked = value && option ? option.item as C5NameOption : null;
 }
 
+/** 下拉每一行:左边中文名 + 英文名,右边 C5 在售最低价和在售数 */
 function renderNameOption(option: SelectOption): VNodeChild {
 	const item = option.item as C5NameOption;
 	const small = {class: 'muted', style: 'font-size: 12px; margin-left: 8px'};
-	return item.zh
-		? h('span', [item.zh, h('span', small, item.name)])
-		: h('span', [`按英文名添加:${item.name}`, h('span', small, '词库里没有,要和 Steam 英文名完全一致')]);
+	const price = priceText(item, nameSearch.priced);
+	return h('div', {style: 'display: flex; justify-content: space-between; gap: 16px; width: 100%'}, [
+		item.zh
+			? h('span', [item.zh, h('span', small, item.name)])
+			: h('span', [`按英文名添加:${item.name}`, h('span', small, '词库里没有,要和 Steam 英文名完全一致')]),
+		price ? h('span', {style: `white-space: nowrap; ${item.lowest != null ? 'color: var(--ok)' : ''}`, class: item.lowest == null ? 'muted' : ''}, price) : null
+	]);
 }
+
+/** 下拉底部:价格从哪来,或者为什么没价格 */
+const priceNote = computed(() => {
+	if (!nameSearch.query || nameSearch.loading || !nameSearch.options.length) {
+		return '';
+	}
+	if (nameSearch.priceError) {
+		return `C5 价格没查到:${nameSearch.priceError}`;
+	}
+	return nameSearch.priced ? '价格是 C5 在售最低价(元)' : '填了 C5 app-key 才显示价格';
+});
+
+const targetPlaceholder = computed(() => {
+	const lowest = nameSearch.picked?.lowest;
+	return lowest != null ? `目标价(现最低 ${money(lowest)})` : '目标价';
+});
 
 function add(): void {
 	const picked = nameSearch.picked;
@@ -406,6 +430,10 @@ async function copyLogs(): Promise<void> {
 					<span>已花 / 预算:{{ state ? budgetText(state.budget) : '-' }}</span>
 					<span>已买:{{ state?.budget.qty ?? 0 }} 件</span>
 					<span>C5 余额:{{ money(state?.balance?.value) }}</span>
+					<span>
+						收货账号:<a class="receiver-link" :title="state?.settings.tradeUrl || '点设置里选收货账号'" @click="settingsOpen = true">{{ receiverText(state?.receiver ?? null) }}</a>
+						<NTag v-if="receiverNote" size="small" :bordered="false" :type="receiverNote.ok ? 'success' : 'warning'" class="receiver-tag">{{ receiverNote.text }}</NTag>
+					</span>
 					<span>{{ cycleText }}</span>
 				</div>
 			</div>
@@ -475,8 +503,11 @@ async function copyLogs(): Promise<void> {
 					<template #empty>
 						<span class="muted">{{ nameSearch.query ? (nameSearch.loading ? '搜索中…' : '没搜到;新出的饰品可以直接输完整英文名') : '输中文或英文名搜索' }}</span>
 					</template>
+					<template v-if="priceNote" #action>
+						<span :class="nameSearch.priceError ? 'warn-text' : 'muted'" class="price-note">{{ priceNote }}</span>
+					</template>
 				</NSelect>
-				<NInputNumber v-model:value="newItem.maxPrice" size="small" :min="0" :step="0.01" :show-button="false" placeholder="目标价" />
+				<NInputNumber v-model:value="newItem.maxPrice" size="small" :min="0" :step="0.01" :show-button="false" :placeholder="targetPlaceholder" />
 				<NInputNumber v-model:value="newItem.maxQty" size="small" :min="1" :precision="0" :show-button="false" placeholder="数量上限" />
 				<NButton size="small" @click="add">添加</NButton>
 			</div>
@@ -525,6 +556,23 @@ async function copyLogs(): Promise<void> {
 .dirty-hint {
 	color: var(--warn);
 	font-size: 12px;
+}
+
+.receiver-link {
+	cursor: pointer;
+	text-decoration: underline dotted;
+}
+
+.receiver-tag {
+	margin-left: 4px;
+}
+
+.price-note {
+	font-size: 12px;
+}
+
+.warn-text {
+	color: var(--warn);
 }
 
 .add-row {

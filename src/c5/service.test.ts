@@ -14,7 +14,7 @@ import {C5Error} from './client.ts';
 import type {C5Api} from './client.ts';
 import {buildItems, DEFAULT_SETTINGS, normalizeSettings, sweepBlocker} from './config.ts';
 import {createC5Service, maskAppKey} from './index.ts';
-import type {C5LogLine} from './index.ts';
+import type {C5LogLine, C5ServiceOptions} from './index.ts';
 
 const KEY = 'c5-app-key-0123456789';
 const TRADE_URL = 'https://steamcommunity.com/tradeoffer/new/?partner=123456&token=abcdefgh';
@@ -89,7 +89,13 @@ function fakeApi(overrides: Partial<C5Api> = {}): C5Api & {calls: string[]} {
 	};
 }
 
-function setup({api = fakeApi(), db = memoryDb(), names}: {api?: C5Api; db?: {db: Db; vault: Vault}; names?: NameDb} = {}) {
+function setup({api = fakeApi(), db = memoryDb(), names, localAccounts, fetchTradeUrl}: {
+	api?: C5Api;
+	db?: {db: Db; vault: Vault};
+	names?: NameDb;
+	localAccounts?: C5ServiceOptions['localAccounts'];
+	fetchTradeUrl?: C5ServiceOptions['fetchTradeUrl'];
+} = {}) {
 	const settingsStore = createSettingsStore(db.db);
 	const store = createC5Store(db.db, db.vault, settingsStore);
 	const timers = manualTimers();
@@ -99,6 +105,8 @@ function setup({api = fakeApi(), db = memoryDb(), names}: {api?: C5Api; db?: {db
 	const service = createC5Service({
 		store,
 		names,
+		localAccounts,
+		fetchTradeUrl,
 		emit: (event, line) => emitted.push(line),
 		createClient: options => {
 			clients.push(options);
@@ -185,7 +193,7 @@ test('运行状态:没有 app-key、交易链接、总预算不能开;状态存�
 	first.service.saveWatchlist([ITEM]);
 	first.service.setRun('sweeping');
 	assert.equal(first.timers.delay, 0, '开了马上跑');
-	assert.ok(first.emitted.some(line => line.level === 'warn' && line.message === '运行状态:自动扫货(真实下单)'));
+	assert.ok(first.emitted.some(line => line.level === 'warn' && line.message === `运行状态:自动扫货(真实下单),收货账号 SteamID ${76561197960265728n + 123456n}`));
 	assert.throws(() => first.service.saveSettings({maxTotalSpend: 0}), err => statusOf(err) === 400 && /正在自动扫货/.test((err as Error).message));
 	assert.equal(first.service.state().settings.maxTotalSpend, 50, '扫货中清空总预算:报错,不改');
 	first.service.stop();
@@ -369,13 +377,12 @@ test('数据库里的设置坏了退回默认值,启动时提示', () => {
 test('中文名:按中文搜到英文名;填中文名拒收;状态、流水、日志带中文名', async () => {
 	const names = createNameDb({'Kilowatt Case': '千瓦武器箱', 'Kilowatt Case Key': '千瓦武器箱钥匙'});
 	const {service, timers, emitted} = setup({names});
-	assert.deepEqual(service.searchNames(' 千瓦 ').options, [
-		{name: 'Kilowatt Case', zh: '千瓦武器箱'}, {name: 'Kilowatt Case Key', zh: '千瓦武器箱钥匙'}
-	]);
-	assert.deepEqual(service.searchNames('Gallery Case').options, [{name: 'Gallery Case', zh: null}], '词库里没有的英文名按原文用');
-	assert.deepEqual(service.searchNames('Kilowatt Case').options.map(option => option.zh), ['千瓦武器箱', '千瓦武器箱钥匙'], '已有的不重复');
-	assert.deepEqual(service.searchNames('不存在').options, [], '中文搜不到不给原文选项');
-	assert.deepEqual(service.searchNames('').options, []);
+	const search = async (query: string) => (await service.searchNames(query)).options.map(option => [option.name, option.zh]);
+	assert.deepEqual(await search(' 千瓦 '), [['Kilowatt Case', '千瓦武器箱'], ['Kilowatt Case Key', '千瓦武器箱钥匙']]);
+	assert.deepEqual(await search('Gallery Case'), [['Gallery Case', null]], '词库里没有的英文名按原文用');
+	assert.deepEqual(await search('Kilowatt Case'), [['Kilowatt Case', '千瓦武器箱'], ['Kilowatt Case Key', '千瓦武器箱钥匙']], '已有的不重复');
+	assert.deepEqual(await search('不存在'), [], '中文搜不到不给原文选项');
+	assert.deepEqual(await search(''), []);
 
 	assert.throws(() => service.saveWatchlist([{...ITEM, name: '千瓦武器箱'}]), err => statusOf(err) === 400 && /应填 Kilowatt Case/.test((err as Error).message));
 	assert.deepEqual(service.state().items, []);
@@ -389,4 +396,88 @@ test('中文名:按中文搜到英文名;填中文名拒收;状态、流水、�
 	assert.deepEqual(state.items.map(item => [item.name, item.zh]), [['Kilowatt Case', '千瓦武器箱'], ['Gallery Case', null]]);
 	assert.deepEqual(state.purchases.map(purchase => [purchase.name, purchase.zh]), [['Kilowatt Case', '千瓦武器箱'], ['Kilowatt Case', '千瓦武器箱']]);
 	assert.ok(emitted.some(line => line.message.startsWith('买入 千瓦武器箱 5.00')));
+});
+
+test('搜饰品带 C5 在售最低价:没填 app-key 不查;30 秒内查过的不重查;查价失败照样给搜索结果', async () => {
+	const names = createNameDb({'Kilowatt Case': '千瓦武器箱', 'Kilowatt Case Key': '千瓦武器箱钥匙'});
+	let fail = false;
+	const asked: string[][] = [];
+	const api = fakeApi({
+		async itemStats(appId, list) {
+			asked.push([...list]);
+			if (fail) {
+				throw new C5Error('POST /merchant/market/v2/item/stat/hash/name 失败: [429] 请求过于频繁');
+			}
+			return {'Kilowatt Case': {sellPrice: '0.66', sellCount: 4}};
+		}
+	});
+	const {service, clock} = setup({api, names});
+	const prices = (result: Awaited<ReturnType<typeof service.searchNames>>) => result.options.map(option => [option.name, option.lowest, option.sellCount]);
+
+	const noKey = await service.searchNames('千瓦');
+	assert.deepEqual([noKey.priced, prices(noKey)], [false, [['Kilowatt Case', null, null], ['Kilowatt Case Key', null, null]]]);
+	assert.equal(asked.length, 0, '没填 app-key 不查价');
+
+	service.saveSettings({appKey: KEY});
+	const priced = await service.searchNames('千瓦');
+	assert.deepEqual([priced.priced, priced.priceError, prices(priced)], [true, null, [['Kilowatt Case', 0.66, 4], ['Kilowatt Case Key', null, null]]]);
+	assert.deepEqual(asked, [['Kilowatt Case', 'Kilowatt Case Key']], '一批结果一个请求');
+	await service.searchNames('千瓦武器箱');
+	assert.equal(asked.length, 1, '30 秒内查过的不重查');
+
+	clock.now += 31_000;
+	fail = true;
+	const failed = await service.searchNames('千瓦');
+	assert.deepEqual([failed.priced, failed.options.length], [false, 2]);
+	assert.match(failed.priceError!, /429/);
+});
+
+test('收货账号:从登录着的账号里选、取交易链接;状态里认得出是哪个账号、C5 上有没有绑定', async () => {
+	const ALPHA = '76561198152000001';
+	const alphaUrl = `https://steamcommunity.com/tradeoffer/new/?partner=${76561198152000001n - 76561197960265728n}&token=abc`;
+	const accounts = [{account: 'alpha', steamId: ALPHA, personaName: '阿尔法'}, {account: 'bravo', steamId: '76561198152000002', personaName: ''}];
+	const api = fakeApi({
+		async steamInfo() {
+			return {steamList: [{steamId: ALPHA, nickname: 'C5 上的阿尔法', accountStatus: 1}]};
+		}
+	});
+	const {service, emitted} = setup({
+		api,
+		// bravo 不在线:只在「全部账号」里
+		localAccounts: withWebSession => (withWebSession ? accounts.slice(0, 1) : accounts),
+		fetchTradeUrl: async account => {
+			if (account !== 'alpha') {
+				throw new Error('网页会话失效了');
+			}
+			return alphaUrl;
+		}
+	});
+
+	const before = await service.receivers();
+	assert.deepEqual(before, {accounts: [{...accounts[0], c5Bound: null}], checked: false, bound: [], boundError: null}, '没填 app-key 不查 C5 绑定');
+	await assert.rejects(service.tradeUrlFor('bravo'), err => statusOf(err) === 404);
+	const fetched = await service.tradeUrlFor('alpha');
+	assert.equal(fetched.tradeUrl, alphaUrl);
+	assert.deepEqual(fetched.receiver, {steamId: ALPHA, account: 'alpha', personaName: '阿尔法', c5: null, c5Checked: false});
+
+	service.saveSettings({appKey: KEY});
+	const after = await service.receivers();
+	assert.deepEqual([after.checked, after.accounts.map(account => [account.account, account.c5Bound])], [true, [['alpha', true]]]);
+	assert.deepEqual(after.bound, [{steamId: ALPHA, nickname: 'C5 上的阿尔法', status: '正常'}]);
+
+	service.saveSettings({tradeUrl: alphaUrl, maxTotalSpend: 50});
+	assert.ok(emitted.some(line => line.message.includes(`收货账号改为 alpha(阿尔法) SteamID ${ALPHA}`)));
+	assert.deepEqual(service.state().receiver, {
+		steamId: ALPHA, account: 'alpha', personaName: '阿尔法', c5: {steamId: ALPHA, nickname: 'C5 上的阿尔法', status: '正常'}, c5Checked: true
+	});
+	service.setRun('sweeping');
+	assert.ok(emitted.some(line => line.message === `运行状态:自动扫货(真实下单),收货账号 alpha(阿尔法) SteamID ${ALPHA}`));
+
+	// 别人的链接:认不出是本工具的哪个账号
+	const stranger = 'https://steamcommunity.com/tradeoffer/new/?partner=7&token=x';
+	service.setRun('stopped');
+	service.saveSettings({tradeUrl: stranger});
+	assert.deepEqual(service.state().receiver, {steamId: '76561197960265735', account: null, personaName: null, c5: null, c5Checked: true});
+	service.saveSettings({tradeUrl: ''});
+	assert.equal(service.state().receiver, null);
 });

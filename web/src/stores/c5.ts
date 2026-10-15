@@ -5,7 +5,7 @@ import {computed, reactive} from 'vue';
 import {api} from '../api/http.ts';
 import {socket} from '../api/socket.ts';
 import {draftPayload, draftsDirty, newDraft, toDrafts} from '../lib/c5.ts';
-import type {C5CheckResult, C5Listing, C5NameOption, C5RunState, C5Settings, C5State, DraftRow} from '../lib/c5.ts';
+import type {C5CheckResult, C5Listing, C5NameSearch, C5Receiver, C5Receivers, C5RunState, C5Settings, C5State, DraftRow} from '../lib/c5.ts';
 import {addLog} from './logs.ts';
 
 const POLL_MS = 2500;
@@ -123,9 +123,19 @@ export async function checkConnection(): Promise<C5CheckResult> {
 }
 
 /** 添加饰品时按中文或英文搜名字 */
-export async function searchNames(q: string): Promise<C5NameOption[]> {
-	const data = await api.get<{options: C5NameOption[]}>('/api/c5/names?q=' + encodeURIComponent(q));
-	return data.options;
+/** 添加饰品时按中文或英文搜名字,带 C5 在售最低价 */
+export async function searchNames(q: string): Promise<C5NameSearch> {
+	return api.get<C5NameSearch>('/api/c5/names?q=' + encodeURIComponent(q));
+}
+
+/** 收货账号下拉:本工具里登录着的账号,和 C5 上绑定的账号 */
+export async function fetchReceivers(): Promise<C5Receivers> {
+	return api.get<C5Receivers>('/api/c5/receivers');
+}
+
+/** 取某个登录着的账号的交易链接(只取不存) */
+export async function fetchTradeUrl(account: string): Promise<{tradeUrl: string; receiver: C5Receiver | null}> {
+	return api.post('/api/c5/trade-url', {account});
 }
 
 export async function fetchListings(name: string): Promise<{name: string; maxPrice: number; listings: C5Listing[]}> {

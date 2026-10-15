@@ -24,6 +24,8 @@
 // 7. 假 Steam 商店结算(store / api / checkout.steampowered.com 上买游戏用到的那几个端点),有状态:
 //    每个账号钱包 10.00 美元、已拥有的包,见 fakeStore();商品可用 FAKE_STORE_PACKAGES 追加。
 // 8. 假社区库存(steamcommunity.com/inventory/<steamID>/730/2):两页共 3 件;FAKE_INVENTORY_FILE 可设成私密(403),见 fakeInventory()。
+//    交易报价隐私设置页(steamcommunity.com/profiles/<steamID>/tradeoffers/privacy):带会话 cookie 时给出这个账号的
+//    交易链接(partner = SteamID 低 32 位),没 cookie 时 302 去登录页,见 fakeTradeUrlPage()。
 // 9. 假 C5GAME 开放平台(openapi.c5game.com),有状态:余额、在售(64 位 id)、批量购买 / 快速购买、订单详情,
 //    初始场景在 FAKE_C5_FILE,见 fakeC5()。app-key 以 bad 开头的一律拒绝,以 ip 开头的查在售时报不在白名单。
 // 10. 外网拦截:全局 fetch 只放行本机;汇率接口返回固定数据;其余外部请求直接失败。
@@ -689,6 +691,18 @@ function fakeInventory(url, init) {
 	return json({success: 1, total_inventory_count: 3, descriptions: [rifle], assets: [{assetid: '103', classid: '1', instanceid: '0', amount: '1'}]});
 }
 
+// ===== 假交易报价隐私设置页 =====
+function fakeTradeUrlPage(url, init) {
+	const headers = Object.fromEntries(Object.entries((init && init.headers) || {}).map(([key, value]) => [key.toLowerCase(), String(value)]));
+	if (!cookieValue(headers.cookie, 'steamLoginSecure')) {
+		return new Response('', {status: 302, headers: {location: 'https://steamcommunity.com/login/home/'}});
+	}
+	const steamId = url.pathname.split('/')[2];
+	const link = `https://steamcommunity.com/tradeoffer/new/?partner=${BigInt(steamId) & 0xFFFFFFFFn}&amp;token=demo${steamId.slice(-4)}`;
+	return new Response(`<html><body><input class="trade_offer_access_url" id="trade_offer_access_url" type="text" value="${link}" readonly></body></html>`,
+		{status: 200, headers: {'content-type': 'text/html'}});
+}
+
 // ===== 假 C5GAME 开放平台 =====
 // 场景文件 FAKE_C5_FILE(启动时读一次,之后状态都在内存里):
 // {balance: 20, steamId, items: {<marketHashName>: {listings: [价格, ...], purchaseMax}}, restock: false}
@@ -854,6 +868,9 @@ globalThis.fetch = async function offlineFetch(input, init) {
 	}
 	if (url.hostname === 'steamcommunity.com' && /^\/inventory\/\d+\/730\/2$/.test(url.pathname)) {
 		return fakeInventory(url, init);
+	}
+	if (url.hostname === 'steamcommunity.com' && /^\/profiles\/\d{17}\/tradeoffers\/privacy$/.test(url.pathname)) {
+		return fakeTradeUrlPage(url, init);
 	}
 	if (['store.steampowered.com', 'api.steampowered.com', 'checkout.steampowered.com'].includes(url.hostname)) {
 		const reply = fakeStore(url, init);

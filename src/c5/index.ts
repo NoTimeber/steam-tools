@@ -8,10 +8,11 @@
 // C5 接口只认 Steam 英文名,监控列表、流水按英文名存;页面和日志上的中文名查 src/items/names.ts 的词库。
 
 import type {NameDb} from '../items/names.ts';
+import {isTradeUrlOf, steamIdFromTradeUrl} from '../steam/trade-url.ts';
 import type {C5Purchase, C5PurchaseStatus, C5Store, C5WatchItem} from '../store/c5.ts';
 import {purchaseCost} from '../store/c5.ts';
 import {C5Error, createC5Client} from './client.ts';
-import type {C5Api, C5SteamAccount} from './client.ts';
+import type {C5Api, C5ItemStat, C5SteamAccount} from './client.ts';
 import {buildItems, c5Error, describeChange, loadSettingsOrDefault, normalizeSettings, RUN_STATES, sweepBlocker} from './config.ts';
 import type {C5RunState, C5Settings} from './config.ts';
 import {createSweeper, EPS, lowestPrice, parseListing, toNumber} from './sweeper.ts';
@@ -23,6 +24,10 @@ export type {C5RunState, C5Settings};
 const LOG_LIMIT = 200;
 const RECENT_PURCHASES = 50;
 const BALANCE_REFRESH_MS = 60_000;
+/** 搜索饰品时查的 C5 价格多久内不重查 */
+const PRICE_TTL_MS = 30_000;
+/** C5 上绑定的 Steam 账号多久重查一次(选收货账号时) */
+const BOUND_REFRESH_MS = 5 * 60_000;
 const ACCOUNT_STATUS: Record<number, string> = {1: '正常', 2: '暂挂', 3: '不可交易'};
 
 export interface C5LogLine {
@@ -51,10 +56,44 @@ export interface C5PurchaseView extends C5Purchase {
 	cost: number;
 }
 
-/** 添加饰品的搜索结果;zh 为 null 是词库里没有、按输入的英文名原样用 */
+/** 添加饰品的搜索结果;zh 为 null 是词库里没有、按输入的英文名原样用。lowest / sellCount 是 C5 在售最低价和在售数 */
 export interface C5NameOption {
 	name: string;
 	zh: string | null;
+	lowest: number | null;
+	sellCount: number | null;
+}
+
+export interface C5NameSearch {
+	options: C5NameOption[];
+	/** 查到了 C5 价格(没填 app-key 或查价失败时为 false) */
+	priced: boolean;
+	priceError: string | null;
+}
+
+/** C5 账户上绑定的 Steam 账号 */
+export interface C5BoundAccount {
+	steamId: string;
+	nickname: string;
+	status: string;
+}
+
+/** 本工具里登录着的 Steam 账号(有网页会话,能取交易链接) */
+export interface C5LocalAccount {
+	account: string;
+	steamId: string;
+	personaName: string;
+}
+
+/** 收货账号:从交易链接里的 partner 算出 SteamID,再对上本工具的账号和 C5 上绑定的账号 */
+export interface C5Receiver {
+	steamId: string;
+	/** 本工具里对应的账号名 / 昵称;不是本工具管理的账号为 null */
+	account: string | null;
+	personaName: string | null;
+	/** C5 上绑定的同一个账号;c5Checked 为 false 时是还没查过 C5 */
+	c5: C5BoundAccount | null;
+	c5Checked: boolean;
 }
 
 export interface C5State {
@@ -69,6 +108,8 @@ export interface C5State {
 	cycle: {n: number; at: number | null; error: string | null; errors: number; done: boolean};
 	budget: {total: number; spent: number; qty: number};
 	balance: {value: number; at: number} | null;
+	/** 收货账号;没填交易链接为 null */
+	receiver: C5Receiver | null;
 	items: C5ItemView[];
 	purchases: C5PurchaseView[];
 	/** 结果未知、按已花费占着额度的单 */
@@ -78,7 +119,7 @@ export interface C5State {
 
 export interface C5CheckResult {
 	balance: {money: number | null; settle: number | null; deposit: number | null};
-	steamAccounts: Array<{steamId: string; nickname: string; status: string}>;
+	steamAccounts: C5BoundAccount[];
 }
 
 export interface C5ServiceOptions {
@@ -87,6 +128,10 @@ export interface C5ServiceOptions {
 	emit(event: 'c5:log', payload: C5LogLine): void;
 	/** 饰品中英文名词库;不给就只显示英文名 */
 	names?: NameDb;
+	/** 本工具里的 Steam 账号:onlyWeb 时只要登录着、有网页会话的(收货账号下拉);否则全部(按 SteamID 认账号) */
+	localAccounts?: (onlyWeb: boolean) => C5LocalAccount[];
+	/** 用账号的网页会话取它自己的交易链接 */
+	fetchTradeUrl?: (account: string) => Promise<string>;
 	/** 默认是 ./client.ts 的真实客户端;单元测试用假的 */
 	createClient?: (options: {appKey: string; timeoutMs: number}) => C5Api;
 	now?: () => number;
@@ -147,6 +192,9 @@ export function createC5Service(options: C5ServiceOptions) {
 	let balance: C5State['balance'] = null;
 	const logs: C5LogLine[] = [];
 	let client: C5Api | null = null;
+	/** C5 上绑定的 Steam 账号(检查连接、选收货账号时查;换 app-key 时清掉) */
+	let boundAccounts: {list: C5BoundAccount[]; at: number} | null = null;
+	const priceCache = new Map<string, {stat: C5ItemStat; at: number}>();
 
 	// ===== 日志 =====
 
@@ -279,6 +327,48 @@ export function createC5Service(options: C5ServiceOptions) {
 		return money;
 	}
 
+	// ===== 收货账号 =====
+
+	function toBound(account: C5SteamAccount): C5BoundAccount {
+		return {
+			steamId: String(account.steamId ?? ''),
+			nickname: String(account.nickname ?? ''),
+			status: ACCOUNT_STATUS[Number(account.accountStatus)] ?? String(account.accountStatus ?? '')
+		};
+	}
+
+	async function loadBoundAccounts(): Promise<C5BoundAccount[]> {
+		const info = await currentClient().steamInfo();
+		const list = (Array.isArray(info.steamList) ? info.steamList : []).map(toBound);
+		boundAccounts = {list, at: now()};
+		return list;
+	}
+
+	function receiverOf(tradeUrl: string): C5Receiver | null {
+		const steamId = steamIdFromTradeUrl(tradeUrl);
+		if (!steamId) {
+			return null;
+		}
+		const local = options.localAccounts?.(false).find(account => isTradeUrlOf(tradeUrl, account.steamId)) ?? null;
+		const c5 = boundAccounts?.list.find(account => isTradeUrlOf(tradeUrl, account.steamId)) ?? null;
+		return {
+			steamId: local?.steamId ?? c5?.steamId ?? steamId,
+			account: local?.account ?? null,
+			personaName: local?.personaName || null,
+			c5,
+			c5Checked: !!boundAccounts
+		};
+	}
+
+	/** 日志里的收货账号:账号名(昵称) SteamID */
+	function receiverText(receiver: C5Receiver | null): string {
+		if (!receiver) {
+			return '未设置';
+		}
+		const name = receiver.account ? `${receiver.account}${receiver.personaName ? `(${receiver.personaName})` : ''} ` : '';
+		return `${name}SteamID ${receiver.steamId}`;
+	}
+
 	// ===== 状态 =====
 
 	function state(): C5State {
@@ -321,6 +411,7 @@ export function createC5Service(options: C5ServiceOptions) {
 				qty: [...totals.values()].reduce((sum, total) => sum + total.qty, 0)
 			},
 			balance: balance ? {...balance} : null,
+			receiver: receiverOf(settings.tradeUrl),
 			items: itemViews,
 			purchases: store.recentPurchases('live', RECENT_PURCHASES)
 				.map(purchase => ({...purchase, zh: zhOf(purchase.name), cost: purchaseCost(purchase)})),
@@ -364,6 +455,14 @@ export function createC5Service(options: C5ServiceOptions) {
 			appKey = '';
 			changes.push('app-key 已删除');
 		}
+		if (changes.length) {
+			// 换了 C5 账户:绑定的 Steam 账号、价格都要重查
+			boundAccounts = null;
+			priceCache.clear();
+		}
+		if (next.tradeUrl !== settings.tradeUrl) {
+			changes.push(`收货账号改为 ${receiverText(receiverOf(next.tradeUrl))}`);
+		}
 		settings = next;
 		client = null;   // app-key / 超时可能变了
 		log('info', `设置已保存:${next.strategy === 'quick' ? '快速购买' : '按在售列表'},`
@@ -397,7 +496,7 @@ export function createC5Service(options: C5ServiceOptions) {
 			}
 		}
 		if (next !== run) {
-			setRunState(next);
+			setRunState(next, next === 'sweeping' ? `收货账号 ${receiverText(receiverOf(settings.tradeUrl))}` : '');
 		}
 		kick();
 		return state();
@@ -421,17 +520,94 @@ export function createC5Service(options: C5ServiceOptions) {
 		return state();
 	}
 
-	/** 添加饰品时搜名字(中文或英文)。输的像英文全名又不在词库里(新出的饰品),附一个按原文用的选项 */
-	function searchNames(query: unknown): {options: C5NameOption[]} {
+	/**
+	 * 添加饰品时搜名字(中文或英文)。输的像英文全名又不在词库里(新出的饰品),附一个按原文用的选项。
+	 * 填了 app-key 时顺带查这批饰品的 C5 在售最低价(一个请求,30 秒内查过的不重查);查价失败不影响搜索结果
+	 */
+	async function searchNames(query: unknown): Promise<C5NameSearch> {
 		const text = String(query ?? '').trim().slice(0, 100);
-		if (!text) {
-			return {options: []};
+		const found: C5NameOption[] = text ? (options.names?.search(text, 30) ?? []).map(match => ({...match, lowest: null, sellCount: null})) : [];
+		if (text && !/[㐀-鿿]/.test(text) && text.length >= 3 && !found.some(option => option.name === text)) {
+			found.push({name: text, zh: null, lowest: null, sellCount: null});
 		}
-		const found: C5NameOption[] = options.names?.search(text, 30) ?? [];
-		if (!/[㐀-鿿]/.test(text) && text.length >= 3 && !found.some(option => option.name === text)) {
-			found.push({name: text, zh: null});
+		if (!found.length || !appKey) {
+			return {options: found, priced: false, priceError: null};
 		}
-		return {options: found};
+		const at = now();
+		const fresh = (name: string) => at - (priceCache.get(name)?.at ?? -Infinity) < PRICE_TTL_MS;
+		const stale = found.map(option => option.name).filter(name => !fresh(name));
+		let priceError: string | null = null;
+		if (stale.length) {
+			try {
+				const stats = await currentClient().itemStats(730, stale);
+				for (const name of priceCache.keys()) {
+					if (!fresh(name)) {
+						priceCache.delete(name);
+					}
+				}
+				for (const name of stale) {
+					priceCache.set(name, {stat: stats[name] ?? {}, at});
+				}
+			} catch (err) {
+				if (!(err instanceof C5Error)) {
+					throw err;
+				}
+				priceError = err.message;
+			}
+		}
+		for (const option of found) {
+			const stat = priceCache.get(option.name)?.stat;
+			if (stat) {
+				option.lowest = lowestPrice(stat);
+				option.sellCount = toNumber(stat.sellCount);
+			}
+		}
+		return {options: found, priced: !priceError, priceError};
+	}
+
+	/** 收货账号下拉:本工具里登录着的账号,标上 C5 有没有绑定(app-key 有了才查,5 分钟内不重查) */
+	async function receivers(): Promise<{
+		accounts: Array<C5LocalAccount & {c5Bound: boolean | null}>;
+		/** 查到了 C5 上绑定的账号(没填 app-key、查失败为 false) */
+		checked: boolean;
+		bound: C5BoundAccount[];
+		boundError: string | null;
+	}> {
+		let boundError: string | null = null;
+		if (appKey && (!boundAccounts || now() - boundAccounts.at >= BOUND_REFRESH_MS)) {
+			try {
+				await loadBoundAccounts();
+			} catch (err) {
+				if (!(err instanceof C5Error)) {
+					throw err;
+				}
+				boundError = err.message;
+			}
+		}
+		const bound = boundAccounts?.list ?? [];
+		return {
+			accounts: (options.localAccounts?.(true) ?? []).map(account => ({
+				...account, c5Bound: boundAccounts ? bound.some(entry => entry.steamId === account.steamId) : null
+			})),
+			checked: !!boundAccounts,
+			bound,
+			boundError
+		};
+	}
+
+	/** 取本工具里某个登录着的账号的交易链接(只取,不保存;页面填进设置后点保存才生效) */
+	async function tradeUrlFor(account: unknown): Promise<{tradeUrl: string; receiver: C5Receiver | null}> {
+		const name = String(account ?? '').trim();
+		if (!options.fetchTradeUrl || !options.localAccounts?.(true).some(entry => entry.account === name)) {
+			throw c5Error(404, `${name || '这个账号'} 没有登录着,先在账户管理里登录`);
+		}
+		let tradeUrl: string;
+		try {
+			tradeUrl = await options.fetchTradeUrl(name);
+		} catch (err) {
+			throw c5Error(502, `取 ${name} 的交易链接失败: ${err instanceof Error ? err.message : String(err)}`);
+		}
+		return {tradeUrl, receiver: receiverOf(tradeUrl)};
 	}
 
 	/** 连通性:app-key、余额、C5 上绑定的 Steam 收货账号 */
@@ -440,14 +616,9 @@ export function createC5Service(options: C5ServiceOptions) {
 		const api = currentClient();
 		try {
 			const money = await api.balance();
-			const info = await api.steamInfo();
 			const result: C5CheckResult = {
 				balance: {money: toNumber(money.moneyAmount), settle: toNumber(money.tradeSettleAmount), deposit: toNumber(money.depositAmount)},
-				steamAccounts: (Array.isArray(info.steamList) ? info.steamList : []).map((account: C5SteamAccount) => ({
-					steamId: String(account.steamId ?? ''),
-					nickname: String(account.nickname ?? ''),
-					status: ACCOUNT_STATUS[Number(account.accountStatus)] ?? String(account.accountStatus ?? '')
-				}))
+				steamAccounts: await loadBoundAccounts()
 			};
 			if (result.balance.money != null) {
 				balance = {value: result.balance.money, at: now()};
@@ -511,6 +682,8 @@ export function createC5Service(options: C5ServiceOptions) {
 		setRun,
 		saveWatchlist,
 		searchNames,
+		receivers,
+		tradeUrlFor,
 		check,
 		listings,
 		refreshOrders,

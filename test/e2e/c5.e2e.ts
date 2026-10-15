@@ -4,7 +4,7 @@
 import {after, before, describe, test} from 'node:test';
 import assert from 'node:assert/strict';
 import {randomBytes} from 'node:crypto';
-import {readFileSync, writeFileSync} from 'node:fs';
+import {mkdirSync, readFileSync, writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {Client, removeDir, sleep, SocketListener, startServer, tempDir} from './support/server.ts';
 import type {TestServer} from './support/server.ts';
@@ -59,6 +59,9 @@ describe('C5 扫货', () => {
 				'Recoil Case': {listings: [1.6], purchaseMax: 1.2}
 			}
 		}));
+		// 收货账号用:alpha 登录后能取交易链接(假 C5 上绑定的也是 alpha 的 SteamID)
+		mkdirSync(join(appRoot, 'data', 'config'), {recursive: true});
+		writeFileSync(join(appRoot, 'data', 'config', 'accounts.json'), JSON.stringify([{accountName: 'alpha', password: 'pw-good'}]));
 		await start('1');
 	});
 
@@ -96,7 +99,8 @@ describe('C5 扫货', () => {
 
 		const names = await client.get('/api/c5/names?q=' + encodeURIComponent('千瓦'));
 		assert.equal(names.status, 200, names.text);
-		assert.deepEqual(names.json.options[0], {name: 'Kilowatt Case', zh: '千瓦武器箱'});
+		assert.deepEqual(names.json.options[0], {name: 'Kilowatt Case', zh: '千瓦武器箱', lowest: 0.6, sellCount: 3}, '带 C5 在售最低价');
+		assert.deepEqual([names.json.priced, names.json.priceError], [true, null]);
 		const chinese = await client.post('/api/c5/watchlist', {items: [{name: '千瓦武器箱', maxPrice: 0.65, maxQty: 5}]});
 		assert.equal(chinese.status, 400);
 		assert.match(chinese.json.error, /应填 Kilowatt Case/);
@@ -175,6 +179,34 @@ describe('C5 扫货', () => {
 
 		const stopped = await client.post('/api/c5/run', {state: 'stopped'});
 		assert.equal(stopped.json.state.run, 'stopped');
+	});
+
+	test('收货账号:从登录着的账号里选,用它的网页会话取交易链接;状态里认得出账号和 C5 绑定', async () => {
+		assert.equal((await state()).receiver.account, null, '原来的链接不是本工具的账号');
+		const notOnline = await client.post('/api/c5/trade-url', {account: 'alpha'});
+		assert.equal(notOnline.status, 404, notOnline.text);
+
+		await client.post('/api/login', {accountName: 'alpha'});
+		const deadline = Date.now() + 10000;
+		let receivers = await client.get('/api/c5/receivers');
+		while (!receivers.json.accounts?.length && Date.now() < deadline) {
+			await sleep(100);
+			receivers = await client.get('/api/c5/receivers');
+		}
+		assert.deepEqual(receivers.json.accounts.map((account: any) => [account.account, account.steamId, account.c5Bound]), [['alpha', '76561190100005555', true]]);
+
+		const fetched = await client.post('/api/c5/trade-url', {account: 'alpha'});
+		assert.equal(fetched.status, 200, fetched.text);
+		assert.equal(fetched.json.tradeUrl, `https://steamcommunity.com/tradeoffer/new/?partner=${76561190100005555n & 0xFFFFFFFFn}&token=demo5555`);
+		const blockedCommunity = server.steamEvents().filter(event => event.event === 'blockedFetch' && String(event.url).includes('steamcommunity.com'));
+		assert.deepEqual(blockedCommunity, [], '取链接走的是社区的交易报价隐私设置页');
+
+		const saved = await client.post('/api/c5/settings', {tradeUrl: fetched.json.tradeUrl});
+		assert.equal(saved.status, 200, saved.text);
+		assert.deepEqual(saved.json.state.receiver, {
+			steamId: '76561190100005555', account: 'alpha', personaName: saved.json.state.receiver.personaName,
+			c5: {steamId: '76561190100005555', nickname: '演示收货号', status: '正常'}, c5Checked: true
+		});
 	});
 
 	test('app-key 不对:检查连接回 502,带平台的错误码', async () => {

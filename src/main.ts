@@ -28,7 +28,9 @@ import type {SteamClient} from './steam/session-manager.ts';
 import {currencyIdToIso} from './steam/currencies.ts';
 import {installMicroTxnHooks} from './steam/microtxn.ts';
 import type {SteamUserClass} from './steam/microtxn.ts';
-import {findAttemptByKey, listCookieFlowAccounts} from './steam/attempts.ts';
+import {findAttemptByKey, listCookieFlowAccounts, listSteamAccounts} from './steam/attempts.ts';
+import {STEAM_WEB_USER_AGENT} from './steam/community.ts';
+import {fetchTradeUrl} from './steam/trade-url.ts';
 import {createGcModuleAttacher} from './steam/gc-modules.ts';
 import {LOCAL_CM_FALLBACKS} from './steam/cm-fallback.ts';
 import {createAccountService, createProfiles, resolveAccountCountry} from './accounts/index.ts';
@@ -294,6 +296,15 @@ const wallet = createWalletService({
 const c5 = createC5Service({
 	store: store.c5,
 	names: loadNameDb(join(config.appDir, 'data', 'cs2-names-zh.json.gz')),
+	// 收货账号从本工具登录着的账号里选,交易链接用它的网页会话去 Steam 取
+	localAccounts: withWebSession => listSteamAccounts(attempts.values(), profiles.cookiesFor, withWebSession),
+	fetchTradeUrl: async account => {
+		const attempt = findAttempt(account);
+		if (!attempt) {
+			throw new Error('没有这个账号的会话');
+		}
+		return fetchTradeUrl({steamId: String(attempt.steamID || ''), cookies: profiles.cookiesFor(attempt), userAgent: STEAM_WEB_USER_AGENT});
+	},
 	emit: (event, payload) => io.emit(event, payload)
 });
 
