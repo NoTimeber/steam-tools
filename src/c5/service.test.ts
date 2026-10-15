@@ -252,8 +252,7 @@ test('自动扫货:一轮买到目标价以内的,按间隔排下一轮;状态�
 	assert.deepEqual(state.purchases.map(p => [p.mode, p.status, p.productId, p.cost]), [['live', 'ok', '12', 5.2], ['live', 'ok', '11', 5]]);
 	assert.equal(state.budget.qty, 2);
 	assert.ok(emitted.some(line => line.level === 'success' && line.message.startsWith('买入 Kilowatt Case 5.00')));
-	assert.ok(!emitted.some(line => line.level === 'debug'), '行情日志不推到右侧日志');
-	assert.ok(state.logs.some(line => line.level === 'debug' && line.message.includes('最低 5.00')), '但页面上的日志里有');
+	assert.ok(!emitted.some(line => line.level === 'debug'), '每个饰品的行情变化不推到运行日志');
 	assert.equal(api.calls.filter(call => call === 'batchBuy').length, 1);
 });
 
@@ -325,7 +324,7 @@ test('检查连接:余额和绑定的 Steam 账号;平台报错回 502', async (
 	service.saveSettings({appKey: KEY});
 	assert.deepEqual(await service.check(), {
 		balance: {money: 88.5, settle: 1, deposit: 0},
-		steamAccounts: [{steamId: '76561190000000001', nickname: '收货号', status: '正常'}]
+		steamAccounts: [{steamId: '76561190000000001', nickname: '收货号', username: '', status: '正常', assistant: false}]
 	});
 	assert.deepEqual(service.state().balance?.value, 88.5);
 
@@ -432,77 +431,78 @@ test('搜饰品带 C5 在售最低价:没填 app-key 不查;30 秒内查过的�
 	assert.match(failed.priceError!, /429/);
 });
 
-test('收货账号:账户管理里的账号都列出来;能取链接的取了记下,不在线、会话过期时用记下的;状态里认得出账号和 C5 绑定', async () => {
+test('收货账号:从 C5 上绑定的账号里选;交易链接先用账户管理里同一账号的会话取,取不到用记下的,都没有就要贴一次', async () => {
 	const ALPHA = '76561198152000001';
-	const partner = (steamId: string) => String(BigInt(steamId) - 76561197960265728n);
-	const urlOf = (steamId: string, token: string) => `https://steamcommunity.com/tradeoffer/new/?partner=${partner(steamId)}&token=${token}`;
-	const alphaUrl = urlOf(ALPHA, 'alpha');
-	// alpha 在线;bravo 不在线但留着上次的会话;charlie 从没登录过;delta 会话过期
+	const BRAVO = '76561198152000002';
+	const HELPER = '76561198152000009';
+	const urlOf = (steamId: string, token: string) => `https://steamcommunity.com/tradeoffer/new/?partner=${BigInt(steamId) - 76561197960265728n}&token=${token}`;
+	// 账户管理里:alpha 在线;bravo 不在线但留着会话(取的时候会失败);C5 上的「助手号」不在账户管理里
 	const accounts = [
 		{account: 'alpha', steamId: ALPHA, personaName: '阿尔法', online: true, hasSession: true},
-		{account: 'bravo', steamId: '76561198152000002', personaName: '', online: false, hasSession: true},
-		{account: 'charlie', steamId: '', personaName: '', online: false, hasSession: false},
-		{account: 'delta', steamId: '76561198152000004', personaName: '', online: false, hasSession: true}
+		{account: 'bravo', steamId: BRAVO, personaName: '', online: false, hasSession: true},
+		{account: 'charlie', steamId: '', personaName: '', online: false, hasSession: false}
 	];
-	let expired = false;
-	const fetched: string[] = [];
 	const api = fakeApi({
 		async steamInfo() {
-			return {steamList: [{steamId: ALPHA, nickname: 'C5 上的阿尔法', accountStatus: 1}]};
+			return {steamList: [
+				{steamId: ALPHA, nickname: 'C5 阿尔法', username: 'alpha_login', autoType: 0, accountStatus: 1},
+				{steamId: BRAVO, nickname: 'C5 布拉沃', accountStatus: 1},
+				{steamId: HELPER, nickname: '助手号', autoType: 2, accountStatus: 3}
+			]};
 		}
 	});
 	const {service, store, emitted} = setup({
 		api,
 		localAccounts: () => accounts,
 		fetchTradeUrl: async account => {
-			fetched.push(account);
-			if (account === 'delta' || expired) {
+			if (account !== 'alpha') {
 				throw new Error('网页会话失效了');
 			}
-			const entry = accounts.find(item => item.account === account)!;
-			return urlOf(entry.steamId, account);
+			return urlOf(ALPHA, 'alpha');
 		}
 	});
-	const pick = (list: Awaited<ReturnType<typeof service.receivers>>['accounts']) => list.map(entry => [entry.account, entry.selectable, entry.saved, entry.c5Bound]);
 
-	const before = await service.receivers();
-	assert.deepEqual([before.checked, pick(before.accounts)], [false, [
-		['alpha', true, false, null], ['bravo', true, false, null], ['charlie', false, false, null], ['delta', true, false, null]
-	]], '没填 app-key 不查 C5 绑定;从没登录过的不能选');
-
-	const alpha = await service.tradeUrlFor('alpha');
-	assert.deepEqual([alpha.tradeUrl, alpha.warning], [alphaUrl, null]);
-	assert.deepEqual(alpha.receiver, {steamId: ALPHA, account: 'alpha', personaName: '阿尔法', c5: null, c5Checked: false});
-	assert.equal((await service.tradeUrlFor('bravo')).tradeUrl, urlOf('76561198152000002', 'bravo'), '不在线的用上次存下的会话去取');
-	assert.deepEqual(store.loadTradeUrls(), {alpha: alphaUrl, bravo: urlOf('76561198152000002', 'bravo')}, '取到的记下来');
-	await assert.rejects(service.tradeUrlFor('charlie'), err => statusOf(err) === 409 && /还没登录过/.test((err as Error).message));
-	assert.ok(!fetched.includes('charlie'), '没会话的不去 Steam 取');
-	await assert.rejects(service.tradeUrlFor('delta'), err => statusOf(err) === 502 && /会话失效/.test((err as Error).message), '取不到又没记过:报错');
-	await assert.rejects(service.tradeUrlFor('nobody'), err => statusOf(err) === 404);
-
-	expired = true;
-	const stale = await service.tradeUrlFor('alpha');
-	assert.equal(stale.tradeUrl, alphaUrl);
-	assert.match(stale.warning!, /用的是上次取到的/);
-
+	assert.deepEqual(await service.receivers(), {accounts: [], checked: false, boundError: '还没填 C5 app-key'});
 	service.saveSettings({appKey: KEY});
-	const after = await service.receivers();
-	assert.deepEqual([after.checked, pick(after.accounts)], [true, [
-		['alpha', true, true, true], ['bravo', true, true, false], ['charlie', false, false, null], ['delta', true, false, false]
-	]]);
+	const listed = await service.receivers();
+	assert.deepEqual(listed.accounts.map(entry => [entry.steamId, entry.nickname, entry.username, entry.status, entry.assistant, entry.account, entry.link]), [
+		[ALPHA, 'C5 阿尔法', 'alpha_login', '正常', false, 'alpha', 'local'],
+		[BRAVO, 'C5 布拉沃', '', '正常', false, 'bravo', 'local'],
+		[HELPER, '助手号', '', '不可交易', true, null, 'none']
+	]);
 
-	service.saveSettings({tradeUrl: alphaUrl, maxTotalSpend: 50});
-	assert.ok(emitted.some(line => line.message.includes(`收货账号改为 alpha(阿尔法) SteamID ${ALPHA}`)));
+	// alpha:用账户管理里的会话取,记下来
+	const alpha = await service.tradeUrlFor(ALPHA);
+	assert.deepEqual([alpha.tradeUrl, alpha.warning, alpha.receiver?.c5?.nickname], [urlOf(ALPHA, 'alpha'), null, 'C5 阿尔法']);
+	assert.deepEqual(Object.values(store.loadTradeUrls()), [urlOf(ALPHA, 'alpha')]);
+	// bravo 会话过期、没记过;助手号不在账户管理里:都要贴一次
+	await assert.rejects(service.tradeUrlFor(BRAVO), err => statusOf(err) === 409 && /bravo 没取到/.test((err as Error).message));
+	await assert.rejects(service.tradeUrlFor(HELPER), err => statusOf(err) === 409 && /要贴一次/.test((err as Error).message));
+	await assert.rejects(service.tradeUrlFor('abc'), err => statusOf(err) === 400);
+
+	// 贴了助手号的链接:设置里保存时记下来,下次直接用
+	service.saveSettings({tradeUrl: urlOf(HELPER, 'helper'), maxTotalSpend: 50});
+	assert.ok(emitted.some(line => line.message.includes(`收货账号改为 助手号 SteamID ${HELPER}`)));
 	assert.deepEqual(service.state().receiver, {
-		steamId: ALPHA, account: 'alpha', personaName: '阿尔法', c5: {steamId: ALPHA, nickname: 'C5 上的阿尔法', status: '正常'}, c5Checked: true
+		steamId: HELPER, account: null, personaName: null,
+		c5: {steamId: HELPER, nickname: '助手号', username: '', status: '不可交易', assistant: true}, c5Checked: true
 	});
-	service.setRun('sweeping');
-	assert.ok(emitted.some(line => line.message === `运行状态:自动扫货(真实下单),收货账号 alpha(阿尔法) SteamID ${ALPHA}`));
+	assert.equal((await service.receivers()).accounts[2]!.link, 'saved');
+	assert.deepEqual(await service.tradeUrlFor(HELPER), {tradeUrl: urlOf(HELPER, 'helper'), receiver: service.state().receiver, warning: null});
 
-	// 别人的链接:认不出是本工具的哪个账号
-	const stranger = 'https://steamcommunity.com/tradeoffer/new/?partner=7&token=x';
+	// bravo 贴过一次后,会话再失效也用记下的
+	service.saveSettings({tradeUrl: urlOf(BRAVO, 'bravo')});
+	const bravo = await service.tradeUrlFor(BRAVO);
+	assert.equal(bravo.tradeUrl, urlOf(BRAVO, 'bravo'));
+	assert.match(bravo.warning!, /bravo 没取到.*用的是上次记下的/);
+
+	service.saveSettings({tradeUrl: urlOf(ALPHA, 'alpha')});
+	service.setRun('sweeping');
+	assert.ok(emitted.some(line => line.message === `运行状态:自动扫货(真实下单),收货账号 C5 阿尔法 SteamID ${ALPHA}`));
+
+	// 不是 C5 绑定的、也不是账户管理里的链接
 	service.setRun('stopped');
-	service.saveSettings({tradeUrl: stranger});
+	service.saveSettings({tradeUrl: 'https://steamcommunity.com/tradeoffer/new/?partner=7&token=x'});
 	assert.deepEqual(service.state().receiver, {steamId: '76561197960265735', account: null, personaName: null, c5: null, c5Checked: true});
 	service.saveSettings({tradeUrl: ''});
 	assert.equal(service.state().receiver, null);

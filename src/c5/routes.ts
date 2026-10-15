@@ -18,9 +18,9 @@ export function c5Routes(router: Router, {c5}: {c5: C5Service}): void {
 
 	// 添加饰品时按中文或英文搜名字,带 C5 在售最低价:?q=千瓦 → {options: [{name, zh, lowest, sellCount}], priced, priceError}
 	router.get('/api/c5/names', spreadRoute(req => c5.searchNames(req.query.q), '搜索饰品失败'));
-	// 收货账号:本工具里登录着的账号(标上 C5 有没有绑定);取某个账号的交易链接(只取不存,页面填进设置后保存)
+	// 收货账号:C5 上绑定的 Steam 账号;取某个 SteamID 的交易链接(只取不存;409 = 要人贴一次)
 	router.get('/api/c5/receivers', spreadRoute(() => c5.receivers(), '读取账号失败'));
-	router.post('/api/c5/trade-url', spreadRoute(req => c5.tradeUrlFor((req.body || {}).account), '取交易链接失败'));
+	router.post('/api/c5/trade-url', spreadRoute(req => c5.tradeUrlFor((req.body || {}).steamId), '取交易链接失败'));
 
 	router.post('/api/c5/check', keyedRoute('result', () => c5.check(), '检查连接失败'));
 	router.post('/api/c5/listings', spreadRoute(req => c5.listings((req.body || {}).name), '查在售失败'));

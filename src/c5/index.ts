@@ -8,7 +8,7 @@
 // C5 接口只认 Steam 英文名,监控列表、流水按英文名存;页面和日志上的中文名查 src/items/names.ts 的词库。
 
 import type {NameDb} from '../items/names.ts';
-import {isTradeUrlOf, steamIdFromTradeUrl} from '../steam/trade-url.ts';
+import {accountIdOf, isTradeUrlOf, partnerOf, steamIdFromTradeUrl} from '../steam/trade-url.ts';
 import type {C5Purchase, C5PurchaseStatus, C5Store, C5WatchItem} from '../store/c5.ts';
 import {purchaseCost} from '../store/c5.ts';
 import {C5Error, createC5Client} from './client.ts';
@@ -21,7 +21,6 @@ import type {C5LogLevel, Listing} from './sweeper.ts';
 export {c5Error};
 export type {C5RunState, C5Settings};
 
-const LOG_LIMIT = 200;
 const RECENT_PURCHASES = 50;
 const BALANCE_REFRESH_MS = 60_000;
 /** 搜索饰品时查的 C5 价格多久内不重查 */
@@ -75,7 +74,11 @@ export interface C5NameSearch {
 export interface C5BoundAccount {
 	steamId: string;
 	nickname: string;
+	/** Steam 登录名;C5 没给为 '' */
+	username: string;
 	status: string;
+	/** C5 的「交易助手」账号 */
+	assistant: boolean;
 }
 
 /** 账户管理里的一个账号(src/steam/attempts.ts 的 AccountRef) */
@@ -90,13 +93,14 @@ export interface C5LocalAccount {
 	hasSession: boolean;
 }
 
-/** 收货账号下拉的一项 */
-export interface C5ReceiverAccount extends C5LocalAccount {
-	/** 取到过交易链接(账号不在线也能用) */
-	saved: boolean;
-	/** 能不能选:能去 Steam 取链接,或者取到过 */
-	selectable: boolean;
-	c5Bound: boolean | null;
+/**
+ * 收货账号下拉的一项:C5 上绑定的 Steam 账号。C5 开放平台不给交易链接,下单又必须带,
+ * link 说明选它时链接从哪来:local 用账户管理里同一个账号的网页会话去 Steam 取;saved 用记下的;none 要贴一次
+ */
+export interface C5ReceiverAccount extends C5BoundAccount {
+	/** 账户管理里对应的账号名;不在账户管理里为 null */
+	account: string | null;
+	link: 'local' | 'saved' | 'none';
 }
 
 /** 收货账号:从交易链接里的 partner 算出 SteamID,再对上本工具的账号和 C5 上绑定的账号 */
@@ -128,7 +132,6 @@ export interface C5State {
 	purchases: C5PurchaseView[];
 	/** 结果未知、按已花费占着额度的单 */
 	unknown: number;
-	logs: C5LogLine[];
 }
 
 export interface C5CheckResult {
@@ -138,7 +141,7 @@ export interface C5CheckResult {
 
 export interface C5ServiceOptions {
 	store: C5Store;
-	/** socket.io 推送:c5:log(写右侧运行日志;行情变化这类 debug 日志不推) */
+	/** socket.io 推送:c5:log(写页面右侧的「实时运行日志」) */
 	emit(event: 'c5:log', payload: C5LogLine): void;
 	/** 饰品中英文名词库;不给就只显示英文名 */
 	names?: NameDb;
@@ -204,7 +207,6 @@ export function createC5Service(options: C5ServiceOptions) {
 	let run: C5RunState = !legacyRun && RUN_STATES.includes(savedRun as C5RunState) ? savedRun as C5RunState : 'stopped';
 	let cycle: C5State['cycle'] = {n: 0, at: null, error: null, errors: 0, done: false};
 	let balance: C5State['balance'] = null;
-	const logs: C5LogLine[] = [];
 	let client: C5Api | null = null;
 	/** C5 上绑定的 Steam 账号(检查连接、选收货账号时查;换 app-key 时清掉) */
 	let boundAccounts: {list: C5BoundAccount[]; at: number} | null = null;
@@ -212,15 +214,12 @@ export function createC5Service(options: C5ServiceOptions) {
 
 	// ===== 日志 =====
 
+	/** 写服务端日志并推到页面右侧的「实时运行日志」;debug(每个饰品的行情变化)不记,监控列表里有实时价格 */
 	function log(level: C5LogLevel, message: string): void {
-		const line: C5LogLine = {time: now(), level, message};
-		logs.push(line);
-		if (logs.length > LOG_LIMIT) {
-			logs.splice(0, logs.length - LOG_LIMIT);
-		}
 		if (level === 'debug') {
 			return;
 		}
+		const line: C5LogLine = {time: now(), level, message};
 		const text = `[c5] ${message}`;
 		if (level === 'error') {
 			logger.error(text);
@@ -347,8 +346,21 @@ export function createC5Service(options: C5ServiceOptions) {
 		return {
 			steamId: String(account.steamId ?? ''),
 			nickname: String(account.nickname ?? ''),
-			status: ACCOUNT_STATUS[Number(account.accountStatus)] ?? String(account.accountStatus ?? '')
+			username: String(account.username ?? ''),
+			status: ACCOUNT_STATUS[Number(account.accountStatus)] ?? String(account.accountStatus ?? ''),
+			assistant: Number(account.autoType) === 2
 		};
+	}
+
+	/** 记下的交易链接里属于这个 SteamID 的(按账号 id 认,和记的时候用什么当 key 无关) */
+	function savedTradeUrl(steamId: string): string | null {
+		return Object.values(store.loadTradeUrls()).find(url => isTradeUrlOf(url, steamId)) ?? null;
+	}
+
+	/** 账户管理里和这个 SteamID 是同一个账号的 */
+	function localOf(steamId: string): C5LocalAccount | null {
+		const id = accountIdOf(steamId);
+		return options.localAccounts?.().find(account => id != null && accountIdOf(account.steamId) === id) ?? null;
 	}
 
 	async function loadBoundAccounts(): Promise<C5BoundAccount[]> {
@@ -379,8 +391,10 @@ export function createC5Service(options: C5ServiceOptions) {
 		if (!receiver) {
 			return '未设置';
 		}
-		const name = receiver.account ? `${receiver.account}${receiver.personaName ? `(${receiver.personaName})` : ''} ` : '';
-		return `${name}SteamID ${receiver.steamId}`;
+		// C5 上的昵称优先;不是 C5 绑定的账号再用账户管理里的账号名(昵称)
+		const name = receiver.c5?.nickname
+			|| (receiver.account ? `${receiver.account}${receiver.personaName ? `(${receiver.personaName})` : ''}` : '');
+		return `${name ? name + ' ' : ''}SteamID ${receiver.steamId}`;
 	}
 
 	// ===== 状态 =====
@@ -429,8 +443,7 @@ export function createC5Service(options: C5ServiceOptions) {
 			items: itemViews,
 			purchases: store.recentPurchases('live', RECENT_PURCHASES)
 				.map(purchase => ({...purchase, zh: zhOf(purchase.name), cost: purchaseCost(purchase)})),
-			unknown: store.selectPurchases('live', ['unknown']).length,
-			logs: logs.slice()
+			unknown: store.selectPurchases('live', ['unknown']).length
 		};
 	}
 
@@ -476,6 +489,11 @@ export function createC5Service(options: C5ServiceOptions) {
 		}
 		if (next.tradeUrl !== settings.tradeUrl) {
 			changes.push(`收货账号改为 ${receiverText(receiverOf(next.tradeUrl))}`);
+			// 贴过的链接记下来,下次在下拉里选这个账号就不用再贴
+			const partner = partnerOf(next.tradeUrl);
+			if (partner) {
+				store.saveTradeUrl(partner, next.tradeUrl);
+			}
 		}
 		settings = next;
 		client = null;   // app-key / 超时可能变了
@@ -579,18 +597,9 @@ export function createC5Service(options: C5ServiceOptions) {
 		return {options: found, priced: !priceError, priceError};
 	}
 
-	/**
-	 * 收货账号下拉:账户管理里的全部账号,标上能不能选(能去 Steam 取交易链接,或者取到过)、
-	 * C5 有没有绑定(app-key 有了才查,5 分钟内不重查)
-	 */
-	async function receivers(): Promise<{
-		accounts: C5ReceiverAccount[];
-		/** 查到了 C5 上绑定的账号(没填 app-key、查失败为 false) */
-		checked: boolean;
-		bound: C5BoundAccount[];
-		boundError: string | null;
-	}> {
-		let boundError: string | null = null;
+	/** 收货账号下拉:C5 上绑定的 Steam 账号(要 app-key;5 分钟内不重查),标上选它时交易链接从哪来 */
+	async function receivers(): Promise<{accounts: C5ReceiverAccount[]; checked: boolean; boundError: string | null}> {
+		let boundError: string | null = appKey ? null : '还没填 C5 app-key';
 		if (appKey && (!boundAccounts || now() - boundAccounts.at >= BOUND_REFRESH_MS)) {
 			try {
 				await loadBoundAccounts();
@@ -601,55 +610,42 @@ export function createC5Service(options: C5ServiceOptions) {
 				boundError = err.message;
 			}
 		}
-		const bound = boundAccounts?.list ?? [];
-		const saved = store.loadTradeUrls();
 		return {
-			accounts: (options.localAccounts?.() ?? []).map(account => {
-				const url = saved[account.account] ?? '';
-				const canFetch = account.hasSession && !!account.steamId && !!options.fetchTradeUrl;
-				const isBound = (entry: C5BoundAccount) => (account.steamId ? entry.steamId === account.steamId : !!url && isTradeUrlOf(url, entry.steamId));
-				return {
-					...account,
-					saved: !!url,
-					selectable: canFetch || !!url,
-					c5Bound: boundAccounts && (account.steamId || url) ? bound.some(isBound) : null
-				};
+			accounts: (boundAccounts?.list ?? []).map(account => {
+				const local = localOf(account.steamId);
+				const link = local?.hasSession && options.fetchTradeUrl ? 'local' : savedTradeUrl(account.steamId) ? 'saved' : 'none';
+				return {...account, account: local?.account ?? null, link};
 			}),
 			checked: !!boundAccounts,
-			bound,
 			boundError
 		};
 	}
 
 	/**
-	 * 取账户管理里某个账号的交易链接(只取,不改设置):能用网页会话就去 Steam 取一次并记下来;
-	 * 账号不在线、会话过期时用上次取到的。warning 是没取到新链接、改用旧链接的原因
+	 * 取某个 SteamID 的交易链接(只取,不改设置)。账户管理里有同一个账号、有网页会话的,去 Steam 取一次并记下来;
+	 * 取不到时用记下的(warning 写原因);都没有回 409,页面让人贴一次
 	 */
-	async function tradeUrlFor(account: unknown): Promise<{tradeUrl: string; receiver: C5Receiver | null; warning: string | null}> {
-		const name = String(account ?? '').trim();
-		const local = options.localAccounts?.().find(entry => entry.account === name);
-		if (!local) {
-			throw c5Error(404, `账户管理里没有 ${name || '这个账号'}`);
+	async function tradeUrlFor(steamId: unknown): Promise<{tradeUrl: string; receiver: C5Receiver | null; warning: string | null}> {
+		const id = String(steamId ?? '').trim();
+		if (accountIdOf(id) == null) {
+			throw c5Error(400, 'SteamID 不对');
 		}
-		const saved = store.loadTradeUrls()[name] ?? null;
+		const saved = savedTradeUrl(id);
+		const local = localOf(id);
 		let warning: string | null = null;
-		if (local.hasSession && local.steamId && options.fetchTradeUrl) {
+		if (local?.hasSession && options.fetchTradeUrl) {
 			try {
-				const tradeUrl = await options.fetchTradeUrl(name);
-				store.saveTradeUrl(name, tradeUrl);
+				const tradeUrl = await options.fetchTradeUrl(local.account);
+				store.saveTradeUrl(partnerOf(tradeUrl) ?? id, tradeUrl);
 				return {tradeUrl, receiver: receiverOf(tradeUrl), warning: null};
 			} catch (err) {
-				const reason = err instanceof Error ? err.message : String(err);
-				if (!saved) {
-					throw c5Error(502, `取 ${name} 的交易链接失败: ${reason}`);
-				}
-				warning = `这次没取到新链接(${reason}),用的是上次取到的`;
+				warning = `用账户管理里的 ${local.account} 没取到交易链接(${err instanceof Error ? err.message : String(err)})`;
 			}
 		}
-		if (!saved) {
-			throw c5Error(409, `${name} 还没登录过,先在账户管理里登录一次,才能取到它的交易链接`);
+		if (saved) {
+			return {tradeUrl: saved, receiver: receiverOf(saved), warning: warning && `${warning},用的是上次记下的`};
 		}
-		return {tradeUrl: saved, receiver: receiverOf(saved), warning};
+		throw c5Error(409, `${warning ? warning + ';' : ''}C5 开放平台不给交易链接,这个账号的交易链接要贴一次(之后会记住)`);
 	}
 
 	/** 连通性:app-key、余额、C5 上绑定的 Steam 收货账号 */

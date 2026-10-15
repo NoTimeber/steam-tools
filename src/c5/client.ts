@@ -39,7 +39,11 @@ export interface C5Balance {
 export interface C5SteamAccount {
 	steamId?: string;
 	nickname?: string;
-	/** 1 正常 / 2 暂挂 / 3 不可交易 */
+	/** Steam 登录名 */
+	username?: string;
+	/** 0 普通 Steam 账号 / 2 交易助手 */
+	autoType?: number;
+	/** 1 正常 / 2 暂挂 / 3 不可交易(库存未公开、交易链接未填写或失效、账号不可交易等) */
 	accountStatus?: number;
 	[key: string]: unknown;
 }

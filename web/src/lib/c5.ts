@@ -58,12 +58,6 @@ export interface C5Purchase {
 	cost: number;
 }
 
-export interface C5LogLine {
-	time: number;
-	level: 'debug' | 'info' | 'success' | 'warn' | 'error';
-	message: string;
-}
-
 /** 后端 src/c5/index.ts 的 C5State */
 export interface C5State {
 	configured: boolean;
@@ -79,7 +73,6 @@ export interface C5State {
 	items: C5ItemView[];
 	purchases: C5Purchase[];
 	unknown: number;
-	logs: C5LogLine[];
 }
 
 export interface C5CheckResult {
@@ -91,12 +84,17 @@ export interface C5CheckResult {
 export interface C5BoundAccount {
 	steamId: string;
 	nickname: string;
+	/** Steam 登录名;C5 没给为 '' */
+	username: string;
 	status: string;
+	/** C5 的「交易助手」账号 */
+	assistant: boolean;
 }
 
 /** 后端 src/c5/index.ts 的 C5Receiver:交易链接对应的账号 */
 export interface C5Receiver {
 	steamId: string;
+	/** 账户管理里对应的账号名 */
 	account: string | null;
 	personaName: string | null;
 	c5: C5BoundAccount | null;
@@ -104,27 +102,20 @@ export interface C5Receiver {
 	c5Checked: boolean;
 }
 
-/** 收货账号下拉:账户管理里的全部账号;c5Bound 为 null 是没查 C5(没填 app-key 或查失败) */
-export interface C5ReceiverAccount {
-	account: string;
-	steamId: string;
-	personaName: string;
-	/** 登录着、有网页会话 */
-	online: boolean;
-	/** 有网页会话 cookie(在线的,或上次登录存下的) */
-	hasSession: boolean;
-	/** 取到过交易链接 */
-	saved: boolean;
-	/** 能选:能去 Steam 取链接,或者取到过 */
-	selectable: boolean;
-	c5Bound: boolean | null;
+/**
+ * 收货账号下拉的一项:C5 上绑定的 Steam 账号。link 是选它时交易链接从哪来:
+ * local 用账户管理里同一个账号的网页会话去 Steam 取;saved 用记下的;none 要贴一次
+ */
+export interface C5ReceiverAccount extends C5BoundAccount {
+	account: string | null;
+	link: 'local' | 'saved' | 'none';
 }
 
 export interface C5Receivers {
 	accounts: C5ReceiverAccount[];
 	/** 查到了 C5 上绑定的账号 */
 	checked: boolean;
-	bound: C5BoundAccount[];
+	/** 没填 app-key、查 C5 失败的原因 */
 	boundError: string | null;
 }
 
@@ -175,7 +166,8 @@ export function partnerOf(tradeUrl: string): string | null {
 	}
 }
 
-function isTradeUrlOf(tradeUrl: string, steamId: string): boolean {
+/** 交易链接是不是这个 SteamID 的(按账号 id = SteamID 低 32 位比) */
+export function isTradeUrlOf(tradeUrl: string, steamId: string): boolean {
 	const partner = partnerOf(tradeUrl);
 	return partner != null && /^\d{17}$/.test(steamId) && String(BigInt(steamId) & 0xFFFFFFFFn) === partner;
 }
@@ -186,41 +178,44 @@ export function describeTradeUrl(tradeUrl: string, receivers: C5Receivers | null
 	if (partner == null) {
 		return null;
 	}
-	const local = receivers?.accounts.find(account => isTradeUrlOf(tradeUrl, account.steamId)) ?? null;
-	const c5 = receivers?.bound.find(account => isTradeUrlOf(tradeUrl, account.steamId)) ?? null;
+	const bound = receivers?.accounts.find(account => isTradeUrlOf(tradeUrl, account.steamId)) ?? null;
 	return {
-		steamId: local?.steamId ?? c5?.steamId ?? String(76561197960265728n + BigInt(partner)),
-		account: local?.account ?? null,
-		personaName: local?.personaName || null,
-		c5,
+		steamId: bound?.steamId ?? String(76561197960265728n + BigInt(partner)),
+		account: bound?.account ?? null,
+		personaName: null,
+		c5: bound && {steamId: bound.steamId, nickname: bound.nickname, username: bound.username, status: bound.status, assistant: bound.assistant},
 		c5Checked: !!receivers?.checked
 	};
 }
 
-/** 收货账号下拉的一项:「alpha(昵称)」,不在线、没登录过、C5 上没绑定的才标出来 */
+/** 收货账号下拉的一项:「C5 昵称(Steam 登录名)」,交易助手、状态不正常、要贴链接的才标出来 */
 export function receiverOptionLabel(account: C5ReceiverAccount): string {
-	const notes = [
-		!account.selectable ? '没登录过' : !account.online ? '未在线' : '',
-		account.c5Bound === false ? 'C5 未绑定' : ''
-	].filter(Boolean);
-	return `${account.account}${account.personaName ? `(${account.personaName})` : ''}${notes.map(note => ` · ${note}`).join('')}`;
+	const name = account.nickname || account.username || account.steamId;
+	const login = account.username && account.username !== name ? `(${account.username})` : '';
+	const notes = [account.assistant ? '交易助手' : '', account.status !== '正常' ? account.status : '', account.link === 'none' ? '要贴链接' : ''].filter(Boolean);
+	return `${name}${login}${notes.map(note => ` · ${note}`).join('')}`;
 }
 
-/** 收货账号下拉的顺序:在线的、能选的在前,同一档按账户管理里的顺序 */
+/** 下拉里搜索:昵称、Steam 登录名、SteamID、账户管理里的账号名都能搜 */
+export function receiverMatches(account: C5ReceiverAccount, pattern: string): boolean {
+	const text = pattern.trim().toLowerCase();
+	return !text || [account.nickname, account.username, account.steamId, account.account ?? ''].some(value => value.toLowerCase().includes(text));
+}
+
+/** 收货账号下拉的顺序:状态正常的在前,同一档按 C5 返回的顺序 */
 export function sortReceiverAccounts(accounts: readonly C5ReceiverAccount[]): C5ReceiverAccount[] {
-	const rank = (account: C5ReceiverAccount) => (account.online ? 0 : account.selectable ? 1 : 2);
 	return accounts.map((account, index) => ({account, index}))
-		.sort((a, b) => rank(a.account) - rank(b.account) || a.index - b.index)
+		.sort((a, b) => Number(a.account.status !== '正常') - Number(b.account.status !== '正常') || a.index - b.index)
 		.map(entry => entry.account);
 }
 
-/** 收货账号一行字:「alpha(昵称) · SteamID 7656…」;不是本工具的账号只给 SteamID */
+/** 收货账号一行字:「C5 昵称 · SteamID 7656…」;不是 C5 绑定的用账户管理里的账号名,都不是只给 SteamID */
 export function receiverText(receiver: C5Receiver | null): string {
 	if (!receiver) {
 		return '未设置';
 	}
-	const name = receiver.account ? `${receiver.account}${receiver.personaName ? `(${receiver.personaName})` : ''} · ` : '';
-	return `${name}SteamID ${receiver.steamId}`;
+	const name = receiver.c5?.nickname || (receiver.account ? `${receiver.account}${receiver.personaName ? `(${receiver.personaName})` : ''}` : '');
+	return `${name ? name + ' · ' : ''}SteamID ${receiver.steamId}`;
 }
 
 /** 收货账号在 C5 上的情况:没查过返回 null */

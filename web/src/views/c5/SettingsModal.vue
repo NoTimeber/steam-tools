@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // C5 扫货设置:app-key(只显示后 4 位,留空不改)、交易链接、策略、风控和轮询。自动扫货都是真实下单,没有模拟。
-// 收货账号一般在主页面顶部直接选;这里只给不是本工具里的账号贴交易链接,下面一行显示链接是谁的。
+// 收货账号一般在主页面顶部从 C5 绑定的账号里选;这里可以直接改交易链接,下面一行显示链接是谁的。
 import {computed, reactive, ref, watch} from 'vue';
 import {NAlert, NButton, NCard, NCheckbox, NForm, NFormItem, NInput, NInputNumber, NModal, NRadioButton, NRadioGroup, NSpace, NTag, useMessage} from 'naive-ui';
 import {errorText} from '../../api/http.ts';
@@ -106,7 +106,7 @@ async function save(): Promise<void> {
 						<span class="muted hint">等同于账号凭证,泄露后别人能直接用你的余额下单。加密存在服务器数据库里,浏览器拿不到原文。</span>
 					</div>
 				</NFormItem>
-				<NFormItem label="收货账号的交易链接(一般直接在主页面顶部选账号;不是本工具里的账号才在这里贴)">
+				<NFormItem label="收货账号的交易链接(一般在主页面顶部从 C5 绑定的账号里选;这里可以直接改链接)">
 					<div class="stack">
 						<NInput v-model:value="form.tradeUrl" placeholder="https://steamcommunity.com/tradeoffer/new/?partner=...&token=..." :input-props="{spellcheck: false}" />
 						<div v-if="form.tradeUrl.trim()" class="receiver-line">

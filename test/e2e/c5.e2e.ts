@@ -118,7 +118,7 @@ describe('C5 扫货', () => {
 		assert.equal(check.status, 200, check.text);
 		assert.deepEqual(check.json.result, {
 			balance: {money: 20, settle: 0, deposit: 0},
-			steamAccounts: [{steamId: '76561190100005555', nickname: '演示收货号', status: '正常'}]
+			steamAccounts: [{steamId: '76561190100005555', nickname: '演示收货号', username: 'alpha', status: '正常', assistant: false}]
 		});
 
 		const listings = await client.post('/api/c5/listings', {name: 'Kilowatt Case'});
@@ -181,35 +181,35 @@ describe('C5 扫货', () => {
 		assert.equal(stopped.json.state.run, 'stopped');
 	});
 
-	test('收货账号:账户管理里的账号都列出来,登录过的用网页会话取交易链接;状态里认得出账号和 C5 绑定', async () => {
-		assert.equal((await state()).receiver.account, null, '原来的链接不是本工具的账号');
-		const listed = await client.get('/api/c5/receivers');
-		assert.deepEqual(listed.json.accounts.map((account: any) => [account.account, account.online, account.selectable]), [['alpha', false, false]], '没登录过也列出来,但不能选');
-		const neverLoggedIn = await client.post('/api/c5/trade-url', {account: 'alpha'});
-		assert.equal(neverLoggedIn.status, 409, neverLoggedIn.text);
+	test('收货账号:从 C5 上绑定的账号里选;账户管理里同一个账号登录后用它的网页会话取交易链接,没有就要贴一次', async () => {
+		const ALPHA = '76561190100005555';
+		const receivers = async () => (await client.get('/api/c5/receivers')).json;
+		assert.deepEqual((await receivers()).accounts.map((account: any) => [account.steamId, account.nickname, account.account, account.link]),
+			[[ALPHA, '演示收货号', null, 'none']], 'alpha 还没登录过:认不出,也取不到链接');
+		const mustPaste = await client.post('/api/c5/trade-url', {steamId: ALPHA});
+		assert.equal(mustPaste.status, 409, mustPaste.text);
+		assert.match(mustPaste.json.error, /要贴一次/);
 
 		await client.post('/api/login', {accountName: 'alpha'});
 		const deadline = Date.now() + 10000;
-		let receivers = await client.get('/api/c5/receivers');
-		while (!receivers.json.accounts?.[0]?.online && Date.now() < deadline) {
+		let listed = await receivers();
+		while (listed.accounts[0]?.link !== 'local' && Date.now() < deadline) {
 			await sleep(100);
-			receivers = await client.get('/api/c5/receivers');
+			listed = await receivers();
 		}
-		assert.deepEqual(receivers.json.accounts.map((account: any) => [account.account, account.steamId, account.online, account.selectable, account.c5Bound]), [
-			['alpha', '76561190100005555', true, true, true]
-		]);
+		assert.deepEqual([listed.accounts[0].account, listed.accounts[0].link], ['alpha', 'local']);
 
-		const fetched = await client.post('/api/c5/trade-url', {account: 'alpha'});
+		const fetched = await client.post('/api/c5/trade-url', {steamId: ALPHA});
 		assert.equal(fetched.status, 200, fetched.text);
-		assert.equal(fetched.json.tradeUrl, `https://steamcommunity.com/tradeoffer/new/?partner=${76561190100005555n & 0xFFFFFFFFn}&token=demo5555`);
+		assert.equal(fetched.json.tradeUrl, `https://steamcommunity.com/tradeoffer/new/?partner=${BigInt(ALPHA) & 0xFFFFFFFFn}&token=demo5555`);
 		const blockedCommunity = server.steamEvents().filter(event => event.event === 'blockedFetch' && String(event.url).includes('steamcommunity.com'));
 		assert.deepEqual(blockedCommunity, [], '取链接走的是社区的交易报价隐私设置页');
 
 		const saved = await client.post('/api/c5/settings', {tradeUrl: fetched.json.tradeUrl});
 		assert.equal(saved.status, 200, saved.text);
 		assert.deepEqual(saved.json.state.receiver, {
-			steamId: '76561190100005555', account: 'alpha', personaName: saved.json.state.receiver.personaName,
-			c5: {steamId: '76561190100005555', nickname: '演示收货号', status: '正常'}, c5Checked: true
+			steamId: ALPHA, account: 'alpha', personaName: saved.json.state.receiver.personaName,
+			c5: {steamId: ALPHA, nickname: '演示收货号', username: 'alpha', status: '正常', assistant: false}, c5Checked: true
 		});
 	});
 

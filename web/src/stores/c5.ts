@@ -128,22 +128,27 @@ export async function searchNames(q: string): Promise<C5NameSearch> {
 	return api.get<C5NameSearch>('/api/c5/names?q=' + encodeURIComponent(q));
 }
 
-/** 收货账号下拉:本工具里登录着的账号,和 C5 上绑定的账号 */
+/** 收货账号下拉:C5 上绑定的 Steam 账号,标上选它时交易链接从哪来 */
 export async function fetchReceivers(): Promise<C5Receivers> {
 	return api.get<C5Receivers>('/api/c5/receivers');
 }
 
-/** 取账户管理里某个账号的交易链接(只取,不改设置);warning 是没取到新链接、改用上次取到的原因 */
-export async function fetchTradeUrl(account: string): Promise<{tradeUrl: string; receiver: C5Receiver | null; warning: string | null}> {
-	return api.post('/api/c5/trade-url', {account});
+/** 取某个 SteamID 的交易链接(只取,不改设置)。409 = 拿不到,要人贴一次;warning 是改用记下的链接的原因 */
+export async function fetchTradeUrl(steamId: string): Promise<{tradeUrl: string; receiver: C5Receiver | null; warning: string | null}> {
+	return api.post('/api/c5/trade-url', {steamId});
 }
 
-/** 主页面换收货账号:取这个账号的交易链接并马上保存(其它设置不动) */
-export async function switchReceiver(account: string): Promise<{state: C5State; warning: string | null}> {
-	const {tradeUrl, warning} = await fetchTradeUrl(account);
+/** 收货账号换成这个交易链接(其它设置不动);后端会记下链接,下次选同一个账号不用再贴 */
+export async function saveReceiverTradeUrl(tradeUrl: string): Promise<C5State> {
 	const data = await api.post<{state: C5State}>('/api/c5/settings', {tradeUrl});
 	applyState(data.state);
-	return {state: data.state, warning};
+	return data.state;
+}
+
+/** 主页面换收货账号:取这个 SteamID 的交易链接并马上保存 */
+export async function switchReceiver(steamId: string): Promise<{state: C5State; warning: string | null}> {
+	const {tradeUrl, warning} = await fetchTradeUrl(steamId);
+	return {state: await saveReceiverTradeUrl(tradeUrl), warning};
 }
 
 export async function fetchListings(name: string): Promise<{name: string; maxPrice: number; listings: C5Listing[]}> {

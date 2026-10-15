@@ -1,20 +1,22 @@
 <script setup lang="ts">
 // C5 扫货:顶栏是运行状态(停止 / 自动扫货,真实下单)和汇总;中间是监控列表(直接改目标价、数量、花费上限,
-// 改过没保存的格子标黄,点「保存」后下一轮按新价扫);下面是购买流水和运行日志。设置、查在售在弹窗里。
+// 改过没保存的格子标黄,点「保存」后下一轮按新价扫);下面是购买流水。运行日志写在页面右侧的「实时运行日志」里。设置、查在售在弹窗里。
 // 添加饰品输中文或英文搜(C5 接口只认 Steam 英文名,后端词库把中文换成英文名),表格里显示中文名。
 import {computed, h, onMounted, onUnmounted, reactive, ref} from 'vue';
-import {NAlert, NButton, NCard, NDataTable, NInputNumber, NRadioButton, NRadioGroup, NSelect, NSpace, NTag, useDialog, useMessage} from 'naive-ui';
+import {
+	NAlert, NButton, NCard, NDataTable, NInput, NInputNumber, NModal, NRadioButton, NRadioGroup, NSelect, NSpace, NTag, useDialog, useMessage
+} from 'naive-ui';
 import type {DataTableColumns, SelectOption} from 'naive-ui';
 import type {VNodeChild} from 'vue';
-import {errorText} from '../api/http.ts';
+import {ApiError, errorText} from '../api/http.ts';
 import {
-	ASSET_TYPE_OPTIONS, budgetText, DELIVERY_OPTIONS, dirtyFields, formatTime, itemLabel, itemStatus, money, priceText, purchaseStatus, receiverC5Note,
-	receiverOptionLabel, receiverText, removedNames, RUN_LABELS, sortReceiverAccounts, sweepBlocker, sweepConfirmText
+	ASSET_TYPE_OPTIONS, budgetText, DELIVERY_OPTIONS, dirtyFields, formatTime, isTradeUrlOf, itemLabel, itemStatus, money, partnerOf, priceText, purchaseStatus,
+	receiverC5Note, receiverMatches, receiverOptionLabel, receiverText, removedNames, RUN_LABELS, sortReceiverAccounts, sweepBlocker, sweepConfirmText
 } from '../lib/c5.ts';
 import type {C5NameOption, C5Purchase, C5ReceiverAccount, C5RunState, DraftField, DraftRow} from '../lib/c5.ts';
 import {
 	addDraft, c5, checkConnection, dirty, discardDrafts, enterC5, fetchReceivers, leaveC5, refreshOrders, removeDraft, resolvePurchase,
-	saveWatchlist, searchNames, serverItems, setRun, switchReceiver
+	saveReceiverTradeUrl, saveWatchlist, searchNames, serverItems, setRun, switchReceiver
 } from '../stores/c5.ts';
 import ListingsModal from './c5/ListingsModal.vue';
 import SettingsModal from './c5/SettingsModal.vue';
@@ -47,8 +49,10 @@ const removed = computed(() => removedNames(c5.drafts, serverItems.value).map(la
 const settingsOpen = ref(false);
 const listingsName = ref('');
 
-// ===== 收货账号:顶栏下拉,从本工具里登录着的账号选,选中马上取交易链接并保存 =====
+// ===== 收货账号:顶栏下拉,从 C5 上绑定的 Steam 账号里选,选中马上取交易链接并保存 =====
+// C5 开放平台不给交易链接,下单又必须带:账户管理里有同一个账号的自动去 Steam 取,取不到用记下的,都没有就弹框让人贴一次
 const receiverAccounts = ref<C5ReceiverAccount[]>([]);
+const receiversError = ref<string | null>(null);
 const receiversLoading = ref(false);
 const switchingReceiver = ref(false);
 const receiverNote = computed(() => receiverC5Note(state.value?.receiver ?? null));
@@ -56,43 +60,77 @@ const receiverNote = computed(() => receiverC5Note(state.value?.receiver ?? null
 async function loadReceivers(): Promise<void> {
 	receiversLoading.value = true;
 	try {
-		receiverAccounts.value = (await fetchReceivers()).accounts;
-	} catch {
-		// 下拉打开时会再读;读不到就只能在设置里贴链接
+		const result = await fetchReceivers();
+		receiverAccounts.value = result.accounts;
+		receiversError.value = result.boundError;
+	} catch (err) {
+		receiversError.value = errorText(err);
 	} finally {
 		receiversLoading.value = false;
 	}
 }
 
-// 账户管理里的全部账号:在线的在前;没登录过(取不到交易链接)的灰掉。可以输账号名、昵称搜
+// 状态正常的在前;昵称、Steam 登录名、SteamID、账户管理里的账号名都能搜
 const receiverOptions = computed(() => sortReceiverAccounts(receiverAccounts.value).map(account => ({
-	value: account.account,
+	value: account.steamId,
 	label: receiverOptionLabel(account),
-	disabled: !account.selectable
+	item: account
 })));
-/** 当前收货账号是下拉里的哪一个;手贴的别人的链接不在下拉里,显示成占位文字 */
+const filterReceiver = (pattern: string, option: SelectOption) => receiverMatches(option.item as C5ReceiverAccount, pattern);
+/** 当前收货账号是下拉里的哪一个;不是 C5 绑定的链接不在下拉里,显示成占位文字 */
 const receiverValue = computed(() => {
-	const account = state.value?.receiver?.account;
-	return account && receiverAccounts.value.some(entry => entry.account === account) ? account : null;
+	const steamId = state.value?.receiver?.steamId;
+	return steamId && receiverAccounts.value.some(entry => entry.steamId === steamId) ? steamId : null;
 });
 const receiverPlaceholder = computed(() => (state.value?.receiver ? receiverText(state.value.receiver) : '选收货账号'));
+const nameOfReceiver = (steamId: string) => {
+	const account = receiverAccounts.value.find(entry => entry.steamId === steamId);
+	return account ? account.nickname || account.username || steamId : steamId;
+};
 
-async function pickReceiver(account: string | null): Promise<void> {
-	if (!account || account === receiverValue.value) {
+async function pickReceiver(steamId: string | null): Promise<void> {
+	if (!steamId || steamId === receiverValue.value) {
 		return;
 	}
 	switchingReceiver.value = true;
 	try {
-		const {warning} = await switchReceiver(account);
+		const {warning} = await switchReceiver(steamId);
 		if (warning) {
-			message.warning(`收货账号已改为 ${account}。${warning}`, {duration: 6000});
+			message.warning(`收货账号已改为 ${nameOfReceiver(steamId)}。${warning}`, {duration: 6000});
 		} else {
-			message.success(`收货账号已改为 ${account}`);
+			message.success(`收货账号已改为 ${nameOfReceiver(steamId)}`);
 		}
+		void loadReceivers();
 	} catch (err) {
-		message.error('换收货账号失败:' + errorText(err));
+		if (err instanceof ApiError && err.status === 409) {
+			Object.assign(paste, {show: true, steamId, tradeUrl: '', error: ''});
+		} else {
+			message.error('换收货账号失败:' + errorText(err));
+		}
 	} finally {
 		switchingReceiver.value = false;
+	}
+}
+
+// 贴交易链接:只收这个账号自己的链接(partner 对得上 SteamID)
+const paste = reactive({show: false, steamId: '', tradeUrl: '', error: '', saving: false});
+
+async function savePastedTradeUrl(): Promise<void> {
+	const tradeUrl = paste.tradeUrl.trim();
+	if (!isTradeUrlOf(tradeUrl, paste.steamId)) {
+		paste.error = partnerOf(tradeUrl) == null ? '不是交易链接' : `这不是 ${nameOfReceiver(paste.steamId)} 的交易链接(SteamID 对不上)`;
+		return;
+	}
+	paste.saving = true;
+	try {
+		await saveReceiverTradeUrl(tradeUrl);
+		message.success(`收货账号已改为 ${nameOfReceiver(paste.steamId)},交易链接已记下`);
+		paste.show = false;
+		void loadReceivers();
+	} catch (err) {
+		paste.error = errorText(err);
+	} finally {
+		paste.saving = false;
 	}
 }
 
@@ -458,19 +496,6 @@ const purchaseColumns: DataTableColumns<C5Purchase> = [
 			: null)
 	}
 ];
-
-// ===== 日志 =====
-const logLines = computed(() => (state.value?.logs ?? []).slice().reverse());
-
-async function copyLogs(): Promise<void> {
-	const text = (state.value?.logs ?? []).map(line => `${formatTime(line.time)} ${line.message}`).join('\n');
-	try {
-		await navigator.clipboard.writeText(text);
-		message.success('已复制');
-	} catch {
-		message.error('复制失败(浏览器不允许访问剪贴板)');
-	}
-}
 </script>
 
 <template>
@@ -495,15 +520,16 @@ async function copyLogs(): Promise<void> {
 							:loading="receiversLoading || switchingReceiver"
 							:disabled="switchingReceiver"
 							:consistent-menu-width="false"
+							:filter="filterReceiver"
 							:title="state?.receiver ? receiverText(state.receiver) : ''"
 							@update:show="(open: boolean) => open && loadReceivers()"
 							@update:value="pickReceiver"
 						>
 							<template #empty>
-								<span class="muted">{{ receiverAccounts.length ? '没搜到这个账号' : '账户管理里还没有账号' }}</span>
+								<span class="muted">{{ receiversError || (receiverAccounts.length ? '没搜到这个账号' : 'C5 上还没绑定 Steam 账号') }}</span>
 							</template>
-							<template v-if="receiverAccounts.some(account => !account.selectable)" #action>
-								<span class="muted price-note">灰色的账号没登录过,取不到交易链接;先在「账户管理」里登录一次</span>
+							<template v-if="receiverAccounts.some(account => account.link === 'none')" #action>
+								<span class="muted price-note">标「要贴链接」的:C5 开放平台不给交易链接,选它时贴一次,之后会记住</span>
 							</template>
 						</NSelect>
 						<NTag v-if="receiverNote && !receiverNote.ok" size="small" :bordered="false" type="warning">{{ receiverNote.text }}</NTag>
@@ -587,31 +613,39 @@ async function copyLogs(): Promise<void> {
 			</div>
 		</NCard>
 
-		<div class="c5-bottom">
-			<NCard size="small" :bordered="false" title="购买流水(最近 50 笔)">
-				<template #header-extra>
-					<NButton size="small" :loading="syncing" :disabled="!state?.configured" title="立刻向平台查一遍全部未完结订单(平时每轮自动查几笔)" @click="sync">同步订单</NButton>
+		<NCard size="small" :bordered="false" title="购买流水(最近 50 笔)">
+			<template #header-extra>
+				<NButton size="small" :loading="syncing" :disabled="!state?.configured" title="立刻向平台查一遍全部未完结订单(平时每轮自动查几笔)" @click="sync">同步订单</NButton>
+			</template>
+			<NDataTable size="small" :columns="purchaseColumns" :data="state?.purchases ?? []" :row-key="(row: C5Purchase) => row.outTradeNo" :max-height="360" :scroll-x="720">
+				<template #empty>
+					<span class="muted">还没有买入</span>
 				</template>
-				<NDataTable size="small" :columns="purchaseColumns" :data="state?.purchases ?? []" :row-key="(row: C5Purchase) => row.outTradeNo" :max-height="360" :scroll-x="720">
-					<template #empty>
-						<span class="muted">还没有买入</span>
-					</template>
-				</NDataTable>
-			</NCard>
-			<NCard size="small" :bordered="false" title="运行日志">
-				<template #header-extra>
-					<NButton size="small" quaternary :disabled="!logLines.length" @click="copyLogs">复制</NButton>
-				</template>
-				<div class="c5-logs mono">
-					<div v-for="(line, index) in logLines" :key="index" :class="['log-line', 'log-' + line.level]">
-						<span class="muted">{{ formatTime(line.time) }}</span> {{ line.message }}
-					</div>
-					<div v-if="!logLines.length" class="muted">暂无</div>
-				</div>
-			</NCard>
-		</div>
+			</NDataTable>
+		</NCard>
 
 		<SettingsModal :show="settingsOpen" @close="settingsOpen = false" />
+		<NModal :show="paste.show" :mask-closable="!paste.saving" @update:show="(value: boolean) => !value && !paste.saving && (paste.show = false)">
+			<NCard :title="`贴 ${nameOfReceiver(paste.steamId)} 的交易链接`" style="width: 560px; max-width: calc(100vw - 32px)" :bordered="false" role="dialog" aria-modal="true">
+				<p class="muted paste-hint">
+					C5 开放平台不给已绑定账号的交易链接,下单又必须带,所以要贴一次,之后会记住。
+					在这个 Steam 账号的「库存 → 交易报价 → 谁可以向我发送交易报价」页面复制(SteamID {{ paste.steamId }})。
+				</p>
+				<NInput
+					v-model:value="paste.tradeUrl"
+					placeholder="https://steamcommunity.com/tradeoffer/new/?partner=...&token=..."
+					:input-props="{spellcheck: false}"
+					@keyup.enter="savePastedTradeUrl"
+				/>
+				<NAlert v-if="paste.error" type="error" :bordered="false" class="paste-error">{{ paste.error }}</NAlert>
+				<template #footer>
+					<NSpace justify="end">
+						<NButton :disabled="paste.saving" @click="paste.show = false">取消</NButton>
+						<NButton type="primary" :loading="paste.saving" @click="savePastedTradeUrl">保存并设为收货账号</NButton>
+					</NSpace>
+				</template>
+			</NCard>
+		</NModal>
 		<ListingsModal :name="listingsName" :label="labelOf(listingsName)" @close="listingsName = ''" />
 	</div>
 </template>
@@ -646,6 +680,15 @@ async function copyLogs(): Promise<void> {
 	font-size: 12px;
 }
 
+.paste-hint {
+	margin: 0 0 10px;
+	font-size: 13px;
+}
+
+.paste-error {
+	margin-top: 8px;
+}
+
 .warn-text {
 	color: var(--warn);
 }
@@ -655,38 +698,6 @@ async function copyLogs(): Promise<void> {
 	grid-template-columns: minmax(0, 1fr) 110px 110px auto;
 	gap: 6px;
 	margin-top: 10px;
-}
-
-.c5-bottom {
-	display: grid;
-	grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
-	gap: 12px;
-	align-items: start;
-}
-
-.c5-logs {
-	max-height: 360px;
-	overflow: auto;
-	font-size: 12px;
-	line-height: 1.6;
-	white-space: pre-wrap;
-	word-break: break-all;
-}
-
-.log-debug {
-	color: var(--muted);
-}
-
-.log-success {
-	color: var(--ok);
-}
-
-.log-warn {
-	color: var(--warn);
-}
-
-.log-error {
-	color: var(--danger);
 }
 
 :deep(.pre) {
@@ -731,11 +742,5 @@ async function copyLogs(): Promise<void> {
 :deep(.price-hit) {
 	color: var(--ok);
 	font-weight: 600;
-}
-
-@media (max-width: 1280px) {
-	.c5-bottom {
-		grid-template-columns: minmax(0, 1fr);
-	}
 }
 </style>

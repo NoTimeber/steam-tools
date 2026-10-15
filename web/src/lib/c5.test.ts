@@ -3,7 +3,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {
 	budgetText, dirtyFields, draftPayload, draftsDirty, formatTime, itemLabel, itemStatus, money, newDraft, purchaseStatus, removedNames, sweepBlocker,
-	sweepConfirmText, toDrafts, describeTradeUrl, priceText, receiverC5Note, receiverOptionLabel, receiverText, sortReceiverAccounts
+	sweepConfirmText, toDrafts, describeTradeUrl, priceText, receiverC5Note, receiverMatches, receiverOptionLabel, receiverText, sortReceiverAccounts
 } from './c5.ts';
 import type {C5Receivers, C5Settings, C5WatchItem} from './c5.ts';
 
@@ -105,42 +105,42 @@ test('搜索结果的价格文字:有价给价和在售数,查过价没在售说
 	assert.equal(priceText({...option, lowest: null, sellCount: null}, false), '');
 });
 
-test('交易链接是谁的:按账号 id(SteamID 低 32 位)对本工具的账号和 C5 绑定的账号', () => {
+test('交易链接是谁的:按账号 id(SteamID 低 32 位)对 C5 绑定的账号;收货账号文字优先用 C5 昵称', () => {
 	const alpha = '76561198152000001';
 	const link = `https://steamcommunity.com/tradeoffer/new/?partner=${76561198152000001n - 76561197960265728n}&token=abc`;
-	const receivers: C5Receivers = {
-		accounts: [{account: 'alpha', steamId: alpha, personaName: '阿尔法', online: true, hasSession: true, saved: true, selectable: true, c5Bound: true}],
-		checked: true,
-		bound: [{steamId: alpha, nickname: 'C5 号', status: '正常'}],
-		boundError: null
-	};
+	const bound = {steamId: alpha, nickname: 'C5 号', username: 'alpha_login', status: '正常', assistant: false};
+	const receivers: C5Receivers = {accounts: [{...bound, account: 'alpha', link: 'local'}], checked: true, boundError: null};
 	const mine = describeTradeUrl(link, receivers);
-	assert.deepEqual(mine, {steamId: alpha, account: 'alpha', personaName: '阿尔法', c5: receivers.bound[0], c5Checked: true});
-	assert.equal(receiverText(mine), `alpha(阿尔法) · SteamID ${alpha}`);
+	assert.deepEqual(mine, {steamId: alpha, account: 'alpha', personaName: null, c5: bound, c5Checked: true});
+	assert.equal(receiverText(mine), `C5 号 · SteamID ${alpha}`);
 	assert.deepEqual(receiverC5Note(mine), {text: 'C5 已绑定(C5 号)', ok: true});
+	assert.equal(receiverText({steamId: alpha, account: 'alpha', personaName: '阿尔法', c5: null, c5Checked: true}), `alpha(阿尔法) · SteamID ${alpha}`);
 
 	const stranger = describeTradeUrl('https://steamcommunity.com/tradeoffer/new/?partner=7&token=x', receivers);
 	assert.equal(receiverText(stranger), 'SteamID 76561197960265735');
 	assert.deepEqual(receiverC5Note(stranger), {text: 'C5 上没绑定这个账号', ok: false});
 	assert.equal(receiverC5Note(describeTradeUrl(link, null)), null, '没查过 C5 不下结论');
-	assert.deepEqual(receiverC5Note({...mine!, c5: {steamId: alpha, nickname: '', status: '暂挂'}}), {text: 'C5 上状态:暂挂', ok: false});
+	assert.deepEqual(receiverC5Note({...mine!, c5: {...bound, status: '暂挂'}}), {text: 'C5 上状态:暂挂', ok: false});
 	assert.equal(describeTradeUrl('https://example.com/?partner=1', receivers), null);
 	assert.equal(receiverText(null), '未设置');
 });
 
-test('收货账号下拉:账号名(昵称),不在线、没登录过、C5 上没绑定的才标出来;在线的在前', () => {
-	const account = {account: 'alpha', steamId: '76561198152000001', personaName: '阿尔法', online: true, hasSession: true, saved: true, selectable: true, c5Bound: true};
-	assert.equal(receiverOptionLabel(account), 'alpha(阿尔法)');
-	assert.equal(receiverOptionLabel({...account, personaName: '', c5Bound: false}), 'alpha · C5 未绑定');
-	assert.equal(receiverOptionLabel({...account, c5Bound: null}), 'alpha(阿尔法)', '没查 C5 不下结论');
-	assert.equal(receiverOptionLabel({...account, online: false}), 'alpha(阿尔法) · 未在线');
-	assert.equal(receiverOptionLabel({...account, personaName: '', online: false, selectable: false, c5Bound: false}), 'alpha · 没登录过 · C5 未绑定');
+test('收货账号下拉:C5 昵称(Steam 登录名),交易助手、状态不正常、要贴链接的才标出来;状态正常的在前;按昵称、登录名、SteamID、账户管理账号名搜', () => {
+	const account = {
+		steamId: '76561198152000001', nickname: 'C5 号', username: 'alpha_login', status: '正常', assistant: false, account: 'alpha', link: 'local' as const
+	};
+	assert.equal(receiverOptionLabel(account), 'C5 号(alpha_login)');
+	assert.equal(receiverOptionLabel({...account, username: ''}), 'C5 号');
+	assert.equal(receiverOptionLabel({...account, nickname: '', username: ''}), '76561198152000001');
+	assert.equal(receiverOptionLabel({...account, assistant: true, status: '不可交易', link: 'none'}), 'C5 号(alpha_login) · 交易助手 · 不可交易 · 要贴链接');
 
-	const list = [
-		{...account, account: 'never', online: false, selectable: false},
-		{...account, account: 'offline', online: false},
-		{...account, account: 'online1'},
-		{...account, account: 'online2'}
-	];
-	assert.deepEqual(sortReceiverAccounts(list).map(entry => entry.account), ['online1', 'online2', 'offline', 'never']);
+	assert.ok(receiverMatches(account, 'c5'));
+	assert.ok(receiverMatches(account, 'ALPHA_LOG'));
+	assert.ok(receiverMatches(account, '2000001'));
+	assert.ok(receiverMatches({...account, username: ''}, 'alpha'), '账户管理里的账号名也能搜');
+	assert.ok(!receiverMatches(account, 'bravo'));
+	assert.ok(receiverMatches(account, '  '));
+
+	const list = [{...account, steamId: '1', status: '暂挂'}, {...account, steamId: '2'}, {...account, steamId: '3', status: '不可交易'}, {...account, steamId: '4'}];
+	assert.deepEqual(sortReceiverAccounts(list).map(entry => entry.steamId), ['2', '4', '1', '3']);
 });

@@ -705,10 +705,10 @@ function fakeTradeUrlPage(url, init) {
 
 // ===== 假 C5GAME 开放平台 =====
 // 场景文件 FAKE_C5_FILE(启动时读一次,之后状态都在内存里):
-// {balance: 20, steamId, items: {<marketHashName>: {listings: [价格, ...], purchaseMax}}, restock: false}
+// {balance: 20, steamId, steamAccounts: [{steamId, nickname, username, autoType, accountStatus}], items: {<marketHashName>: {listings: [价格, ...], purchaseMax}}, restock: false}
 // 在售 id 是 19 位整数(JS 数字放不下),回包里按原样的数字写,收到的请求体也按原文解析,方便测试核对没丢精度。
 // restock: true 时每次查行情都可能在原价附近补一件新在售(演示服务用,让页面有东西可看)。
-const c5 = {loaded: false, balance: 0, steamId: '', items: new Map(), orders: new Map(), seq: 0, restock: false};
+const c5 = {loaded: false, balance: 0, steamId: '', steamAccounts: [], items: new Map(), orders: new Map(), seq: 0, restock: false};
 
 function c5State() {
 	if (!c5.loaded) {
@@ -719,6 +719,9 @@ function c5State() {
 		} catch (_) {}
 		c5.balance = Number(scenario.balance ?? 100);
 		c5.steamId = String(scenario.steamId || '76561190100005555');
+		// C5 上绑定的 Steam 账号;默认只有 alpha(假 steam-user 按账号名长度算出来的 SteamID)
+		c5.steamAccounts = Array.isArray(scenario.steamAccounts) ? scenario.steamAccounts
+			: [{steamId: c5.steamId, nickname: '演示收货号', username: 'alpha', autoType: 0, accountStatus: 1}];
 		c5.restock = !!scenario.restock;
 		for (const [name, item] of Object.entries(scenario.items || {})) {
 			const prices = item.listings || [];
@@ -787,7 +790,7 @@ function fakeC5(url, init) {
 		case '/merchant/account/v2/balance':
 			return ok({moneyAmount: state.balance, tradeSettleAmount: 0, depositAmount: 0});
 		case '/merchant/account/v1/steamInfo':
-			return ok({steamList: [{steamId: state.steamId, nickname: '演示收货号', accountStatus: 1}]});
+			return ok({steamList: state.steamAccounts});
 		case '/merchant/market/v2/item/stat/hash/name': {
 			c5Restock();
 			const out = {};

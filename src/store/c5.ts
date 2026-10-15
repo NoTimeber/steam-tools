@@ -10,7 +10,7 @@ const APP_KEY_SETTING = 'c5.appKey';
 const APP_KEY_PURPOSE = 'c5.app_key';
 const SETTINGS_KEY = 'c5.settings';
 const RUN_STATE_KEY = 'c5.run';
-/** 取到过的各账号交易链接 {账号名: 链接}:账号不在线时也能选它当收货账号 */
+/** 取到过、贴过的交易链接:下次选同一个收货账号不用再取、再贴 */
 const TRADE_URLS_KEY = 'c5.tradeUrls';
 
 /** dry 是旧版本模拟模式留下的记录(现在不再写入、也不显示);live 是真实下单 */
@@ -79,9 +79,9 @@ export interface C5Store {
 	saveSettings(settings: object): void;
 	loadRunState(): string | undefined;
 	saveRunState(state: string): void;
-	/** 取到过的交易链接 {账号名: 链接} */
+	/** 记下的交易链接 {账号 id(交易链接的 partner): 链接};旧版本用账号名当 key,查的时候按链接本身认 */
 	loadTradeUrls(): Record<string, string>;
-	saveTradeUrl(account: string, tradeUrl: string): void;
+	saveTradeUrl(key: string, tradeUrl: string): void;
 
 	listItems(): C5WatchItem[];
 	replaceItems(items: readonly C5WatchItem[]): void;
@@ -191,8 +191,8 @@ export function createC5Store(db: Db, vault: Vault, settings: SettingsStore): C5
 			settings.set(RUN_STATE_KEY, state);
 		},
 		loadTradeUrls,
-		saveTradeUrl(account, tradeUrl) {
-			settings.set(TRADE_URLS_KEY, {...loadTradeUrls(), [account]: tradeUrl});
+		saveTradeUrl(key, tradeUrl) {
+			settings.set(TRADE_URLS_KEY, {...loadTradeUrls(), [key]: tradeUrl});
 		},
 
 		listItems() {

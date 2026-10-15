@@ -8,7 +8,8 @@
 //   charlie  要移动令牌验证码,填 24680
 //   delta    密码错误,登录失败
 // UU 发货:「获取 Token」用短信登录,手机号随便填 11 位、验证码随便填,拿到的演示 token 在 UU 侧绑定的是 alpha 的 SteamID。
-// C5 扫货:app-key 随便填(bad 开头的会被拒);假平台有 500 元余额和四个箱子的在售,每次查行情可能在原价附近补货。
+// C5 扫货:app-key 随便填(bad 开头的会被拒);假平台有 500 元余额和四个箱子的在售,每次查行情可能在原价附近补货;
+// 绑了两个 Steam 账号:alpha(登录后自动取交易链接)和一个交易助手(选它时要贴交易链接)。
 // 删掉那个目录就回到初始状态。端口 PORT、口令 APP_PASSWORD 可改。前端要先在 web/ 下构建(npm run build),开发时用 web/ 下的 npm run dev。
 
 import {spawn} from 'node:child_process';
@@ -50,6 +51,11 @@ const c5ScenarioFile = join(root, 'fake-c5.json');
 writeFileSync(c5ScenarioFile, JSON.stringify({
 	balance: 500,
 	restock: true,
+	// C5 上绑定的账号:alpha 在账户管理里(登录后自动取交易链接);交易助手不在,选它时要贴一次交易链接
+	steamAccounts: [
+		{steamId: '76561190100005555', nickname: '演示收货号', username: 'alpha', autoType: 0, accountStatus: 1},
+		{steamId: '76561198012345678', nickname: '演示交易助手', username: 'c5_helper', autoType: 2, accountStatus: 1}
+	],
 	items: {
 		'Kilowatt Case': {listings: [0.62, 0.64, 0.66, 0.7, 0.72], purchaseMax: 0.58},
 		'Dreams & Nightmares Case': {listings: [6.1, 6.2, 6.35], purchaseMax: 5.9},
