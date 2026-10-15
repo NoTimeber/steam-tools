@@ -3,7 +3,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {
 	budgetText, dirtyFields, draftPayload, draftsDirty, formatTime, itemLabel, itemStatus, money, newDraft, purchaseStatus, removedNames, sweepBlocker,
-	sweepConfirmText, toDrafts, describeTradeUrl, priceText, receiverC5Note, receiverText
+	sweepConfirmText, toDrafts, describeTradeUrl, priceText, receiverC5Note, receiverOptionLabel, receiverText
 } from './c5.ts';
 import type {C5Receivers, C5Settings, C5WatchItem} from './c5.ts';
 
@@ -126,4 +126,11 @@ test('交易链接是谁的:按账号 id(SteamID 低 32 位)对本工具的账�
 	assert.deepEqual(receiverC5Note({...mine!, c5: {steamId: alpha, nickname: '', status: '暂挂'}}), {text: 'C5 上状态:暂挂', ok: false});
 	assert.equal(describeTradeUrl('https://example.com/?partner=1', receivers), null);
 	assert.equal(receiverText(null), '未设置');
+});
+
+test('收货账号下拉的一项:账号名(昵称),只有 C5 上没绑定的才标出来', () => {
+	const account = {account: 'alpha', steamId: '76561198152000001', personaName: '阿尔法', c5Bound: true};
+	assert.equal(receiverOptionLabel(account), 'alpha(阿尔法)');
+	assert.equal(receiverOptionLabel({...account, personaName: '', c5Bound: false}), 'alpha · C5 未绑定');
+	assert.equal(receiverOptionLabel({...account, c5Bound: null}), 'alpha(阿尔法)', '没查 C5 不下结论');
 });

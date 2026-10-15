@@ -189,6 +189,11 @@ export function describeTradeUrl(tradeUrl: string, receivers: C5Receivers | null
 	};
 }
 
+/** 收货账号下拉的一项:「alpha(昵称)」,C5 上没绑定的才标出来 */
+export function receiverOptionLabel(account: C5ReceiverAccount): string {
+	return `${account.account}${account.personaName ? `(${account.personaName})` : ''}${account.c5Bound === false ? ' · C5 未绑定' : ''}`;
+}
+
 /** 收货账号一行字:「alpha(昵称) · SteamID 7656…」;不是本工具的账号只给 SteamID */
 export function receiverText(receiver: C5Receiver | null): string {
 	if (!receiver) {

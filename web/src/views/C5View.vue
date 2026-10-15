@@ -9,12 +9,12 @@ import type {VNodeChild} from 'vue';
 import {errorText} from '../api/http.ts';
 import {
 	ASSET_TYPE_OPTIONS, budgetText, DELIVERY_OPTIONS, dirtyFields, formatTime, itemLabel, itemStatus, money, priceText, purchaseStatus, receiverC5Note,
-	receiverText, removedNames, RUN_LABELS, sweepBlocker, sweepConfirmText
+	receiverOptionLabel, receiverText, removedNames, RUN_LABELS, sweepBlocker, sweepConfirmText
 } from '../lib/c5.ts';
-import type {C5NameOption, C5Purchase, C5RunState, DraftField, DraftRow} from '../lib/c5.ts';
+import type {C5NameOption, C5Purchase, C5ReceiverAccount, C5RunState, DraftField, DraftRow} from '../lib/c5.ts';
 import {
-	addDraft, c5, checkConnection, dirty, discardDrafts, enterC5, leaveC5, refreshOrders, removeDraft, resolvePurchase,
-	saveWatchlist, searchNames, serverItems, setRun
+	addDraft, c5, checkConnection, dirty, discardDrafts, enterC5, fetchReceivers, leaveC5, refreshOrders, removeDraft, resolvePurchase,
+	saveWatchlist, searchNames, serverItems, setRun, switchReceiver
 } from '../stores/c5.ts';
 import ListingsModal from './c5/ListingsModal.vue';
 import SettingsModal from './c5/SettingsModal.vue';
@@ -31,6 +31,7 @@ function warnUnsaved(event: BeforeUnloadEvent): void {
 
 onMounted(() => {
 	enterC5();
+	loadReceivers();
 	window.addEventListener('beforeunload', warnUnsaved);
 });
 onUnmounted(() => {
@@ -44,8 +45,47 @@ const labelOf = (name: string) => itemLabel(viewByName.value.get(name) ?? {name}
 const removed = computed(() => removedNames(c5.drafts, serverItems.value).map(labelOf));
 
 const settingsOpen = ref(false);
-const receiverNote = computed(() => receiverC5Note(state.value?.receiver ?? null));
 const listingsName = ref('');
+
+// ===== 收货账号:顶栏下拉,从本工具里登录着的账号选,选中马上取交易链接并保存 =====
+const receiverAccounts = ref<C5ReceiverAccount[]>([]);
+const receiversLoading = ref(false);
+const switchingReceiver = ref(false);
+const receiverNote = computed(() => receiverC5Note(state.value?.receiver ?? null));
+
+async function loadReceivers(): Promise<void> {
+	receiversLoading.value = true;
+	try {
+		receiverAccounts.value = (await fetchReceivers()).accounts;
+	} catch {
+		// 下拉打开时会再读;读不到就只能在设置里贴链接
+	} finally {
+		receiversLoading.value = false;
+	}
+}
+
+const receiverOptions = computed(() => receiverAccounts.value.map(account => ({value: account.account, label: receiverOptionLabel(account)})));
+/** 当前收货账号是下拉里的哪一个;手贴的别人的链接不在下拉里,显示成占位文字 */
+const receiverValue = computed(() => {
+	const account = state.value?.receiver?.account;
+	return account && receiverAccounts.value.some(entry => entry.account === account) ? account : null;
+});
+const receiverPlaceholder = computed(() => (state.value?.receiver ? receiverText(state.value.receiver) : '选收货账号'));
+
+async function pickReceiver(account: string | null): Promise<void> {
+	if (!account || account === receiverValue.value) {
+		return;
+	}
+	switchingReceiver.value = true;
+	try {
+		await switchReceiver(account);
+		message.success(`收货账号已改为 ${account}`);
+	} catch (err) {
+		message.error('换收货账号失败:' + errorText(err));
+	} finally {
+		switchingReceiver.value = false;
+	}
+}
 
 const cycleText = computed(() => {
 	const value = state.value;
@@ -73,6 +113,10 @@ function changeRun(next: C5RunState): void {
 	if (!value || next === value.run) return;
 	if (next === 'stopped') {
 		doRun(next);
+		return;
+	}
+	if (value.configured && !value.settings.tradeUrl) {
+		message.warning('不能开始自动扫货:还没选收货账号,先在页面顶部选');
 		return;
 	}
 	const blocker = value.configured ? sweepBlocker(value.settings) : '没填 C5 app-key';
@@ -430,9 +474,26 @@ async function copyLogs(): Promise<void> {
 					<span>已花 / 预算:{{ state ? budgetText(state.budget) : '-' }}</span>
 					<span>已买:{{ state?.budget.qty ?? 0 }} 件</span>
 					<span>C5 余额:{{ money(state?.balance?.value) }}</span>
-					<span>
-						收货账号:<a class="receiver-link" :title="state?.settings.tradeUrl || '点设置里选收货账号'" @click="settingsOpen = true">{{ receiverText(state?.receiver ?? null) }}</a>
-						<NTag v-if="receiverNote" size="small" :bordered="false" :type="receiverNote.ok ? 'success' : 'warning'" class="receiver-tag">{{ receiverNote.text }}</NTag>
+					<span class="receiver">
+						收货账号:
+						<NSelect
+							class="receiver-select"
+							size="tiny"
+							:value="receiverValue"
+							:options="receiverOptions"
+							:placeholder="receiverPlaceholder"
+							:loading="receiversLoading || switchingReceiver"
+							:disabled="switchingReceiver"
+							:consistent-menu-width="false"
+							:title="state?.receiver ? receiverText(state.receiver) : ''"
+							@update:show="(open: boolean) => open && loadReceivers()"
+							@update:value="pickReceiver"
+						>
+							<template #empty>
+								<span class="muted">没有登录着的账号,先在「账户管理」里登录</span>
+							</template>
+						</NSelect>
+						<NTag v-if="receiverNote && !receiverNote.ok" size="small" :bordered="false" type="warning">{{ receiverNote.text }}</NTag>
 					</span>
 					<span>{{ cycleText }}</span>
 				</div>
@@ -558,13 +619,14 @@ async function copyLogs(): Promise<void> {
 	font-size: 12px;
 }
 
-.receiver-link {
-	cursor: pointer;
-	text-decoration: underline dotted;
+.receiver {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
 }
 
-.receiver-tag {
-	margin-left: 4px;
+.receiver-select {
+	width: 220px;
 }
 
 .price-note {

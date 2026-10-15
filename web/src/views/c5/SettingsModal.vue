@@ -1,14 +1,12 @@
 <script setup lang="ts">
-// C5 扫货设置:app-key(只显示后 4 位,留空不改)、收货账号、策略、风控和轮询。自动扫货都是真实下单,没有模拟。
-// 收货账号:从本工具里登录着的账号里选,自动取它的交易链接;也可以直接贴别的账号的交易链接。下面一行显示链接是谁的。
+// C5 扫货设置:app-key(只显示后 4 位,留空不改)、交易链接、策略、风控和轮询。自动扫货都是真实下单,没有模拟。
+// 收货账号一般在主页面顶部直接选;这里只给不是本工具里的账号贴交易链接,下面一行显示链接是谁的。
 import {computed, reactive, ref, watch} from 'vue';
-import {
-	NAlert, NButton, NCard, NCheckbox, NForm, NFormItem, NInput, NInputNumber, NModal, NRadioButton, NRadioGroup, NSelect, NSpace, NTag, useMessage
-} from 'naive-ui';
+import {NAlert, NButton, NCard, NCheckbox, NForm, NFormItem, NInput, NInputNumber, NModal, NRadioButton, NRadioGroup, NSpace, NTag, useMessage} from 'naive-ui';
 import {errorText} from '../../api/http.ts';
 import {describeTradeUrl, receiverC5Note, receiverText} from '../../lib/c5.ts';
 import type {C5Receivers, C5Settings} from '../../lib/c5.ts';
-import {c5, fetchReceivers, fetchTradeUrl, saveSettings} from '../../stores/c5.ts';
+import {c5, fetchReceivers, saveSettings} from '../../stores/c5.ts';
 
 const props = defineProps<{show: boolean}>();
 const emit = defineEmits<{close: []}>();
@@ -42,46 +40,20 @@ watch(() => props.show, open => {
 	}
 });
 
-// ===== 收货账号 =====
+// ===== 交易链接是谁的(认账号、看 C5 绑定要用账号列表) =====
 const receivers = ref<C5Receivers | null>(null);
-const receiversLoading = ref(false);
-const fetchingAccount = ref('');
 
 async function loadReceivers(): Promise<void> {
-	receiversLoading.value = true;
 	try {
 		receivers.value = await fetchReceivers();
-	} catch (err) {
-		message.error('读取账号失败:' + errorText(err));
-	} finally {
-		receiversLoading.value = false;
+	} catch {
+		// 认不出账号就只显示 SteamID
 	}
 }
-
-const accountOptions = computed(() => (receivers.value?.accounts ?? []).map(account => ({
-	value: account.account,
-	label: [account.account, account.personaName, account.c5Bound == null ? '' : account.c5Bound ? 'C5 已绑定' : 'C5 未绑定'].filter(Boolean).join(' · ')
-})));
 
 /** 当前填的链接是谁的(随输入即时变) */
 const current = computed(() => describeTradeUrl(form.tradeUrl.trim(), receivers.value));
 const currentNote = computed(() => receiverC5Note(current.value));
-
-async function pickAccount(account: string | null): Promise<void> {
-	if (!account) {
-		return;
-	}
-	fetchingAccount.value = account;
-	try {
-		const result = await fetchTradeUrl(account);
-		form.tradeUrl = result.tradeUrl;
-		message.success(`已取到 ${account} 的交易链接,点保存后生效`);
-	} catch (err) {
-		message.error(errorText(err));
-	} finally {
-		fetchingAccount.value = '';
-	}
-}
 
 function close(): void {
 	if (!form.saving) {
@@ -134,33 +106,16 @@ async function save(): Promise<void> {
 						<span class="muted hint">等同于账号凭证,泄露后别人能直接用你的余额下单。加密存在服务器数据库里,浏览器拿不到原文。</span>
 					</div>
 				</NFormItem>
-				<NFormItem label="收货 Steam 账号(买到的饰品发到这个账号,开始扫货前必填)">
+				<NFormItem label="收货账号的交易链接(一般直接在主页面顶部选账号;不是本工具里的账号才在这里贴)">
 					<div class="stack">
-						<NSelect
-							:value="null"
-							:options="accountOptions"
-							:loading="receiversLoading || !!fetchingAccount"
-							:disabled="!!fetchingAccount"
-							placeholder="从本工具里登录着的账号选,自动取它的交易链接"
-							@update:value="pickAccount"
-						>
-							<template #empty>
-								<span class="muted">没有登录着的账号(先在「账户管理」里登录),或者在下面直接贴交易链接</span>
-							</template>
-						</NSelect>
-						<NInput v-model:value="form.tradeUrl" placeholder="或者贴交易链接:https://steamcommunity.com/tradeoffer/new/?partner=...&token=..." :input-props="{spellcheck: false}" />
+						<NInput v-model:value="form.tradeUrl" placeholder="https://steamcommunity.com/tradeoffer/new/?partner=...&token=..." :input-props="{spellcheck: false}" />
 						<div v-if="form.tradeUrl.trim()" class="receiver-line">
 							<template v-if="current">
 								<span>发到:{{ receiverText(current) }}</span>
-								<NTag v-if="currentNote" size="small" :bordered="false" :type="currentNote.ok ? 'success' : 'warning'">{{ currentNote.text }}</NTag>
-								<span v-if="!current.account" class="muted">(不是本工具里的账号)</span>
+								<NTag v-if="currentNote && !currentNote.ok" size="small" :bordered="false" type="warning">{{ currentNote.text }}</NTag>
 							</template>
 							<span v-else class="warn-text">不是交易链接</span>
 						</div>
-						<span v-if="receivers?.boundError" class="muted hint">查 C5 绑定的账号失败:{{ receivers.boundError }}</span>
-						<span v-else-if="receivers?.bound.length" class="muted hint">
-							C5 上绑定的 Steam 账号:{{ receivers.bound.map(account => `${account.nickname || '-'}(${account.steamId},${account.status})`).join('、') }}
-						</span>
 					</div>
 				</NFormItem>
 				<div class="grid">

@@ -138,6 +138,14 @@ export async function fetchTradeUrl(account: string): Promise<{tradeUrl: string;
 	return api.post('/api/c5/trade-url', {account});
 }
 
+/** 主页面换收货账号:取这个账号的交易链接并马上保存(其它设置不动) */
+export async function switchReceiver(account: string): Promise<C5State> {
+	const {tradeUrl} = await fetchTradeUrl(account);
+	const data = await api.post<{state: C5State}>('/api/c5/settings', {tradeUrl});
+	applyState(data.state);
+	return data.state;
+}
+
 export async function fetchListings(name: string): Promise<{name: string; maxPrice: number; listings: C5Listing[]}> {
 	return api.post('/api/c5/listings', {name});
 }
