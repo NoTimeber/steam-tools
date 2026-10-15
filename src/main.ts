@@ -19,6 +19,7 @@ import {createOriginCheck, parseCookieSecure, parseTrustProxy} from './core/http
 import {createVersionCheck} from './core/version-check.ts';
 import {openStore} from './store/index.ts';
 import type {Store} from './store/index.ts';
+import {loadNameDb} from './items/names.ts';
 import {describeGcItem, loadItemsGameSchema} from './items/schema.ts';
 import type {ItemSchema} from './items/schema.ts';
 import {createFingerprintStore} from './steam/fingerprint.ts';
@@ -289,9 +290,10 @@ const wallet = createWalletService({
 	emit: payload => io.emit('wallet:redeem', payload)
 });
 
-// C5 扫货:app-key、设置、监控列表、购买流水在加密库(store.c5);到价自动买,运行状态重启后恢复
+// C5 扫货:app-key、设置、监控列表、购买流水在加密库(store.c5);到价自动买,运行状态重启后恢复;中文名查随包词库 app/data/cs2-names-zh.json.gz
 const c5 = createC5Service({
 	store: store.c5,
+	names: loadNameDb(join(config.appDir, 'data', 'cs2-names-zh.json.gz')),
 	emit: (event, payload) => io.emit(event, payload)
 });
 

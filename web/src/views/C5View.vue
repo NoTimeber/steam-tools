@@ -1,18 +1,20 @@
 <script setup lang="ts">
-// C5 扫货:顶栏是运行状态(停止 / 只看行情 / 自动扫货)和汇总;中间是监控列表(直接改目标价、数量、花费上限,
+// C5 扫货:顶栏是运行状态(停止 / 自动扫货,真实下单)和汇总;中间是监控列表(直接改目标价、数量、花费上限,
 // 改过没保存的格子标黄,点「保存」后下一轮按新价扫);下面是购买流水和运行日志。设置、查在售在弹窗里。
+// 添加饰品输中文或英文搜(C5 接口只认 Steam 英文名,后端词库把中文换成英文名),表格里显示中文名。
 import {computed, h, onMounted, onUnmounted, reactive, ref} from 'vue';
-import {NAlert, NButton, NCard, NDataTable, NInput, NInputNumber, NRadioButton, NRadioGroup, NSelect, NSpace, NTag, useDialog, useMessage} from 'naive-ui';
-import type {DataTableColumns} from 'naive-ui';
+import {NAlert, NButton, NCard, NDataTable, NInputNumber, NRadioButton, NRadioGroup, NSelect, NSpace, NTag, useDialog, useMessage} from 'naive-ui';
+import type {DataTableColumns, SelectOption} from 'naive-ui';
 import type {VNodeChild} from 'vue';
 import {errorText} from '../api/http.ts';
 import {
-	ASSET_TYPE_OPTIONS, budgetText, DELIVERY_OPTIONS, dirtyFields, formatTime, itemStatus, liveConfirmText, money, purchaseStatus, removedNames, RUN_LABELS
+	ASSET_TYPE_OPTIONS, budgetText, DELIVERY_OPTIONS, dirtyFields, formatTime, itemLabel, itemStatus, money, purchaseStatus, removedNames, RUN_LABELS,
+	sweepBlocker, sweepConfirmText
 } from '../lib/c5.ts';
-import type {C5Purchase, C5RunState, DraftField, DraftRow} from '../lib/c5.ts';
+import type {C5NameOption, C5Purchase, C5RunState, DraftField, DraftRow} from '../lib/c5.ts';
 import {
-	addDraft, c5, checkConnection, clearDryPurchases, dirty, discardDrafts, enterC5, leaveC5, refreshOrders, removeDraft, resolvePurchase,
-	saveWatchlist, serverItems, setRun
+	addDraft, c5, checkConnection, dirty, discardDrafts, enterC5, leaveC5, refreshOrders, removeDraft, resolvePurchase,
+	saveWatchlist, searchNames, serverItems, setRun
 } from '../stores/c5.ts';
 import ListingsModal from './c5/ListingsModal.vue';
 import SettingsModal from './c5/SettingsModal.vue';
@@ -37,9 +39,9 @@ onUnmounted(() => {
 });
 
 const state = computed(() => c5.state);
-const live = computed(() => state.value?.settings.mode === 'live');
 const viewByName = computed(() => new Map((state.value?.items ?? []).map(item => [item.name, item])));
-const removed = computed(() => removedNames(c5.drafts, serverItems.value));
+const labelOf = (name: string) => itemLabel(viewByName.value.get(name) ?? {name});
+const removed = computed(() => removedNames(c5.drafts, serverItems.value).map(labelOf));
 
 const settingsOpen = ref(false);
 const listingsName = ref('');
@@ -68,29 +70,30 @@ async function doRun(next: C5RunState): Promise<void> {
 function changeRun(next: C5RunState): void {
 	const value = state.value;
 	if (!value || next === value.run) return;
-	if (next !== 'stopped' && !value.configured) {
-		message.warning('先在「设置」里填 C5 app-key');
+	if (next === 'stopped') {
+		doRun(next);
+		return;
+	}
+	const blocker = value.configured ? sweepBlocker(value.settings) : '没填 C5 app-key';
+	if (blocker) {
+		message.warning(`不能开始自动扫货:${blocker},先在「设置」里填`);
 		settingsOpen.value = true;
 		return;
 	}
 	// 扫货按已保存的列表下单:页面上改了价没保存就开扫,会按旧价买
-	if (next === 'sweeping' && dirty.value) {
+	if (dirty.value) {
 		message.warning('监控列表有改动还没保存,先「保存」或「放弃修改」再开始自动扫货');
 		return;
 	}
-	if (next === 'sweeping' && value.settings.mode === 'live') {
-		dialog.warning({
-			title: '开始实盘扫货',
-			content: () => h('div', {class: 'pre'}, liveConfirmText(value.settings, serverItems.value.length)),
-			positiveText: '开始',
-			negativeText: '取消',
-			onPositiveClick: () => {
-				doRun(next);
-			}
-		});
-		return;
-	}
-	doRun(next);
+	dialog.warning({
+		title: '开始自动扫货(真实下单)',
+		content: () => h('div', {class: 'pre'}, sweepConfirmText(value.settings, serverItems.value.length)),
+		positiveText: '开始',
+		negativeText: '取消',
+		onPositiveClick: () => {
+			doRun(next);
+		}
+	});
 }
 
 // ===== 检查连接 =====
@@ -151,14 +154,20 @@ function selectInput(row: DraftRow, field: 'delivery' | 'assetType', options: Ar
 	}));
 }
 
+/** 中文名一行,英文名(C5 接口用的)小字一行;词库里没有的只有英文名 */
+function nameCell(row: DraftRow): VNodeChild {
+	return h('div', {class: 'item-name', title: row.name}, [
+		h('div', {class: 'item-zh'}, itemLabel(row)),
+		row.zh ? h('div', {class: 'item-en muted'}, row.name) : null
+	]);
+}
+
 const columns: DataTableColumns<DraftRow> = [
 	{
-		title: '饰品(Steam 英文名)',
+		title: '饰品',
 		key: 'name',
-		width: 230,
-		render: row => (row.origName == null
-			? cell(row, 'name', h(NInput, {size: 'small', value: row.name, placeholder: '如 Kilowatt Case', 'onUpdate:value': (value: string) => { row.name = value; }}))
-			: h('span', {class: 'item-name', title: row.name}, row.name))
+		width: 260,
+		render: row => (row.origName == null ? cell(row, 'name', nameCell(row)) : nameCell(row))
 	},
 	{
 		title: '状态',
@@ -224,20 +233,73 @@ const columns: DataTableColumns<DraftRow> = [
 	}
 ];
 
-const newItem = reactive({name: '', maxPrice: null as number | null, maxQty: null as number | null});
+// ===== 添加饰品:输中文或英文,停 200 毫秒后向后端搜,从下拉里选 =====
+const newItem = reactive({maxPrice: null as number | null, maxQty: null as number | null});
+const nameSearch = reactive({query: '', loading: false, options: [] as C5NameOption[], picked: null as C5NameOption | null});
+let searchSeq = 0;
+let searchTimer: number | undefined;
+
+const nameOptions = computed<SelectOption[]>(() => {
+	const {picked, options} = nameSearch;
+	const list = picked && !options.some(option => option.name === picked.name) ? [picked, ...options] : options;
+	return list.map(option => ({value: option.name, label: option.zh ?? option.name, item: option}));
+});
+
+function onSearch(query: string): void {
+	window.clearTimeout(searchTimer);
+	const q = query.trim();
+	nameSearch.query = q;
+	const seq = ++searchSeq;
+	if (!q) {
+		nameSearch.options = [];
+		nameSearch.loading = false;
+		return;
+	}
+	nameSearch.loading = true;
+	searchTimer = window.setTimeout(async () => {
+		try {
+			const options = await searchNames(q);
+			if (seq === searchSeq) {
+				nameSearch.options = options;
+			}
+		} catch (err) {
+			if (seq === searchSeq) {
+				nameSearch.options = [];
+				message.error('搜索饰品失败:' + errorText(err));
+			}
+		} finally {
+			if (seq === searchSeq) {
+				nameSearch.loading = false;
+			}
+		}
+	}, 200);
+}
+
+function pickName(value: string | null, option: SelectOption | null): void {
+	nameSearch.picked = value && option ? option.item as C5NameOption : null;
+}
+
+function renderNameOption(option: SelectOption): VNodeChild {
+	const item = option.item as C5NameOption;
+	const small = {class: 'muted', style: 'font-size: 12px; margin-left: 8px'};
+	return item.zh
+		? h('span', [item.zh, h('span', small, item.name)])
+		: h('span', [`按英文名添加:${item.name}`, h('span', small, '词库里没有,要和 Steam 英文名完全一致')]);
+}
 
 function add(): void {
-	const name = newItem.name.trim();
-	if (!name) {
-		message.warning('填饰品的 Steam 英文名(marketHashName),要和市场上的完全一致');
+	const picked = nameSearch.picked;
+	if (!picked) {
+		message.warning('先在饰品框里输中文或英文名(如 千瓦、红线 久经),从下拉里选一个');
 		return;
 	}
-	if (c5.drafts.some(row => row.name.trim() === name)) {
-		message.warning(`${name} 已经在列表里了`);
+	if (c5.drafts.some(row => row.name.trim() === picked.name)) {
+		message.warning(`${itemLabel(picked)} 已经在列表里了`);
 		return;
 	}
-	addDraft({name, maxPrice: newItem.maxPrice, maxQty: newItem.maxQty});
-	newItem.name = '';
+	addDraft({name: picked.name, zh: picked.zh, maxPrice: newItem.maxPrice, maxQty: newItem.maxQty});
+	nameSearch.picked = null;
+	nameSearch.options = [];
 	newItem.maxPrice = null;
 	newItem.maxQty = null;
 }
@@ -269,7 +331,7 @@ async function sync(): Promise<void> {
 function confirmResolve(purchase: C5Purchase, status: 'ok' | 'failed'): void {
 	dialog.warning({
 		title: status === 'ok' ? '标记为已成交' : '标记为未成交',
-		content: `${purchase.name} 单号 ${purchase.outTradeNo}:先去 C5 官网核对这笔单的真实结果。`
+		content: `${itemLabel(purchase)} 单号 ${purchase.outTradeNo}:先去 C5 官网核对这笔单的真实结果。`
 			+ (status === 'ok' ? '标记已成交后会继续占用数量和预算。' : '标记未成交后会释放数量和预算,可能再买一件。'),
 		positiveText: '标记',
 		negativeText: '取消',
@@ -284,26 +346,9 @@ function confirmResolve(purchase: C5Purchase, status: 'ok' | 'failed'): void {
 	});
 }
 
-function confirmClearDry(): void {
-	dialog.warning({
-		title: '清空模拟记录',
-		content: '删掉全部模拟买入记录,模拟的数量和预算从零算。实盘流水不受影响。',
-		positiveText: '清空',
-		negativeText: '取消',
-		onPositiveClick: async () => {
-			try {
-				await clearDryPurchases();
-				message.success('已清空模拟记录');
-			} catch (err) {
-				message.error('清空失败:' + errorText(err));
-			}
-		}
-	});
-}
-
 const purchaseColumns: DataTableColumns<C5Purchase> = [
 	{title: '时间', key: 'ts', width: 130, render: purchase => formatTime(purchase.ts)},
-	{title: '饰品', key: 'name', minWidth: 150, ellipsis: {tooltip: true}},
+	{title: '饰品', key: 'name', minWidth: 150, ellipsis: {tooltip: true}, render: purchase => itemLabel(purchase)},
 	{title: '价格', key: 'cost', width: 70, render: purchase => money(purchase.cost)},
 	{
 		title: '状态',
@@ -320,7 +365,6 @@ const purchaseColumns: DataTableColumns<C5Purchase> = [
 		minWidth: 150,
 		ellipsis: {tooltip: true},
 		render: purchase => {
-			if (purchase.mode === 'dry') return h('span', {class: 'muted'}, '模拟');
 			const parts = [purchase.orderId || '-', purchase.orderStatusName || (purchase.orderStatus != null ? `状态 ${purchase.orderStatus}` : '')].filter(Boolean);
 			return h('span', {title: `商户单号 ${purchase.outTradeNo}${purchase.error ? '\n' + purchase.error : ''}`}, parts.join(' · '));
 		}
@@ -329,7 +373,7 @@ const purchaseColumns: DataTableColumns<C5Purchase> = [
 		title: '',
 		key: 'actions',
 		width: 140,
-		render: purchase => (purchase.status === 'unknown' && purchase.mode === 'live'
+		render: purchase => (purchase.status === 'unknown'
 			? h(NSpace, {size: 4, wrap: false}, () => [
 				h(NButton, {size: 'tiny', secondary: true, onClick: () => confirmResolve(purchase, 'ok')}, () => '标记成交'),
 				h(NButton, {size: 'tiny', secondary: true, onClick: () => confirmResolve(purchase, 'failed')}, () => '标记失败')
@@ -358,18 +402,16 @@ async function copyLogs(): Promise<void> {
 			<div>
 				<h1>C5 扫货</h1>
 				<div class="module-counts">
-					<span>模式:<NTag size="small" :bordered="false" :type="live ? 'error' : 'default'">{{ live ? '实盘' : '模拟' }}</NTag></span>
 					<span>策略:{{ state?.settings.strategy === 'quick' ? '快速购买' : '按在售列表' }}</span>
 					<span>已花 / 预算:{{ state ? budgetText(state.budget) : '-' }}</span>
 					<span>已买:{{ state?.budget.qty ?? 0 }} 件</span>
-					<span v-if="live">C5 余额:{{ money(state?.balance?.value) }}</span>
+					<span>C5 余额:{{ money(state?.balance?.value) }}</span>
 					<span>{{ cycleText }}</span>
 				</div>
 			</div>
 			<NSpace align="center">
 				<NRadioGroup :value="state?.run ?? 'stopped'" :disabled="!state || runBusy" size="small" @update:value="changeRun">
 					<NRadioButton value="stopped">{{ RUN_LABELS.stopped }}</NRadioButton>
-					<NRadioButton value="watching">{{ RUN_LABELS.watching }}</NRadioButton>
 					<NRadioButton value="sweeping">{{ RUN_LABELS.sweeping }}</NRadioButton>
 				</NRadioGroup>
 				<NButton :loading="checking" @click="check">检查连接</NButton>
@@ -386,7 +428,7 @@ async function copyLogs(): Promise<void> {
 			<NAlert v-if="state.run !== 'stopped' && state.cycle.error" type="error" :bordered="false">
 				本轮失败(连续 {{ state.cycle.errors }} 次,自动退避重试):{{ state.cycle.error }}
 			</NAlert>
-			<NAlert v-if="live && state.unknown > 0" type="warning" :bordered="false">
+			<NAlert v-if="state.unknown > 0" type="warning" :bordered="false">
 				有 {{ state.unknown }} 笔下单结果未知,先按已花费占着额度,正在自动对账;一直对不上的,去 C5 官网核对后在购买流水里手工标记。
 			</NAlert>
 			<NAlert v-if="state.run !== 'stopped' && state.cycle.done && state.items.length" type="info" :bordered="false">
@@ -416,7 +458,24 @@ async function copyLogs(): Promise<void> {
 				</template>
 			</NDataTable>
 			<div class="add-row">
-				<NInput v-model:value="newItem.name" size="small" placeholder="饰品 Steam 英文名(marketHashName),如 Kilowatt Case" @keyup.enter="add" />
+				<NSelect
+					size="small"
+					filterable
+					remote
+					clearable
+					:value="nameSearch.picked?.name ?? null"
+					:options="nameOptions"
+					:loading="nameSearch.loading"
+					:render-label="renderNameOption"
+					:consistent-menu-width="false"
+					placeholder="搜饰品:输中文或英文,如 千瓦、红线 久经、Kilowatt"
+					@search="onSearch"
+					@update:value="pickName"
+				>
+					<template #empty>
+						<span class="muted">{{ nameSearch.query ? (nameSearch.loading ? '搜索中…' : '没搜到;新出的饰品可以直接输完整英文名') : '输中文或英文名搜索' }}</span>
+					</template>
+				</NSelect>
 				<NInputNumber v-model:value="newItem.maxPrice" size="small" :min="0" :step="0.01" :show-button="false" placeholder="目标价" />
 				<NInputNumber v-model:value="newItem.maxQty" size="small" :min="1" :precision="0" :show-button="false" placeholder="数量上限" />
 				<NButton size="small" @click="add">添加</NButton>
@@ -424,14 +483,13 @@ async function copyLogs(): Promise<void> {
 		</NCard>
 
 		<div class="c5-bottom">
-			<NCard size="small" :bordered="false" :title="`购买流水(${live ? '实盘' : '模拟'},最近 50 笔)`">
+			<NCard size="small" :bordered="false" title="购买流水(最近 50 笔)">
 				<template #header-extra>
-					<NButton v-if="live" size="small" :loading="syncing" title="立刻向平台查一遍全部未完结订单(平时每轮自动查几笔)" @click="sync">同步订单</NButton>
-					<NButton v-else size="small" :disabled="!state?.purchases.length" @click="confirmClearDry">清空模拟记录</NButton>
+					<NButton size="small" :loading="syncing" :disabled="!state?.configured" title="立刻向平台查一遍全部未完结订单(平时每轮自动查几笔)" @click="sync">同步订单</NButton>
 				</template>
 				<NDataTable size="small" :columns="purchaseColumns" :data="state?.purchases ?? []" :row-key="(row: C5Purchase) => row.outTradeNo" :max-height="360" :scroll-x="720">
 					<template #empty>
-						<span class="muted">{{ live ? '还没有实盘买入' : '还没有模拟买入。模拟模式到价只记账不花钱' }}</span>
+						<span class="muted">还没有买入</span>
 					</template>
 				</NDataTable>
 			</NCard>
@@ -449,7 +507,7 @@ async function copyLogs(): Promise<void> {
 		</div>
 
 		<SettingsModal :show="settingsOpen" @close="settingsOpen = false" />
-		<ListingsModal :name="listingsName" @close="listingsName = ''" />
+		<ListingsModal :name="listingsName" :label="labelOf(listingsName)" @close="listingsName = ''" />
 	</div>
 </template>
 
@@ -528,7 +586,23 @@ async function copyLogs(): Promise<void> {
 }
 
 :deep(.item-name) {
+	line-height: 1.3;
+	min-width: 0;
+}
+
+:deep(.item-zh),
+:deep(.item-en) {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+:deep(.item-zh) {
 	font-weight: 500;
+}
+
+:deep(.item-en) {
+	font-size: 11px;
 }
 
 :deep(.price-hit) {

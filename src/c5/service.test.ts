@@ -8,15 +8,19 @@ import type {Vault} from '../core/vault.ts';
 import {createC5Store} from '../store/c5.ts';
 import {MIGRATIONS} from '../store/schema.ts';
 import {createSettingsStore} from '../store/settings.ts';
+import {createNameDb} from '../items/names.ts';
+import type {NameDb} from '../items/names.ts';
 import {C5Error} from './client.ts';
 import type {C5Api} from './client.ts';
-import {buildItems, normalizeSettings} from './config.ts';
+import {buildItems, DEFAULT_SETTINGS, normalizeSettings, sweepBlocker} from './config.ts';
 import {createC5Service, maskAppKey} from './index.ts';
 import type {C5LogLine} from './index.ts';
 
 const KEY = 'c5-app-key-0123456789';
 const TRADE_URL = 'https://steamcommunity.com/tradeoffer/new/?partner=123456&token=abcdefgh';
 const ITEM = {name: 'Kilowatt Case', maxPrice: 5.5, maxQty: 3};
+/** 能开始自动扫货的最少设置 */
+const READY = {appKey: KEY, tradeUrl: TRADE_URL, maxTotalSpend: 50};
 
 function memoryDb(): {db: Db; vault: Vault} {
 	const db = openDatabase(':memory:');
@@ -85,7 +89,7 @@ function fakeApi(overrides: Partial<C5Api> = {}): C5Api & {calls: string[]} {
 	};
 }
 
-function setup({api = fakeApi(), db = memoryDb()}: {api?: C5Api; db?: {db: Db; vault: Vault}} = {}) {
+function setup({api = fakeApi(), db = memoryDb(), names}: {api?: C5Api; db?: {db: Db; vault: Vault}; names?: NameDb} = {}) {
 	const settingsStore = createSettingsStore(db.db);
 	const store = createC5Store(db.db, db.vault, settingsStore);
 	const timers = manualTimers();
@@ -94,6 +98,7 @@ function setup({api = fakeApi(), db = memoryDb()}: {api?: C5Api; db?: {db: Db; v
 	const clock = {now: 1_700_000_000_000};
 	const service = createC5Service({
 		store,
+		names,
 		emit: (event, line) => emitted.push(line),
 		createClient: options => {
 			clients.push(options);
@@ -110,19 +115,19 @@ const statusOf = (err: unknown) => (err as {statusCode?: number}).statusCode;
 
 // ===== 设置和监控列表的校验 =====
 
-test('设置:默认模拟;实盘要交易链接和总预算;数字范围', () => {
-	assert.equal(normalizeSettings({}).mode, 'dry');
-	assert.throws(() => normalizeSettings({mode: 'live', maxTotalSpend: 100}), /交易链接/);
-	assert.throws(() => normalizeSettings({mode: 'live', tradeUrl: TRADE_URL}), /总预算/);
+test('设置:数字范围、交易链接格式;开始扫货前要有交易链接和总预算;旧版本的 mode 忽略', () => {
+	assert.equal(sweepBlocker(normalizeSettings({})), '没填收货账号的交易链接');
+	assert.equal(sweepBlocker(normalizeSettings({tradeUrl: TRADE_URL})), '没设总预算(要大于 0)');
 	assert.throws(() => normalizeSettings({tradeUrl: 'https://steamcommunity.com/id/me'}), /交易链接不对/);
 	assert.throws(() => normalizeSettings({tradeUrl: 'https://steamcommunity.com/tradeoffer/new/?partner=1'}), /交易链接不对/);
 	assert.throws(() => normalizeSettings({pollIntervalSec: 0.5}), /轮询间隔/);
 	assert.throws(() => normalizeSettings({maxBuyPerCycle: 2.5}), /整数/);
 	assert.throws(() => normalizeSettings({strategy: 'fast'}), /策略/);
-	const live = normalizeSettings({mode: 'live', tradeUrl: ` ${TRADE_URL} `, maxTotalSpend: '500', strategy: 'QUICK'});
-	assert.deepEqual([live.mode, live.tradeUrl, live.maxTotalSpend, live.strategy], ['live', TRADE_URL, 500, 'quick']);
+	const ready = normalizeSettings({mode: 'dry', tradeUrl: ` ${TRADE_URL} `, maxTotalSpend: '500', strategy: 'QUICK'});
+	assert.deepEqual(ready, {...DEFAULT_SETTINGS, tradeUrl: TRADE_URL, maxTotalSpend: 500, strategy: 'quick'});
+	assert.equal(sweepBlocker(ready), null);
 	// 没提交的字段沿用当前值
-	assert.equal(normalizeSettings({pollIntervalSec: 5}, live).mode, 'live');
+	assert.equal(normalizeSettings({pollIntervalSec: 5}, ready).tradeUrl, TRADE_URL);
 });
 
 test('监控列表:逐项校验,名字不重复,默认 CS2 / 不限发货 / 普通在售', () => {
@@ -153,11 +158,11 @@ test('app-key 加密存库,状态里只给后 4 位;留空不改,clearAppKey 删
 	assert.equal(state.appKeyMasked, '****6789');
 	assert.ok(!JSON.stringify(state).includes(KEY));
 
-	service.saveSettings({appKey: '', pollIntervalSec: 5});
+	service.saveSettings({appKey: '', pollIntervalSec: 5, tradeUrl: TRADE_URL, maxTotalSpend: 50});
 	assert.equal(service.state().configured, true, '留空不改');
-	service.setRun('watching');
+	service.setRun('sweeping');
 	assert.throws(() => service.saveSettings({appKey: 'another-key-0000', clearAppKey: true, pollIntervalSec: 7}), err => statusOf(err) === 400);
-	assert.deepEqual([service.state().appKeyMasked, service.state().run, service.state().settings.pollIntervalSec], ['****6789', 'watching', 5], '既填新 key 又勾删除:报错,什么都不改');
+	assert.deepEqual([service.state().appKeyMasked, service.state().run, service.state().settings.pollIntervalSec], ['****6789', 'sweeping', 5], '既填新 key 又勾删除:报错,什么都不改');
 	service.saveSettings({clearAppKey: true});
 	assert.deepEqual([service.state().configured, service.state().run], [false, 'stopped']);
 	assert.throws(() => service.saveSettings({appKey: 'has space'}), /空白/);
@@ -167,43 +172,67 @@ test('app-key 加密存库,状态里只给后 4 位;留空不改,clearAppKey 删
 
 // ===== 运行状态 =====
 
-test('运行状态:没有 app-key 不能开;状态存库,重启后恢复并马上跑一轮', async () => {
+test('运行状态:没有 app-key、交易链接、总预算不能开;状态存库,重启后恢复并马上跑一轮', async () => {
 	const db = memoryDb();
 	const first = setup({db});
-	assert.throws(() => first.service.setRun('watching'), err => statusOf(err) === 409);
-	assert.throws(() => first.service.setRun('flying'), err => statusOf(err) === 400);
+	assert.throws(() => first.service.setRun('sweeping'), err => statusOf(err) === 409);
+	assert.throws(() => first.service.setRun('watching'), err => statusOf(err) === 400, '没有只看行情了');
 	first.service.saveSettings({appKey: KEY});
+	assert.throws(() => first.service.setRun('sweeping'), err => statusOf(err) === 400 && /交易链接/.test((err as Error).message));
+	first.service.saveSettings({tradeUrl: TRADE_URL});
+	assert.throws(() => first.service.setRun('sweeping'), err => statusOf(err) === 400 && /总预算/.test((err as Error).message));
+	first.service.saveSettings(READY);
 	first.service.saveWatchlist([ITEM]);
-	first.service.setRun('watching');
+	first.service.setRun('sweeping');
 	assert.equal(first.timers.delay, 0, '开了马上跑');
+	assert.ok(first.emitted.some(line => line.level === 'warn' && line.message === '运行状态:自动扫货(真实下单)'));
+	assert.throws(() => first.service.saveSettings({maxTotalSpend: 0}), err => statusOf(err) === 400 && /正在自动扫货/.test((err as Error).message));
+	assert.equal(first.service.state().settings.maxTotalSpend, 50, '扫货中清空总预算:报错,不改');
 	first.service.stop();
 	assert.equal(first.timers.delay, null, '停服务清掉定时器');
 
 	const second = setup({db});
-	assert.equal(second.service.state().run, 'watching');
+	assert.equal(second.service.state().run, 'sweeping');
 	second.service.start();
 	assert.equal(second.timers.delay, 0);
 	await second.timers.fire();
-	assert.equal(second.service.state().items[0]!.status, 'hit');
-	assert.ok(second.emitted.some(line => line.message.startsWith('恢复上次的运行状态:只看行情')));
+	assert.equal(second.service.state().items[0]!.bought, 2);
+	assert.ok(second.emitted.some(line => line.message.startsWith('恢复上次的运行状态:自动扫货(真实下单)')));
 });
 
-test('模拟切实盘时,正在自动扫货的先降为只看行情', () => {
-	const {service} = setup();
-	service.saveSettings({appKey: KEY});
-	service.setRun('sweeping');
-	const state = service.saveSettings({mode: 'live', tradeUrl: TRADE_URL, maxTotalSpend: 50});
-	assert.deepEqual([state.settings.mode, state.run], ['live', 'watching']);
-	// 实盘下手动开扫可以
-	assert.equal(service.setRun('sweeping').run, 'sweeping');
+test('旧版本的只看行情、模拟扫货升级后不自动恢复;旧版本实盘扫货照常恢复', () => {
+	const legacy = (settings: unknown, run: string) => {
+		const db = memoryDb();
+		const seed = setup({db});
+		seed.store.setAppKey(KEY);
+		createSettingsStore(db.db).set('c5.settings', settings);
+		seed.store.saveRunState(run);
+		const {service, emitted} = setup({db});
+		service.start();
+		return {run: service.state().run, saved: seed.store.loadRunState(), messages: emitted.map(line => line.message)};
+	};
+	const old = {strategy: 'listing', tradeUrl: TRADE_URL, maxTotalSpend: 50};
+
+	const watching = legacy({...old, mode: 'live'}, 'watching');
+	assert.deepEqual([watching.run, watching.saved], ['stopped', 'stopped']);
+	assert.ok(watching.messages.some(message => message.includes('上次的只看行情不再自动恢复')));
+
+	const dry = legacy({...old, mode: 'dry'}, 'sweeping');
+	assert.deepEqual([dry.run, dry.saved], ['stopped', 'stopped']);
+	assert.ok(dry.messages.some(message => message.includes('上次的模拟扫货不再自动恢复')));
+	assert.equal(legacy(null, 'sweeping').run, 'stopped', '没存过设置就是默认的模拟');
+
+	assert.equal(legacy({...old, mode: 'live'}, 'sweeping').run, 'sweeping');
+	assert.equal(legacy(old, 'sweeping').run, 'sweeping', '新版本存的设置没有 mode');
+	assert.equal(legacy({...old, maxTotalSpend: 0}, 'sweeping').run, 'stopped', '设置不全不恢复');
 });
 
 // ===== 轮询 =====
 
-test('模拟扫货:一轮买到目标价以内的,按间隔排下一轮;状态里有行情和已买', async () => {
+test('自动扫货:一轮买到目标价以内的,按间隔排下一轮;状态里有行情和已买', async () => {
 	const api = fakeApi();
 	const {service, timers, clients, emitted} = setup({api});
-	service.saveSettings({appKey: KEY, pollIntervalSec: 4, timeoutSec: 7});
+	service.saveSettings({...READY, pollIntervalSec: 4, timeoutSec: 7});
 	service.saveWatchlist([ITEM]);
 	service.setRun('sweeping');
 	await timers.fire();
@@ -212,20 +241,20 @@ test('模拟扫货:一轮买到目标价以内的,按间隔排下一轮;状态�
 	const state = service.state();
 	assert.equal(state.cycle.n, 1);
 	assert.deepEqual(state.items.map(item => [item.status, item.lowest, item.sellCount, item.purchaseMax, item.bought]), [['hit', 5, 12, 4.6, 2]]);
-	assert.deepEqual(state.purchases.map(p => [p.mode, p.status, p.productId, p.cost]), [['dry', 'ok', '12', 5.2], ['dry', 'ok', '11', 5]]);
+	assert.deepEqual(state.purchases.map(p => [p.mode, p.status, p.productId, p.cost]), [['live', 'ok', '12', 5.2], ['live', 'ok', '11', 5]]);
 	assert.equal(state.budget.qty, 2);
-	assert.ok(emitted.some(line => line.level === 'success' && line.message.startsWith('[模拟] 买入 Kilowatt Case × 2')));
+	assert.ok(emitted.some(line => line.level === 'success' && line.message.startsWith('买入 Kilowatt Case 5.00')));
 	assert.ok(!emitted.some(line => line.level === 'debug'), '行情日志不推到右侧日志');
 	assert.ok(state.logs.some(line => line.level === 'debug' && line.message.includes('最低 5.00')), '但页面上的日志里有');
-	assert.equal(api.calls.includes('batchBuy'), false);
+	assert.equal(api.calls.filter(call => call === 'batchBuy').length, 1);
 });
 
-test('实盘:每分钟查一次余额,这一轮下过单就马上查', async () => {
+test('每分钟查一次余额,这一轮下过单就马上查', async () => {
 	const listings = [{productId: '11', price: 5.0}];
 	const {service, timers, clock} = setup({api: fakeApi({async searchProducts() {
 		return listings;
 	}})});
-	service.saveSettings({appKey: KEY, mode: 'live', tradeUrl: TRADE_URL, maxTotalSpend: 50});
+	service.saveSettings(READY);
 	service.saveWatchlist([ITEM]);
 	service.setRun('sweeping');
 	await timers.fire();
@@ -241,18 +270,6 @@ test('实盘:每分钟查一次余额,这一轮下过单就马上查', async () 
 	assert.equal(service.state().balance!.at, clock.now, '下了单马上查');
 });
 
-test('只看行情不下单;改成自动扫货后下一轮就买', async () => {
-	const {service, timers} = setup();
-	service.saveSettings({appKey: KEY});
-	service.saveWatchlist([ITEM]);
-	service.setRun('watching');
-	await timers.fire();
-	assert.equal(service.state().purchases.length, 0);
-	service.setRun('sweeping');
-	await timers.fire();
-	assert.equal(service.state().purchases.length, 2);
-});
-
 test('本轮失败:记下原因,连续失败按倍数退避;成功后恢复', async () => {
 	let fail = true;
 	const api = fakeApi({
@@ -264,9 +281,9 @@ test('本轮失败:记下原因,连续失败按倍数退避;成功后恢复', as
 		}
 	});
 	const {service, timers, emitted} = setup({api});
-	service.saveSettings({appKey: KEY, pollIntervalSec: 3});
+	service.saveSettings({...READY, pollIntervalSec: 3});
 	service.saveWatchlist([ITEM]);
-	service.setRun('watching');
+	service.setRun('sweeping');
 	await timers.fire();
 	assert.equal(timers.delay, 6000);
 	await timers.fire();
@@ -280,8 +297,8 @@ test('本轮失败:记下原因,连续失败按倍数退避;成功后恢复', as
 
 test('停止后不再排下一轮;保存监控列表马上跑一轮', async () => {
 	const {service, timers} = setup();
-	service.saveSettings({appKey: KEY});
-	service.setRun('watching');
+	service.saveSettings(READY);
+	service.setRun('sweeping');
 	await timers.fire();
 	assert.ok(service.state().cycle.done, '列表是空的');
 	service.saveWatchlist([ITEM]);
@@ -320,13 +337,16 @@ test('查在售:只查已保存的饰品,按价格排序', async () => {
 	assert.deepEqual(result.listings.map(l => [l.productId, l.price]), [['11', 5], ['12', 5.2]]);
 });
 
-test('对账只在实盘;手工标记结果未知的单;清空模拟记录', async () => {
+test('对账;手工标记结果未知的单;旧版本的模拟记录不显示、不占额度', async () => {
 	const {service, store, clock} = setup();
+	await assert.rejects(service.refreshOrders(), err => statusOf(err) === 409);
 	service.saveSettings({appKey: KEY});
-	await assert.rejects(service.refreshOrders(), err => statusOf(err) === 400);
 
+	store.addPurchase({outTradeNo: 'd1', ts: clock.now, mode: 'dry', name: ITEM.name, productId: '2', price: 5, status: 'ok'});
 	store.addPurchase({outTradeNo: 'n1', ts: clock.now, mode: 'live', name: ITEM.name, productId: '1', price: 5, status: 'unknown'});
-	service.saveSettings({mode: 'live', tradeUrl: TRADE_URL, maxTotalSpend: 50});
+	service.saveWatchlist([ITEM]);
+	assert.deepEqual(service.state().purchases.map(purchase => purchase.outTradeNo), ['n1']);
+	assert.deepEqual([service.state().budget.qty, service.state().items[0]!.bought], [1, 1]);
 	assert.equal(service.state().unknown, 1);
 	const {checked} = await service.refreshOrders();
 	assert.equal(checked, 1);
@@ -335,19 +355,38 @@ test('对账只在实盘;手工标记结果未知的单;清空模拟记录', asy
 	await assert.rejects(service.resolvePurchase('nope', 'ok'), err => statusOf(err) === 404);
 	const state = await service.resolvePurchase('n1', 'ok');
 	assert.deepEqual([state.unknown, store.getPurchase('n1')!.status, store.getPurchase('n1')!.error], [0, 'ok', '手工标记']);
-
-	store.addPurchase({outTradeNo: 'd1', ts: clock.now, mode: 'dry', name: ITEM.name, productId: '2', price: 5, status: 'ok'});
-	await assert.rejects(service.clearPurchases('live'), err => statusOf(err) === 400);
-	await service.clearPurchases('dry');
-	assert.deepEqual(store.selectPurchases('dry'), []);
-	assert.equal(store.selectPurchases('live').length, 1, '实盘流水不动');
 });
 
 test('数据库里的设置坏了退回默认值,启动时提示', () => {
 	const db = memoryDb();
-	createSettingsStore(db.db).set('c5.settings', {mode: 'live'});
+	createSettingsStore(db.db).set('c5.settings', {pollIntervalSec: 0});
 	const {service, emitted} = setup({db});
-	assert.equal(service.state().settings.mode, 'dry');
+	assert.deepEqual(service.state().settings, DEFAULT_SETTINGS);
 	service.start();
 	assert.ok(emitted.some(line => line.level === 'warn' && line.message.includes('已退回默认值')));
+});
+
+test('中文名:按中文搜到英文名;填中文名拒收;状态、流水、日志带中文名', async () => {
+	const names = createNameDb({'Kilowatt Case': '千瓦武器箱', 'Kilowatt Case Key': '千瓦武器箱钥匙'});
+	const {service, timers, emitted} = setup({names});
+	assert.deepEqual(service.searchNames(' 千瓦 ').options, [
+		{name: 'Kilowatt Case', zh: '千瓦武器箱'}, {name: 'Kilowatt Case Key', zh: '千瓦武器箱钥匙'}
+	]);
+	assert.deepEqual(service.searchNames('Gallery Case').options, [{name: 'Gallery Case', zh: null}], '词库里没有的英文名按原文用');
+	assert.deepEqual(service.searchNames('Kilowatt Case').options.map(option => option.zh), ['千瓦武器箱', '千瓦武器箱钥匙'], '已有的不重复');
+	assert.deepEqual(service.searchNames('不存在').options, [], '中文搜不到不给原文选项');
+	assert.deepEqual(service.searchNames('').options, []);
+
+	assert.throws(() => service.saveWatchlist([{...ITEM, name: '千瓦武器箱'}]), err => statusOf(err) === 400 && /应填 Kilowatt Case/.test((err as Error).message));
+	assert.deepEqual(service.state().items, []);
+
+	service.saveSettings(READY);
+	service.saveWatchlist([ITEM, {name: 'Gallery Case', maxPrice: 1, maxQty: 1}]);
+	assert.ok(emitted.some(line => line.message.includes('新增 千瓦武器箱 ≤ 5.50 × 3') && line.message.includes('新增 Gallery Case')));
+	service.setRun('sweeping');
+	await timers.fire();
+	const state = service.state();
+	assert.deepEqual(state.items.map(item => [item.name, item.zh]), [['Kilowatt Case', '千瓦武器箱'], ['Gallery Case', null]]);
+	assert.deepEqual(state.purchases.map(purchase => [purchase.name, purchase.zh]), [['Kilowatt Case', '千瓦武器箱'], ['Kilowatt Case', '千瓦武器箱']]);
+	assert.ok(emitted.some(line => line.message.startsWith('买入 千瓦武器箱 5.00')));
 });

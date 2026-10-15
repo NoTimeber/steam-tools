@@ -11,9 +11,10 @@ inspect_key.txt
 # 证书/私钥
 *.pem
 
-# app/data 只保留随代码分发的 cs2-skin-db.json,其余(一次性脚本写的 session/token)不入库
+# app/data 只保留随代码分发的 cs2-skin-db.json、cs2-names-zh.json.gz,其余(一次性脚本写的 session/token)不入库
 /app/data/*
 !/app/data/cs2-skin-db.json
+!/app/data/cs2-names-zh.json.gz
 
 # ===== 依赖与工具 =====
 node_modules/

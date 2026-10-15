@@ -87,7 +87,7 @@ class FakeClient implements C5Api {
 const listing = (productId: string | number, price: number, amount = 1) => ({productId: String(productId), price, assetInfo: {amount}});
 
 function env({items = [CASE], canBuy = true, ...overrides}: Partial<C5Settings> & {items?: C5WatchItem[]; canBuy?: boolean} = {}) {
-	const settings: C5Settings = {...DEFAULT_SETTINGS, mode: 'live', tradeUrl: 'https://t', maxTotalSpend: 100, ...overrides};
+	const settings: C5Settings = {...DEFAULT_SETTINGS, tradeUrl: 'https://t', maxTotalSpend: 100, ...overrides};
 	const client = new FakeClient();
 	client.stats = {[CASE.name]: {sellPrice: 5.0, sellCount: 10}};
 	const store = memoryStore();
@@ -143,16 +143,16 @@ test('最低价高于目标价:不查在售、不下单', async () => {
 	assert.deepEqual(store.selectPurchases('live'), []);
 });
 
-test('模拟:不调下单和余额,同一个在售不重复买', async () => {
-	const {sweeper, client, store} = env({mode: 'dry'});
+test('同一个在售不重复买', async () => {
+	const {sweeper, client, store} = env();
 	client.listings = [listing(1, 5.0), listing(2, 5.2)];
 	await sweeper.runCycle();
 	await sweeper.runCycle();
-	assert.equal(client.count('batchBuy') + client.count('balance'), 0);
-	assert.deepEqual(store.selectPurchases('dry').map(p => p.productId), ['1', '2']);
+	assert.equal(client.count('batchBuy'), 1);
+	assert.deepEqual(store.selectPurchases('live').map(p => p.productId), ['1', '2']);
 });
 
-test('只看行情:到价也不下单', async () => {
+test('已停止(不让下单):到价也不下单,行情照常更新', async () => {
 	const {sweeper, client, store, state} = env({canBuy: false});
 	client.listings = [listing(1, 5.0)];
 	assert.equal(await sweeper.runCycle(), true);
@@ -163,9 +163,9 @@ test('只看行情:到价也不下单', async () => {
 	assert.equal(store.selectPurchases('live').length, 1);
 });
 
-// ===== 实盘下单 =====
+// ===== 下单 =====
 
-test('实盘:按在售 id 批量下单并记账', async () => {
+test('按在售 id 批量下单并记账', async () => {
 	const {sweeper, client, store} = env();
 	client.listings = [listing('1444544795338493955', 5.0), listing(2, 5.2), listing(3, 5.9)];
 	await sweeper.runCycle();

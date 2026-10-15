@@ -1,4 +1,4 @@
-// C5 扫货:网页设置 app-key / 监控列表 → 检查连接、查在售 → 实盘自动扫货(批量下单)→ 对账 → 重启后恢复。
+// C5 扫货:网页设置 app-key / 监控列表 → 检查连接、查在售 → 自动扫货(真实下单,批量)→ 对账 → 重启后恢复。
 // C5GAME 开放平台是假的(support/offline-preload.cjs 的 fakeC5):在售 id 是 19 位整数,下单按 id 扣在售和余额。
 
 import {after, before, describe, test} from 'node:test';
@@ -70,7 +70,7 @@ describe('C5 扫货', () => {
 
 	test('没填 app-key:不能开;填了只回后 4 位,库里是密文', async () => {
 		assert.equal((await state()).configured, false);
-		const run = await client.post('/api/c5/run', {state: 'watching'});
+		const run = await client.post('/api/c5/run', {state: 'sweeping'});
 		assert.equal(run.status, 409, run.text);
 
 		const saved = await client.post('/api/c5/settings', {appKey: APP_KEY, pollIntervalSec: 1});
@@ -89,18 +89,25 @@ describe('C5 扫货', () => {
 		assert.ok(!dbText.includes(APP_KEY), 'app-key 明文不落盘');
 	});
 
-	test('监控列表校验;检查连接;查在售时 64 位 id 不丢精度', async () => {
+	test('监控列表校验;按中文搜饰品、填中文名拒收;检查连接;查在售时 64 位 id 不丢精度', async () => {
 		const bad = await client.post('/api/c5/watchlist', {items: [{name: 'Kilowatt Case', maxPrice: 0, maxQty: 1}]});
 		assert.equal(bad.status, 400);
 		assert.match(bad.json.error, /目标价必须大于 0/);
+
+		const names = await client.get('/api/c5/names?q=' + encodeURIComponent('千瓦'));
+		assert.equal(names.status, 200, names.text);
+		assert.deepEqual(names.json.options[0], {name: 'Kilowatt Case', zh: '千瓦武器箱'});
+		const chinese = await client.post('/api/c5/watchlist', {items: [{name: '千瓦武器箱', maxPrice: 0.65, maxQty: 5}]});
+		assert.equal(chinese.status, 400);
+		assert.match(chinese.json.error, /应填 Kilowatt Case/);
 
 		const saved = await client.post('/api/c5/watchlist', {items: [
 			{name: 'Kilowatt Case', maxPrice: 0.65, maxQty: 5},
 			{name: 'Recoil Case', maxPrice: 1.5, maxQty: 1}
 		]});
 		assert.equal(saved.status, 200, saved.text);
-		assert.deepEqual(saved.json.state.items.map((item: any) => [item.name, item.maxPrice, item.maxQty, item.delivery]), [
-			['Kilowatt Case', 0.65, 5, 0], ['Recoil Case', 1.5, 1, 0]
+		assert.deepEqual(saved.json.state.items.map((item: any) => [item.name, item.zh, item.maxPrice, item.maxQty, item.delivery]), [
+			['Kilowatt Case', '千瓦武器箱', 0.65, 5, 0], ['Recoil Case', '反冲武器箱', 1.5, 1, 0]
 		]);
 
 		const check = await client.post('/api/c5/check');
@@ -125,12 +132,12 @@ describe('C5 扫货', () => {
 		}
 	});
 
-	test('实盘要交易链接和总预算;自动扫货按在售 id 下单,对账拿到平台订单状态', async () => {
-		const noUrl = await client.post('/api/c5/settings', {mode: 'live', maxTotalSpend: 10});
+	test('开扫前要交易链接和总预算;自动扫货按在售 id 下单,对账拿到平台订单状态', async () => {
+		const noUrl = await client.post('/api/c5/run', {state: 'sweeping'});
 		assert.equal(noUrl.status, 400);
 		assert.match(noUrl.json.error, /交易链接/);
-		const live = await client.post('/api/c5/settings', {mode: 'live', tradeUrl: TRADE_URL, maxTotalSpend: 10});
-		assert.equal(live.status, 200, live.text);
+		const ready = await client.post('/api/c5/settings', {tradeUrl: TRADE_URL, maxTotalSpend: 10});
+		assert.equal(ready.status, 200, ready.text);
 
 		const run = await client.post('/api/c5/run', {state: 'sweeping'});
 		assert.equal(run.status, 200, run.text);
@@ -149,7 +156,7 @@ describe('C5 扫货', () => {
 		assert.deepEqual((buys[0]!.body?.productList as any[]).map(p => [p.productId, p.buyPrice]), [
 			['1444544795338000001', 0.6], ['1444544795338000002', 0.62]
 		]);
-		await socket.waitFor('c5:log', payload => payload.level === 'success' && payload.message.startsWith('买入 Kilowatt Case 0.60'));
+		await socket.waitFor('c5:log', payload => payload.level === 'success' && payload.message.startsWith('买入 千瓦武器箱 0.60'));
 
 		const refreshed = await client.post('/api/c5/orders/refresh');
 		assert.equal(refreshed.status, 200, refreshed.text);
@@ -162,9 +169,9 @@ describe('C5 扫货', () => {
 		await server.kill();
 		await start('2');
 		const resumed = await state();
-		assert.deepEqual([resumed.run, resumed.settings.mode, resumed.purchases.length, resumed.budget.qty], ['sweeping', 'live', 2, 2]);
+		assert.deepEqual([resumed.run, resumed.settings.maxTotalSpend, resumed.purchases.length, resumed.budget.qty], ['sweeping', 10, 2, 2]);
 		await waitState(value => value.cycle.n >= 1 && value.items[0].lowest === 0.6);
-		assert.match(server.output(), /\[c5\] 恢复上次的运行状态:自动扫货\(实盘\)/);
+		assert.match(server.output(), /\[c5\] 恢复上次的运行状态:自动扫货\(真实下单\)/);
 
 		const stopped = await client.post('/api/c5/run', {state: 'stopped'});
 		assert.equal(stopped.json.state.run, 'stopped');

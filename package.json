@@ -13,7 +13,8 @@
     "typecheck": "tsc -p tsconfig.json",
     "test": "node --test \"src/**/*.test.ts\"",
     "test:e2e": "node --test --test-concurrency=1 \"test/e2e/*.e2e.ts\"",
-    "demo": "node test/demo/server.ts"
+    "demo": "node test/demo/server.ts",
+    "build:names": "node scripts/build-cs2-names.ts"
   },
   "dependencies": {
     "binarykvparser": "^2.3.0",

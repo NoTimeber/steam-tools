@@ -1,14 +1,18 @@
 // C5 扫货服务(原独立的 c5 项目,Python):填好目标价,持续轮询 C5GAME 在售最低价,跌到目标价以内自动买,
 // 买满数量或用完预算为止。app-key、设置、监控列表、购买流水都在加密库(src/store/c5.ts),在网页上改,不用重启。
 //
-// 运行状态三档:停止 / 只看行情(照常轮询,不下单)/ 自动扫货;记在数据库里,服务重启后恢复。
+// 运行状态两档:停止 / 自动扫货(真实下单,没有模拟);记在数据库里,服务重启后恢复。
 // 每轮、手动对账、手工标记都排进同一个串行队列,互相不会交叉。路由在 ./routes.ts。
+// 流水表的 mode 列是旧版本留下的(当时有模拟模式),现在只写、只读 live。
+//
+// C5 接口只认 Steam 英文名,监控列表、流水按英文名存;页面和日志上的中文名查 src/items/names.ts 的词库。
 
-import type {C5Mode, C5Purchase, C5PurchaseStatus, C5Store, C5WatchItem} from '../store/c5.ts';
+import type {NameDb} from '../items/names.ts';
+import type {C5Purchase, C5PurchaseStatus, C5Store, C5WatchItem} from '../store/c5.ts';
 import {purchaseCost} from '../store/c5.ts';
 import {C5Error, createC5Client} from './client.ts';
 import type {C5Api, C5SteamAccount} from './client.ts';
-import {buildItems, c5Error, describeChange, loadSettingsOrDefault, normalizeSettings, RUN_STATES} from './config.ts';
+import {buildItems, c5Error, describeChange, loadSettingsOrDefault, normalizeSettings, RUN_STATES, sweepBlocker} from './config.ts';
 import type {C5RunState, C5Settings} from './config.ts';
 import {createSweeper, EPS, lowestPrice, parseListing, toNumber} from './sweeper.ts';
 import type {C5LogLevel, Listing} from './sweeper.ts';
@@ -31,6 +35,8 @@ export interface C5LogLine {
 export type C5ItemStatus = 'done' | 'cooldown' | 'noquote' | 'hit' | 'watch';
 
 export interface C5ItemView extends C5WatchItem {
+	/** 中文名;词库里没有为 null */
+	zh: string | null;
 	status: C5ItemStatus;
 	pauseUntil: number | null;
 	lowest: number | null;
@@ -41,7 +47,14 @@ export interface C5ItemView extends C5WatchItem {
 }
 
 export interface C5PurchaseView extends C5Purchase {
+	zh: string | null;
 	cost: number;
+}
+
+/** 添加饰品的搜索结果;zh 为 null 是词库里没有、按输入的英文名原样用 */
+export interface C5NameOption {
+	name: string;
+	zh: string | null;
 }
 
 export interface C5State {
@@ -72,6 +85,8 @@ export interface C5ServiceOptions {
 	store: C5Store;
 	/** socket.io 推送:c5:log(写右侧运行日志;行情变化这类 debug 日志不推) */
 	emit(event: 'c5:log', payload: C5LogLine): void;
+	/** 饰品中英文名词库;不给就只显示英文名 */
+	names?: NameDb;
 	/** 默认是 ./client.ts 的真实客户端;单元测试用假的 */
 	createClient?: (options: {appKey: string; timeoutMs: number}) => C5Api;
 	now?: () => number;
@@ -112,14 +127,22 @@ export function createC5Service(options: C5ServiceOptions) {
 	const logger = options.logger ?? console;
 	const timers = options.timers ?? realTimers;
 	const makeClient = options.createClient ?? (({appKey, timeoutMs}) => createC5Client({appKey, timeoutMs}));
+	const zhOf = (name: string) => options.names?.zh(name) ?? null;
+	/** 日志里的饰品名:有中文用中文 */
+	const label = (name: string) => zhOf(name) ?? name;
 
 	let appKey = store.getAppKey();
-	const loaded = loadSettingsOrDefault(store.loadSettings());
+	const savedSettings = store.loadSettings();
+	const loaded = loadSettingsOrDefault(savedSettings);
 	let settings = loaded.settings;
 	const settingsError = loaded.error;
 	let items: C5WatchItem[] = store.listItems();
 	const savedRun = store.loadRunState();
-	let run: C5RunState = RUN_STATES.includes(savedRun as C5RunState) ? savedRun as C5RunState : 'stopped';
+	// 旧版本的「只看行情」和模拟模式下的自动扫货都不花钱,升级后不能自己变成真实下单:一律停下,等人确认后手动开始。
+	// 旧版本的设置里都有 mode(没存过设置就是默认的模拟);新版本存的没有 mode
+	const savedMode = savedSettings && typeof savedSettings === 'object' ? (savedSettings as {mode?: unknown}).mode : 'dry';
+	const legacyRun = savedRun === 'watching' || (savedRun === 'sweeping' && savedMode !== undefined && savedMode !== 'live');
+	let run: C5RunState = !legacyRun && RUN_STATES.includes(savedRun as C5RunState) ? savedRun as C5RunState : 'stopped';
 	let cycle: C5State['cycle'] = {n: 0, at: null, error: null, errors: 0, done: false};
 	let balance: C5State['balance'] = null;
 	const logs: C5LogLine[] = [];
@@ -159,10 +182,11 @@ export function createC5Service(options: C5ServiceOptions) {
 		items: () => items,
 		canBuy: () => run === 'sweeping',
 		log,
+		label,
 		now
 	});
 
-	// ===== 串行队列:每轮、手动对账、手工标记、清空模拟记录不交叉 =====
+	// ===== 串行队列:每轮、手动对账、手工标记不交叉 =====
 
 	let tail: Promise<unknown> = Promise.resolve();
 	function serial<T>(fn: () => Promise<T> | T): Promise<T> {
@@ -241,8 +265,8 @@ export function createC5Service(options: C5ServiceOptions) {
 				log('error', `本轮出错(连续第 ${cycle.errors} 次): ${message}`);
 			}
 		}
-		// 实盘:每分钟查一次余额;这一轮下过单就马上查
-		if (settings.mode === 'live' && (now() - (balance?.at ?? 0) >= BALANCE_REFRESH_MS || lastPurchase() !== lastBefore)) {
+		// 每分钟查一次余额;这一轮下过单就马上查
+		if (now() - (balance?.at ?? 0) >= BALANCE_REFRESH_MS || lastPurchase() !== lastBefore) {
 			await refreshBalance().catch(err => log('warn', `查余额失败: ${(err as Error).message}`));
 		}
 	}
@@ -259,7 +283,7 @@ export function createC5Service(options: C5ServiceOptions) {
 
 	function state(): C5State {
 		const view = sweeper.view();
-		const totals = store.totals(settings.mode);
+		const totals = store.totals('live');
 		const at = now();
 		const itemViews = items.map((item): C5ItemView => {
 			const stat = view.stats[item.name] ?? {};
@@ -279,7 +303,7 @@ export function createC5Service(options: C5ServiceOptions) {
 				status = 'watch';
 			}
 			return {
-				...item, status, pauseUntil, lowest,
+				...item, zh: zhOf(item.name), status, pauseUntil, lowest,
 				sellCount: toNumber(stat.sellCount), purchaseMax: toNumber(stat.purchaseMaxPrice),
 				bought: total.qty, spent: total.spent
 			};
@@ -298,8 +322,9 @@ export function createC5Service(options: C5ServiceOptions) {
 			},
 			balance: balance ? {...balance} : null,
 			items: itemViews,
-			purchases: store.recentPurchases(settings.mode, RECENT_PURCHASES).map(purchase => ({...purchase, cost: purchaseCost(purchase)})),
-			unknown: store.selectPurchases(settings.mode, ['unknown']).length,
+			purchases: store.recentPurchases('live', RECENT_PURCHASES)
+				.map(purchase => ({...purchase, zh: zhOf(purchase.name), cost: purchaseCost(purchase)})),
+			unknown: store.selectPurchases('live', ['unknown']).length,
 			logs: logs.slice()
 		};
 	}
@@ -312,10 +337,7 @@ export function createC5Service(options: C5ServiceOptions) {
 		}
 	}
 
-	/**
-	 * 保存设置。appKey 非空时替换;clearAppKey 删除(同时停止)。
-	 * 模拟切到实盘时,正在自动扫货的先降为「只看行情」,确认无误后再手动开扫。
-	 */
+	/** 保存设置。appKey 非空时替换;clearAppKey 删除(同时停止)。正在扫货时交易链接和总预算不能清空 */
 	function saveSettings(body: unknown): C5State {
 		const input = body && typeof body === 'object' ? body as Record<string, unknown> : {};
 		const {appKey: newKey, clearAppKey, ...rest} = input;
@@ -327,7 +349,10 @@ export function createC5Service(options: C5ServiceOptions) {
 		if (keyText && clearAppKey === true) {
 			throw c5Error(400, '不能同时填新 app-key 又删除 app-key,二选一');
 		}
-		const switchedToLive = settings.mode !== 'live' && next.mode === 'live';
+		const blocker = run === 'sweeping' && clearAppKey !== true ? sweepBlocker(next) : null;
+		if (blocker) {
+			throw c5Error(400, `正在自动扫货,${blocker};要清空先停止`);
+		}
 		store.saveSettings(next);
 		const changes: string[] = [];
 		if (keyText) {
@@ -339,17 +364,12 @@ export function createC5Service(options: C5ServiceOptions) {
 			appKey = '';
 			changes.push('app-key 已删除');
 		}
-		if (next.mode !== settings.mode) {
-			changes.push(next.mode === 'live' ? '切到实盘' : '切到模拟');
-		}
 		settings = next;
 		client = null;   // app-key / 超时可能变了
-		log('info', `设置已保存:${next.mode === 'live' ? '实盘' : '模拟'},${next.strategy === 'quick' ? '快速购买' : '按在售列表'},`
-			+ `总预算 ${next.maxTotalSpend || '不限'},轮询 ${next.pollIntervalSec} 秒${changes.length ? ';' + changes.join(',') : ''}`);
+		log('info', `设置已保存:${next.strategy === 'quick' ? '快速购买' : '按在售列表'},`
+			+ `总预算 ${next.maxTotalSpend || '未设'},轮询 ${next.pollIntervalSec} 秒${changes.length ? ';' + changes.join(',') : ''}`);
 		if (!appKey && run !== 'stopped') {
 			setRunState('stopped', '没有 app-key');
-		} else if (switchedToLive && run === 'sweeping') {
-			setRunState('watching', '刚切到实盘,先只看行情;确认无误后点「自动扫货」');
 		}
 		kick();
 		return state();
@@ -358,8 +378,7 @@ export function createC5Service(options: C5ServiceOptions) {
 	function setRunState(next: C5RunState, reason = ''): void {
 		run = next;
 		store.saveRunState(next);
-		const label = next === 'stopped' ? '停止' : next === 'watching' ? '只看行情(不下单)' : `自动扫货(${settings.mode === 'live' ? '实盘' : '模拟'})`;
-		log(next === 'sweeping' && settings.mode === 'live' ? 'warn' : 'info', `运行状态:${label}${reason ? ',' + reason : ''}`);
+		log(next === 'sweeping' ? 'warn' : 'info', `运行状态:${next === 'sweeping' ? '自动扫货(真实下单)' : '停止'}${reason ? ',' + reason : ''}`);
 		if (next === 'stopped') {
 			cancelTimer();
 		}
@@ -370,12 +389,12 @@ export function createC5Service(options: C5ServiceOptions) {
 		if (!RUN_STATES.includes(next)) {
 			throw c5Error(400, `运行状态只能是 ${RUN_STATES.join(' / ')}`);
 		}
-		if (next !== 'stopped') {
+		if (next === 'sweeping') {
 			requireAppKey();
-		}
-		if (next === 'sweeping' && settings.mode === 'live') {
-			// 设置保存时已校验过;数据库被改坏退回默认值时这里兜底
-			normalizeSettings({}, settings);
+			const blocker = sweepBlocker(settings);
+			if (blocker) {
+				throw c5Error(400, `不能开始自动扫货:${blocker}`);
+			}
 		}
 		if (next !== run) {
 			setRunState(next);
@@ -387,12 +406,32 @@ export function createC5Service(options: C5ServiceOptions) {
 	/** 网页提交整张表:校验、存库、下一轮按新列表扫。不合法报 400,原来的不动 */
 	function saveWatchlist(raws: unknown): C5State {
 		const next = buildItems(raws);
+		for (const item of next) {
+			// 填了中文名:C5 查不到行情,提前拦下(有的英文名里本身带汉字,所以按词库判断)
+			const name = zhOf(item.name) == null ? options.names?.nameOf(item.name) : null;
+			if (name) {
+				throw c5Error(400, `「${item.name}」是中文名,C5 接口只认英文名,应填 ${name}`);
+			}
+		}
 		const before = items;
 		store.replaceItems(next);
 		items = next;
-		log('info', `监控列表已保存,${next.length} 个饰品${describeChange(before, next)}`);
+		log('info', `监控列表已保存,${next.length} 个饰品${describeChange(before, next, label)}`);
 		kick();
 		return state();
+	}
+
+	/** 添加饰品时搜名字(中文或英文)。输的像英文全名又不在词库里(新出的饰品),附一个按原文用的选项 */
+	function searchNames(query: unknown): {options: C5NameOption[]} {
+		const text = String(query ?? '').trim().slice(0, 100);
+		if (!text) {
+			return {options: []};
+		}
+		const found: C5NameOption[] = options.names?.search(text, 30) ?? [];
+		if (!/[㐀-鿿]/.test(text) && text.length >= 3 && !found.some(option => option.name === text)) {
+			found.push({name: text, zh: null});
+		}
+		return {options: found};
 	}
 
 	/** 连通性:app-key、余额、C5 上绑定的 Steam 收货账号 */
@@ -441,12 +480,9 @@ export function createC5Service(options: C5ServiceOptions) {
 		}
 	}
 
-	/** 实盘:立刻向平台对一遍全部未完结订单 */
+	/** 立刻向平台对一遍全部未完结订单 */
 	async function refreshOrders(): Promise<{checked: number; state: C5State}> {
 		requireAppKey();
-		if (settings.mode !== 'live') {
-			throw c5Error(400, '模拟模式没有平台订单');
-		}
 		const checked = await serial(() => sweeper.refreshOrders(null, {force: true}));
 		log('info', `已向平台同步 ${checked} 笔未完结订单`);
 		return {checked, state: state()};
@@ -464,19 +500,8 @@ export function createC5Service(options: C5ServiceOptions) {
 				throw c5Error(404, `没有单号 ${no}`);
 			}
 			store.updatePurchase(no, {status: status as C5PurchaseStatus, error: '手工标记'});
-			log('info', `手工标记:${purchase.name} 单号 ${no} ${purchase.status} → ${status}`);
+			log('info', `手工标记:${label(purchase.name)} 单号 ${no} ${purchase.status} → ${status}`);
 		});
-		return state();
-	}
-
-	/** 清空模拟流水(模拟的数量和预算从零算) */
-	async function clearPurchases(mode: unknown): Promise<C5State> {
-		if (mode !== 'dry') {
-			throw c5Error(400, '只能清空模拟记录');
-		}
-		const removed = await serial(() => store.clearPurchases(mode as C5Mode));
-		log('info', `已清空 ${removed} 笔模拟记录`);
-		kick();
 		return state();
 	}
 
@@ -485,24 +510,27 @@ export function createC5Service(options: C5ServiceOptions) {
 		saveSettings,
 		setRun,
 		saveWatchlist,
+		searchNames,
 		check,
 		listings,
 		refreshOrders,
 		resolvePurchase,
-		clearPurchases,
-		/** 服务启动:上次在跑就接着跑 */
+		/** 服务启动:上次在扫货就接着扫 */
 		start(): void {
 			shutDown = false;
 			if (settingsError) {
 				log('warn', `数据库里的设置无效,已退回默认值: ${settingsError}`);
 			}
-			if (run !== 'stopped') {
-				if (appKey) {
-					log(run === 'sweeping' && settings.mode === 'live' ? 'warn' : 'info',
-						`恢复上次的运行状态:${run === 'sweeping' ? `自动扫货(${settings.mode === 'live' ? '实盘' : '模拟'})` : '只看行情'},监控 ${items.length} 个饰品`);
-					kick();
+			if (legacyRun) {
+				setRunState('stopped', `已去掉「只看行情」和模拟模式,上次的${savedRun === 'watching' ? '只看行情' : '模拟扫货'}不再自动恢复;`
+					+ '确认设置后点「自动扫货」开始真实下单');
+			} else if (run === 'sweeping') {
+				const blocker = appKey ? sweepBlocker(settings) : '没有 app-key';
+				if (blocker) {
+					setRunState('stopped', blocker);
 				} else {
-					setRunState('stopped', '没有 app-key');
+					log('warn', `恢复上次的运行状态:自动扫货(真实下单),监控 ${items.length} 个饰品`);
+					kick();
 				}
 			}
 		},

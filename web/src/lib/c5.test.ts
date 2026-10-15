@@ -1,8 +1,11 @@
 /// <reference types="node" />
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {budgetText, dirtyFields, draftPayload, draftsDirty, formatTime, itemStatus, money, newDraft, purchaseStatus, removedNames, toDrafts} from './c5.ts';
-import type {C5WatchItem} from './c5.ts';
+import {
+	budgetText, dirtyFields, draftPayload, draftsDirty, formatTime, itemLabel, itemStatus, money, newDraft, purchaseStatus, removedNames, sweepBlocker,
+	sweepConfirmText, toDrafts
+} from './c5.ts';
+import type {C5Settings, C5WatchItem} from './c5.ts';
 
 const ITEMS: C5WatchItem[] = [
 	{name: 'Kilowatt Case', maxPrice: 0.66, maxQty: 100, maxSpend: 0, appId: 730, delivery: 0, assetType: 1},
@@ -60,10 +63,36 @@ test('文案', () => {
 	assert.deepEqual(purchaseStatus('unknown'), {label: '结果未知', tone: 'warning'});
 	assert.equal(money(null), '-');
 	assert.equal(money(1.005), '1.00');
-	assert.equal(budgetText({total: 0, spent: 1.2, qty: 2}), '1.20 / 不限');
+	assert.equal(budgetText({total: 0, spent: 1.2, qty: 2}), '1.20 / 未设');
 	assert.equal(budgetText({total: 500, spent: 0, qty: 0}), '0.00 / 500.00');
 	const now = new Date(2026, 9, 14, 12, 0, 0).getTime();
 	assert.equal(formatTime(new Date(2026, 9, 14, 9, 5, 7).getTime(), now), '09:05:07');
 	assert.equal(formatTime(new Date(2026, 9, 13, 23, 0, 0).getTime(), now), '10-13 23:00:00');
 	assert.equal(formatTime(null), '-');
+});
+
+test('中文名:草稿带上中文名只用来显示,不提交、不算改动;报错用中文名', () => {
+	const drafts = toDrafts(ITEMS.map((item, index) => ({...item, zh: index === 0 ? '千瓦武器箱' : null})), uids());
+	assert.deepEqual(drafts.map(row => [row.name, row.zh, itemLabel(row)]), [
+		['Kilowatt Case', '千瓦武器箱', '千瓦武器箱'], ['Recoil Case', null, 'Recoil Case']
+	]);
+	assert.equal(draftsDirty(drafts, ITEMS), false);
+	assert.deepEqual(draftPayload(drafts), {items: ITEMS, error: ''});
+
+	const added = [...drafts, newDraft(uids(), {name: 'Gallery Case', zh: '画廊武器箱', maxPrice: 0, maxQty: 1})];
+	assert.equal(added[2]!.zh, '画廊武器箱');
+	assert.equal(draftPayload(added).error, '画廊武器箱:目标价要大于 0');
+});
+
+test('开始自动扫货:要交易链接和总预算;确认文字写明真实下单', () => {
+	const settings: C5Settings = {
+		strategy: 'quick', tradeUrl: '', maxTotalSpend: 0, maxBuyPerCycle: 10, minBalanceReserve: 5, errorCooldownSec: 10, pollIntervalSec: 3, timeoutSec: 10
+	};
+	assert.equal(sweepBlocker(settings), '没填收货账号的交易链接');
+	assert.equal(sweepBlocker({...settings, tradeUrl: 'https://steamcommunity.com/tradeoffer/new/?partner=1&token=a'}), '没设总预算(要大于 0)');
+	assert.equal(sweepBlocker({...settings, tradeUrl: 'https://steamcommunity.com/tradeoffer/new/?partner=1&token=a', maxTotalSpend: 20}), null);
+	const text = sweepConfirmText({...settings, maxTotalSpend: 20}, 3);
+	assert.match(text, /真实下单/);
+	assert.match(text, /总预算 20\.00,每轮最多 10 单,余额保留 5\.00/);
+	assert.match(text, /快速购买.*监控 3 个饰品/);
 });

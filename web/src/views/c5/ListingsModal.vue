@@ -8,7 +8,8 @@ import {money} from '../../lib/c5.ts';
 import type {C5Listing} from '../../lib/c5.ts';
 import {fetchListings} from '../../stores/c5.ts';
 
-const props = defineProps<{name: string}>();
+/** name 是英文名(查在售用),label 是显示用的(有中文用中文) */
+const props = defineProps<{name: string; label?: string}>();
 const emit = defineEmits<{close: []}>();
 
 const view = reactive({loading: false, error: '', maxPrice: 0, listings: [] as C5Listing[]});
@@ -45,7 +46,7 @@ const columns: DataTableColumns<C5Listing> = [
 
 <template>
 	<NModal :show="!!name" @update:show="(value: boolean) => !value && emit('close')">
-		<NCard :title="`${name}:目标价 ${money(view.maxPrice)} 以内的在售`" style="width: 520px; max-width: calc(100vw - 32px)" :bordered="false" role="dialog" aria-modal="true">
+		<NCard :title="`${label || name}:目标价 ${money(view.maxPrice)} 以内的在售`" style="width: 520px; max-width: calc(100vw - 32px)" :bordered="false" role="dialog" aria-modal="true">
 			<NAlert v-if="view.error" type="error" :bordered="false" class="error">
 				{{ view.error }}
 				<div class="muted">在售查询是内测接口:报白名单 / 权限错误时,去 C5 官网 API 管理把服务器公网 IP 加进白名单,或者把策略换成「快速购买」。</div>

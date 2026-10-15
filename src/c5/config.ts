@@ -1,21 +1,19 @@
 // C5 扫货的运行设置和监控列表:默认值、校验(原 c5 项目的 .env 和 watchlist.toml,现在都在网页上改、存数据库)。
 
-import type {C5Mode, C5WatchItem} from '../store/c5.ts';
+import type {C5WatchItem} from '../store/c5.ts';
 
 export type C5Strategy = 'listing' | 'quick';
 
-/** stopped 停止;watching 只看行情不下单;sweeping 到价自动买 */
-export type C5RunState = 'stopped' | 'watching' | 'sweeping';
-export const RUN_STATES: readonly C5RunState[] = ['stopped', 'watching', 'sweeping'];
+/** stopped 停止;sweeping 到价自动买(真实下单,没有模拟) */
+export type C5RunState = 'stopped' | 'sweeping';
+export const RUN_STATES: readonly C5RunState[] = ['stopped', 'sweeping'];
 
 export interface C5Settings {
-	/** dry:到价后模拟买入并记账,不花钱;live:真实下单 */
-	mode: C5Mode;
 	/** listing:查在售列表后按在售 id 批量买(内测接口,要 IP 白名单);quick:快速购买接口,平台挑最低价,一次一件 */
 	strategy: C5Strategy;
-	/** 收货 Steam 账号的交易链接 */
+	/** 收货 Steam 账号的交易链接;开始扫货前必填 */
 	tradeUrl: string;
-	/** 所有饰品累计花费上限;实盘必填,模拟下 0 = 不限 */
+	/** 所有饰品累计花费上限;开始扫货前必须大于 0 */
 	maxTotalSpend: number;
 	/** 每轮最多下几单,防止瞬间打光预算 */
 	maxBuyPerCycle: number;
@@ -30,7 +28,6 @@ export interface C5Settings {
 }
 
 export const DEFAULT_SETTINGS: Readonly<C5Settings> = {
-	mode: 'dry',
 	strategy: 'listing',
 	tradeUrl: '',
 	maxTotalSpend: 0,
@@ -95,14 +92,11 @@ export function isTradeUrl(value: string): boolean {
 
 /**
  * 网页提交的设置 → 校验后的完整设置。没提交的字段沿用 current(数据库里存的,或默认值)。
- * 实盘必须有交易链接和总预算(原来 .env 里还要写 C5_LIVE_CONFIRM=yes,现在由网页切实盘时的确认框代替)。
+ * 交易链接和总预算可以先空着(先填 app-key 检查连接),开始扫货时再由 sweepBlocker 拦。
+ * 旧版本存的 mode(模拟 / 实盘)已经没有了,忽略。
  */
 export function normalizeSettings(raw: unknown, current: Readonly<C5Settings> = DEFAULT_SETTINGS): C5Settings {
 	const input = {...current, ...(raw && typeof raw === 'object' ? raw as Record<string, unknown> : {})} as Record<string, unknown>;
-	const mode = String(input.mode ?? '').trim().toLowerCase();
-	if (mode !== 'dry' && mode !== 'live') {
-		throw invalid(`模式只能是 dry / live,收到: ${mode}`);
-	}
 	const strategy = String(input.strategy ?? '').trim().toLowerCase();
 	if (strategy !== 'listing' && strategy !== 'quick') {
 		throw invalid(`策略只能是 listing / quick,收到: ${strategy}`);
@@ -111,8 +105,7 @@ export function normalizeSettings(raw: unknown, current: Readonly<C5Settings> = 
 	if (tradeUrl && !isTradeUrl(tradeUrl)) {
 		throw invalid(`交易链接不对,应形如 ${TRADE_URL_PREFIX}?partner=...&token=...`);
 	}
-	const settings: C5Settings = {
-		mode,
+	return {
 		strategy,
 		tradeUrl,
 		maxTotalSpend: inRange(numberField(input, 'maxTotalSpend', 0, '总预算'), 0, 10_000_000, '总预算'),
@@ -122,15 +115,17 @@ export function normalizeSettings(raw: unknown, current: Readonly<C5Settings> = 
 		pollIntervalSec: inRange(numberField(input, 'pollIntervalSec', DEFAULT_SETTINGS.pollIntervalSec, '轮询间隔'), 1, 600, '轮询间隔(秒)'),
 		timeoutSec: inRange(numberField(input, 'timeoutSec', DEFAULT_SETTINGS.timeoutSec, '请求超时'), 3, 60, '请求超时(秒)')
 	};
-	if (settings.mode === 'live') {
-		if (!settings.tradeUrl) {
-			throw invalid('实盘要先填收货账号的交易链接');
-		}
-		if (settings.maxTotalSpend <= 0) {
-			throw invalid('实盘必须设总预算(大于 0)');
-		}
+}
+
+/** 能不能开始(或继续)自动扫货:真实下单前必须有交易链接和总预算。能返回 null,不能返回原因 */
+export function sweepBlocker(settings: Readonly<C5Settings>): string | null {
+	if (!settings.tradeUrl) {
+		return '没填收货账号的交易链接';
 	}
-	return settings;
+	if (settings.maxTotalSpend <= 0) {
+		return '没设总预算(要大于 0)';
+	}
+	return null;
 }
 
 /** 数据库里存的设置坏了(手改过、旧版本)时退回默认值,不让服务起不来 */
@@ -202,24 +197,24 @@ export function buildItems(raws: unknown): C5WatchItem[] {
 	return items;
 }
 
-/** 给日志用:这次保存改了什么 */
-export function describeChange(before: readonly C5WatchItem[], after: readonly C5WatchItem[]): string {
+/** 给日志用:这次保存改了什么。label 把英文名换成显示用的名字 */
+export function describeChange(before: readonly C5WatchItem[], after: readonly C5WatchItem[], label: (name: string) => string = name => name): string {
 	const old = new Map(before.map(item => [item.name, item]));
 	const next = new Map(after.map(item => [item.name, item]));
 	const parts: string[] = [];
 	for (const [name, b] of next) {
 		const a = old.get(name);
 		if (!a) {
-			parts.push(`新增 ${name} ≤ ${b.maxPrice.toFixed(2)} × ${b.maxQty}`);
+			parts.push(`新增 ${label(name)} ≤ ${b.maxPrice.toFixed(2)} × ${b.maxQty}`);
 		} else if (a.maxPrice !== b.maxPrice || a.maxQty !== b.maxQty || a.maxSpend !== b.maxSpend
 			|| a.delivery !== b.delivery || a.assetType !== b.assetType || a.appId !== b.appId) {
-			parts.push(`${name} ≤ ${a.maxPrice.toFixed(2)} × ${a.maxQty} → ≤ ${b.maxPrice.toFixed(2)} × ${b.maxQty}`
+			parts.push(`${label(name)} ≤ ${a.maxPrice.toFixed(2)} × ${a.maxQty} → ≤ ${b.maxPrice.toFixed(2)} × ${b.maxQty}`
 				+ (a.maxSpend !== b.maxSpend ? `,花费上限 ${b.maxSpend.toFixed(2)}` : ''));
 		}
 	}
 	for (const name of old.keys()) {
 		if (!next.has(name)) {
-			parts.push(`删除 ${name}`);
+			parts.push(`删除 ${label(name)}`);
 		}
 	}
 	return parts.length ? ':' + parts.join(';') : '(没有变化)';

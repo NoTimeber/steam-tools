@@ -1,14 +1,14 @@
 // C5 扫货的纯逻辑(不依赖 Vue):后端状态的类型、状态文案、监控列表草稿(改价、添加、删除、改动检测、提交前检查)。
+// 饰品按 Steam 英文名(name)存和提交(C5 接口只认它),页面上显示后端词库查到的中文名(zh)。
 
-export type C5Mode = 'dry' | 'live';
-export type C5RunState = 'stopped' | 'watching' | 'sweeping';
+/** stopped 停止;sweeping 自动扫货(真实下单,没有模拟) */
+export type C5RunState = 'stopped' | 'sweeping';
 export type C5ItemStatus = 'done' | 'cooldown' | 'noquote' | 'hit' | 'watch';
 export type C5PurchaseStatus = 'unknown' | 'ok' | 'failed' | 'cancelled';
 export type Tone = 'default' | 'success' | 'warning' | 'error' | 'info';
 
 /** 后端 src/c5/config.ts 的 C5Settings */
 export interface C5Settings {
-	mode: C5Mode;
 	strategy: 'listing' | 'quick';
 	tradeUrl: string;
 	maxTotalSpend: number;
@@ -30,6 +30,8 @@ export interface C5WatchItem {
 }
 
 export interface C5ItemView extends C5WatchItem {
+	/** 中文名;词库里没有为 null */
+	zh: string | null;
 	status: C5ItemStatus;
 	pauseUntil: number | null;
 	lowest: number | null;
@@ -42,8 +44,8 @@ export interface C5ItemView extends C5WatchItem {
 export interface C5Purchase {
 	outTradeNo: string;
 	ts: number;
-	mode: C5Mode;
 	name: string;
+	zh: string | null;
 	productId: string;
 	price: number;
 	status: C5PurchaseStatus;
@@ -89,9 +91,20 @@ export interface C5Listing {
 	amount: number;
 }
 
+/** 添加饰品的搜索结果(后端 src/c5/index.ts 的 C5NameOption);zh 为 null 是词库里没有、按输入的英文名原样用 */
+export interface C5NameOption {
+	name: string;
+	zh: string | null;
+}
+
+/** 显示用的饰品名:有中文用中文 */
+export function itemLabel(item: {name: string; zh?: string | null}): string {
+	return item.zh || item.name;
+}
+
 // ===== 文案 =====
 
-export const RUN_LABELS: Record<C5RunState, string> = {stopped: '停止', watching: '只看行情', sweeping: '自动扫货'};
+export const RUN_LABELS: Record<C5RunState, string> = {stopped: '停止', sweeping: '自动扫货'};
 
 export const DELIVERY_OPTIONS = [
 	{value: 0, label: '不限'},
@@ -142,16 +155,17 @@ export function formatTime(ms: number | null | undefined, now: number = Date.now
 }
 
 export function budgetText(budget: C5State['budget']): string {
-	return `${money(budget.spent)} / ${budget.total > 0 ? money(budget.total) : '不限'}`;
+	return `${money(budget.spent)} / ${budget.total > 0 ? money(budget.total) : '未设'}`;
 }
 
 // ===== 监控列表草稿 =====
 
-/** 表格里正在编辑的一行。origName 为空的是新加的(还没保存) */
+/** 表格里正在编辑的一行。origName 为空的是新加的(还没保存);zh 只用来显示,不提交 */
 export interface DraftRow {
 	uid: string;
 	origName: string | null;
 	name: string;
+	zh: string | null;
 	maxPrice: number | null;
 	maxQty: number | null;
 	maxSpend: number | null;
@@ -164,11 +178,12 @@ export type DraftField = 'name' | 'maxPrice' | 'maxQty' | 'maxSpend' | 'delivery
 const FIELDS: readonly DraftField[] = ['name', 'maxPrice', 'maxQty', 'maxSpend', 'delivery', 'assetType'];
 
 /** 服务端列表 → 草稿;previous 里同名的行沿用原来的 uid(表格不重建行,输入框不丢焦点) */
-export function toDrafts(items: readonly C5WatchItem[], newUid: () => string, previous: readonly DraftRow[] = []): DraftRow[] {
+export function toDrafts(items: ReadonlyArray<C5WatchItem & {zh?: string | null}>, newUid: () => string, previous: readonly DraftRow[] = []): DraftRow[] {
 	return items.map(item => ({
 		uid: previous.find(row => row.origName === item.name)?.uid ?? newUid(),
 		origName: item.name,
 		name: item.name,
+		zh: item.zh ?? null,
 		maxPrice: item.maxPrice,
 		maxQty: item.maxQty,
 		maxSpend: item.maxSpend,
@@ -201,11 +216,12 @@ export function draftsDirty(drafts: readonly DraftRow[], items: readonly C5Watch
 		|| drafts.some((row, index) => row.origName !== items[index]?.name || dirtyFields(row, items).size > 0);
 }
 
-export function newDraft(newUid: () => string, init: Partial<Pick<DraftRow, 'name' | 'maxPrice' | 'maxQty' | 'maxSpend'>> = {}): DraftRow {
+export function newDraft(newUid: () => string, init: Partial<Pick<DraftRow, 'name' | 'zh' | 'maxPrice' | 'maxQty' | 'maxSpend'>> = {}): DraftRow {
 	return {
 		uid: newUid(),
 		origName: null,
 		name: String(init.name ?? '').trim(),
+		zh: init.zh ?? null,
 		maxPrice: init.maxPrice ?? null,
 		maxQty: init.maxQty ?? null,
 		maxSpend: init.maxSpend ?? 0,
@@ -224,17 +240,18 @@ export function draftPayload(drafts: readonly DraftRow[]): {items: C5WatchItem[]
 		if (!name) {
 			return {items: [], error: `${where}:饰品名不能为空`};
 		}
+		const shown = row.zh || name;
 		if (!(Number(row.maxPrice) > 0)) {
-			return {items: [], error: `${name}:目标价要大于 0`};
+			return {items: [], error: `${shown}:目标价要大于 0`};
 		}
 		if (!Number.isInteger(row.maxQty) || Number(row.maxQty) < 1) {
-			return {items: [], error: `${name}:数量上限至少 1`};
+			return {items: [], error: `${shown}:数量上限至少 1`};
 		}
 		if (Number(row.maxSpend ?? 0) < 0) {
-			return {items: [], error: `${name}:花费上限不能是负数`};
+			return {items: [], error: `${shown}:花费上限不能是负数`};
 		}
 		if (items.some(item => item.name === name)) {
-			return {items: [], error: `${name} 重复了`};
+			return {items: [], error: `${shown} 重复了`};
 		}
 		items.push({
 			name, maxPrice: Number(row.maxPrice), maxQty: Number(row.maxQty), maxSpend: Number(row.maxSpend ?? 0),
@@ -244,10 +261,21 @@ export function draftPayload(drafts: readonly DraftRow[]): {items: C5WatchItem[]
 	return {items, error: ''};
 }
 
-/** 开实盘扫货前的确认文字 */
-export function liveConfirmText(settings: C5Settings, itemCount: number): string {
+/** 能不能开始自动扫货(和后端 src/c5/config.ts 的 sweepBlocker 一样):能返回 null,不能返回原因 */
+export function sweepBlocker(settings: C5Settings): string | null {
+	if (!settings.tradeUrl) {
+		return '没填收货账号的交易链接';
+	}
+	if (!(settings.maxTotalSpend > 0)) {
+		return '没设总预算(要大于 0)';
+	}
+	return null;
+}
+
+/** 开始自动扫货前的确认文字 */
+export function sweepConfirmText(settings: C5Settings, itemCount: number): string {
 	return [
-		'实盘自动扫货:监控列表里的饰品跌到目标价以内会真实下单,花 C5 账户余额。',
+		'自动扫货:监控列表里的饰品跌到目标价以内会真实下单,花 C5 账户余额(没有模拟)。',
 		`总预算 ${money(settings.maxTotalSpend)},每轮最多 ${settings.maxBuyPerCycle} 单,余额保留 ${money(settings.minBalanceReserve)}。`,
 		`策略:${settings.strategy === 'quick' ? '快速购买(平台挑最低价,一次一件)' : '按在售列表批量买'};监控 ${itemCount} 个饰品。`,
 		'确定开始?'

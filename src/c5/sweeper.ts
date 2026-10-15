@@ -107,9 +107,11 @@ export interface SweeperDeps {
 	settings(): C5Settings;
 	/** 监控列表。网页上保存时整个换掉(不原地改),每轮开始时取一次快照 */
 	items(): readonly C5WatchItem[];
-	/** false = 只看行情不下单(随时可能变,每次下单前都看一眼) */
+	/** false = 已停止,不再下单(随时可能变,每次下单前都看一眼) */
 	canBuy(): boolean;
 	log(level: C5LogLevel, message: string): void;
+	/** 日志里显示的饰品名(有中文用中文);默认就是英文名 */
+	label?: (name: string) => string;
 	now?: () => number;
 	newOutTradeNo?: (now: number) => string;
 }
@@ -118,6 +120,7 @@ export function createSweeper(deps: SweeperDeps) {
 	const {store, log} = deps;
 	const now = deps.now ?? Date.now;
 	const nextOutTradeNo = deps.newOutTradeNo ?? newOutTradeNo;
+	const label = deps.label ?? ((name: string) => name);
 	let skipUntil = new Map<string, number>();     // 在售 id -> 此时间前不再尝试
 	const pauseUntil = new Map<string, number>();  // 饰品名 -> 此时间前不再下单
 	const lastPrice = new Map<string, string>();
@@ -135,16 +138,18 @@ export function createSweeper(deps: SweeperDeps) {
 		}
 		lastPrice.set(item.name, key);
 		if (price == null) {
-			log('warn', `查不到 ${item.name} 的行情,检查饰品名是不是正确的 marketHashName`);
+			log('warn', label(item.name) === item.name
+				? `查不到 ${item.name} 的行情,检查饰品名是不是正确的 marketHashName`
+				: `查不到 ${label(item.name)}(${item.name})的行情,C5 上可能暂时没有在售`);
 		} else {
-			log('debug', `${item.name} 最低 ${price.toFixed(2)}(目标 ≤ ${item.maxPrice.toFixed(2)}) 在售 ${stat.sellCount ?? '-'} 求购最高 ${stat.purchaseMaxPrice ?? '-'}`);
+			log('debug', `${label(item.name)} 最低 ${price.toFixed(2)}(目标 ≤ ${item.maxPrice.toFixed(2)}) 在售 ${stat.sellCount ?? '-'} 求购最高 ${stat.purchaseMaxPrice ?? '-'}`);
 		}
 	}
 
 	function pause(item: C5WatchItem, reason: unknown, what = '下单被拒'): void {
 		const cooldown = deps.settings().errorCooldownSec;
 		pauseUntil.set(item.name, now() + cooldown * 1000);
-		log('warn', `${item.name} ${what},暂停 ${cooldown} 秒: ${reason instanceof Error ? reason.message : String(reason)}`);
+		log('warn', `${label(item.name)} ${what},暂停 ${cooldown} 秒: ${reason instanceof Error ? reason.message : String(reason)}`);
 	}
 
 	// ===== 主循环的一轮 =====
@@ -152,12 +157,9 @@ export function createSweeper(deps: SweeperDeps) {
 	/** 跑一轮。返回 false 表示没有要监控的、或所有目标都已买满 / 预算用完(且没有结果未知的单) */
 	async function runCycle(): Promise<boolean> {
 		const settings = deps.settings();
-		const live = settings.mode === 'live';
-		if (live) {
-			const force = refreshRequested;
-			refreshRequested = false;
-			await refreshOrders(force ? null : REFRESH_PER_CYCLE, {force});
-		}
+		const force = refreshRequested;
+		refreshRequested = false;
+		await refreshOrders(force ? null : REFRESH_PER_CYCLE, {force});
 		const items = deps.items();
 		// 行情整张列表一起查(每个 appId 一个请求),买满的也照常显示最新价
 		const stats: Record<string, C5ItemStat> = {};
@@ -166,17 +168,17 @@ export function createSweeper(deps: SweeperDeps) {
 			Object.assign(stats, await client.itemStats(appId, items.filter(item => item.appId === appId).map(item => item.name)));
 		}
 
-		const totals = store.totals(settings.mode);
+		const totals = store.totals('live');
 		let budget = left(settings.maxTotalSpend, [...totals.values()].reduce((sum, total) => sum + total.spent, 0));
 		const todo = items.filter(item => qtyLeft(item, totals) > 0 && spendLeft(item, totals) > EPS);
 		if (!todo.length || budget <= EPS) {
 			view = {at: now(), stats, pauseUntil: Object.fromEntries(pauseUntil), done: true};
 			// 还有结果未知的单时先不算完:对账后可能释放额度
-			return store.selectPurchases(settings.mode, ['unknown']).length > 0;
+			return store.selectPurchases('live', ['unknown']).length > 0;
 		}
 
 		let cycleLeft = settings.maxBuyPerCycle;
-		let balance: number | null = null;   // 实盘下有触发时才查
+		let balance: number | null = null;   // 有饰品到价时才查
 		for (const item of todo) {
 			const stat = stats[item.name] ?? {};
 			const price = lowestPrice(stat);
@@ -187,19 +189,15 @@ export function createSweeper(deps: SweeperDeps) {
 			if (!deps.canBuy() || cycleLeft <= 0 || now() < (pauseUntil.get(item.name) ?? 0)) {
 				continue;
 			}
-			if (live && balance == null) {
-				balance = (toNumber((await client.balance()).moneyAmount) ?? 0) - settings.minBalanceReserve;
-			}
-			const money = Math.min(budget, spendLeft(item, totals), balance ?? Infinity);
+			balance ??= (toNumber((await client.balance()).moneyAmount) ?? 0) - settings.minBalanceReserve;
+			const money = Math.min(budget, spendLeft(item, totals), balance);
 			const qty = Math.min(qtyLeft(item, totals), cycleLeft);
 			const [bought, cost] = settings.strategy === 'quick'
-				? await sweepQuick(item, price, qty, money, settings)
+				? await sweepQuick(item, qty, money, settings)
 				: await sweepListing(item, qty, money, settings);
 			cycleLeft -= bought;
 			budget -= cost;
-			if (balance != null) {
-				balance -= cost;
-			}
+			balance -= cost;
 		}
 		view = {at: now(), stats, pauseUntil: Object.fromEntries(pauseUntil), done: false};
 		return true;
@@ -223,20 +221,12 @@ export function createSweeper(deps: SweeperDeps) {
 		}
 		const at = now();
 		skipUntil = new Map([...skipUntil].filter(([, until]) => until > at));
-		const skipIds = new Set([...store.productIds(settings.mode), ...skipUntil.keys()]);
+		const skipIds = new Set([...store.productIds('live'), ...skipUntil.keys()]);
 		const picks = pickListings(raw.map(parseListing).filter((listing): listing is Listing => !!listing), {
 			maxPrice: item.maxPrice, qtyLeft: qty, budgetLeft: money, skipIds
 		});
 		if (!picks.length || !deps.canBuy()) {
 			return [0, 0];
-		}
-		if (settings.mode === 'dry') {
-			for (const pick of picks) {
-				store.addPurchase({outTradeNo: nextOutTradeNo(at), ts: at, mode: 'dry', name: item.name, productId: pick.productId, price: pick.price, status: 'ok'});
-			}
-			const total = picks.reduce((sum, pick) => sum + pick.price, 0);
-			log('success', `[模拟] 买入 ${item.name} × ${picks.length},合计 ${total.toFixed(2)}(${picks.map(pick => pick.price.toFixed(2)).join(' ')})`);
-			return [picks.length, total];
 		}
 		return batchBuy(item, picks, settings);
 	}
@@ -256,7 +246,7 @@ export function createSweeper(deps: SweeperDeps) {
 			})));
 		} catch (err) {
 			if (err instanceof C5NetworkError) {
-				log('error', `${item.name} 下单结果未知(${err.message}),${picks.length} 笔先按已花费计入预算,稍后自动对账`);
+				log('error', `${label(item.name)} 下单结果未知(${err.message}),${picks.length} 笔先按已花费计入预算,稍后自动对账`);
 				return [picks.length, picks.reduce((sum, pick) => sum + pick.price, 0)];
 			}
 			if (err instanceof C5Error) {
@@ -280,7 +270,7 @@ export function createSweeper(deps: SweeperDeps) {
 			orders.delete(outTradeNo);
 			const pay = toNumber(row.actualPay) || pick.price;
 			store.updatePurchase(outTradeNo, {status: 'ok', orderId: String(row.orderId ?? ''), actualPay: pay});
-			log('success', `买入 ${item.name} ${pay.toFixed(2)},订单 ${row.orderId ?? '-'}`);
+			log('success', `买入 ${label(item.name)} ${pay.toFixed(2)},订单 ${row.orderId ?? '-'}`);
 			bought += 1;
 			cost += pay;
 		}
@@ -293,10 +283,10 @@ export function createSweeper(deps: SweeperDeps) {
 			orders.delete(outTradeNo);
 			store.updatePurchase(outTradeNo, {status: 'failed', error: row.failReason ? `平台返回购买失败: ${row.failReason}` : '平台返回购买失败'});
 			skipUntil.set(pick.productId, now() + FAILED_SKIP_MS);
-			log('info', `没买到 ${item.name} ${pick.price.toFixed(2)}(在售 ${pick.productId})`);
+			log('info', `没买到 ${label(item.name)} ${pick.price.toFixed(2)}(在售 ${pick.productId})`);
 		}
 		for (const [outTradeNo, pick] of orders) {   // 两个列表里都没有的,保持未知,等对账
-			log('warn', `${item.name} 单号 ${outTradeNo} 不在返回结果里,先按已花费计入预算`);
+			log('warn', `${label(item.name)} 单号 ${outTradeNo} 不在返回结果里,先按已花费计入预算`);
 			bought += 1;
 			cost += pick.price;
 		}
@@ -305,18 +295,8 @@ export function createSweeper(deps: SweeperDeps) {
 
 	// ===== quick 策略:平台挑最低价,一次一件 =====
 
-	async function sweepQuick(item: C5WatchItem, price: number, qty: number, money: number, settings: C5Settings): Promise<[number, number]> {
+	async function sweepQuick(item: C5WatchItem, qty: number, money: number, settings: C5Settings): Promise<[number, number]> {
 		const target = item.maxPrice;
-		if (settings.mode === 'dry') {
-			// 拿不到在售明细,每轮按当前最低价模拟买一件
-			if (price > money + EPS) {
-				return [0, 0];
-			}
-			store.addPurchase({outTradeNo: nextOutTradeNo(now()), ts: now(), mode: 'dry', name: item.name, productId: '', price, status: 'ok'});
-			log('success', `[模拟] 快速购买 ${item.name} ${price.toFixed(2)}`);
-			return [1, price];
-		}
-
 		let bought = 0;
 		let cost = 0;
 		// 成交价事先不知道,预算按目标价预留
@@ -330,7 +310,7 @@ export function createSweeper(deps: SweeperDeps) {
 				});
 			} catch (err) {
 				if (err instanceof C5NetworkError) {
-					log('error', `${item.name} 下单结果未知(${err.message}),先按 ${target.toFixed(2)} 计入预算,稍后自动对账`);
+					log('error', `${label(item.name)} 下单结果未知(${err.message}),先按 ${target.toFixed(2)} 计入预算,稍后自动对账`);
 					return [bought + 1, cost + target];
 				}
 				if (err instanceof C5Error) {
@@ -351,11 +331,11 @@ export function createSweeper(deps: SweeperDeps) {
 			const orderId = String(data.orderId ?? '');
 			if (payStatus === 1) {
 				store.updatePurchase(outTradeNo, {status: 'ok', orderId, actualPay: pay});
-				log('success', `买入 ${item.name} ${pay.toFixed(2)},订单 ${orderId || '-'}`);
+				log('success', `买入 ${label(item.name)} ${pay.toFixed(2)},订单 ${orderId || '-'}`);
 			} else {
 				// 支付中(或没给支付状态):成没成交还不知道,保持未知、照样占额度,交给对账
 				store.updatePurchase(outTradeNo, {orderId, actualPay: pay});
-				log('info', `${item.name} 已下单,平台${payStatus === 0 ? '支付中' : '没返回支付状态'},先按 ${pay.toFixed(2)} 计入预算,稍后自动对账`);
+				log('info', `${label(item.name)} 已下单,平台${payStatus === 0 ? '支付中' : '没返回支付状态'},先按 ${pay.toFixed(2)} 计入预算,稍后自动对账`);
 			}
 			bought += 1;
 			cost += pay;
@@ -396,7 +376,7 @@ export function createSweeper(deps: SweeperDeps) {
 			// 平台已经给过订单号的(快速购买支付中)确实下了单,查不到是查询的问题,不按未成交释放,留给手工核对
 			if (purchase.status === 'unknown' && !purchase.orderId && at - purchase.ts > UNKNOWN_GIVEUP_MS) {
 				store.updatePurchase(purchase.outTradeNo, {status: 'failed', error: '对账:平台没有这笔订单', checkedAt: at});
-				log('info', `对账:${purchase.name} 单号 ${purchase.outTradeNo} 平台没有订单,按未成交处理`);
+				log('info', `对账:${label(purchase.name)} 单号 ${purchase.outTradeNo} 平台没有订单,按未成交处理`);
 			} else {
 				store.updatePurchase(purchase.outTradeNo, {checkedAt: at});
 			}
@@ -416,10 +396,10 @@ export function createSweeper(deps: SweeperDeps) {
 		if (ORDER_CANCELLED.includes(orderStatus)) {
 			fields.status = 'cancelled';
 			fields.error = String(detail.failedDesc || detail.statusName || '已取消');
-			log('warn', `${purchase.name} 订单 ${orderId} 已取消(${fields.error}),释放额度`);
+			log('warn', `${label(purchase.name)} 订单 ${orderId} 已取消(${fields.error}),释放额度`);
 		} else if (purchase.status === 'unknown') {
 			fields.status = 'ok';
-			log('success', `对账:${purchase.name} 单号 ${purchase.outTradeNo} 已成交`);
+			log('success', `对账:${label(purchase.name)} 单号 ${purchase.outTradeNo} 已成交`);
 		}
 		store.updatePurchase(purchase.outTradeNo, fields);
 	}

@@ -9,12 +9,15 @@ export function c5Routes(router: Router, {c5}: {c5: C5Service}): void {
 		res.json({success: true, state: c5.state()});
 	});
 
-	// 设置:{appKey?, clearAppKey?, mode, strategy, tradeUrl, maxTotalSpend, ...};appKey 留空表示不改
+	// 设置:{appKey?, clearAppKey?, strategy, tradeUrl, maxTotalSpend, ...};appKey 留空表示不改
 	router.post('/api/c5/settings', keyedRoute('state', req => c5.saveSettings(req.body || {}), '保存设置失败'));
-	// 运行状态:stopped / watching / sweeping
+	// 运行状态:stopped / sweeping(真实下单)
 	router.post('/api/c5/run', keyedRoute('state', req => c5.setRun((req.body || {}).state), '操作失败'));
 	// 监控列表整张表一起提交:{items: [{name, maxPrice, maxQty, maxSpend, delivery, assetType, appId}]}
 	router.post('/api/c5/watchlist', keyedRoute('state', req => c5.saveWatchlist((req.body || {}).items), '保存监控列表失败'));
+
+	// 添加饰品时按中文或英文搜名字:?q=千瓦 → {options: [{name: 'Kilowatt Case', zh: '千瓦武器箱'}]}
+	router.get('/api/c5/names', spreadRoute(req => c5.searchNames(req.query.q), '搜索饰品失败'));
 
 	router.post('/api/c5/check', keyedRoute('result', () => c5.check(), '检查连接失败'));
 	router.post('/api/c5/listings', spreadRoute(req => c5.listings((req.body || {}).name), '查在售失败'));
@@ -23,5 +26,4 @@ export function c5Routes(router: Router, {c5}: {c5: C5Service}): void {
 		const body = req.body || {};
 		return c5.resolvePurchase(body.outTradeNo, body.status);
 	}, '标记失败'));
-	router.post('/api/c5/purchases/clear', keyedRoute('state', req => c5.clearPurchases((req.body || {}).mode), '清空失败'));
 }

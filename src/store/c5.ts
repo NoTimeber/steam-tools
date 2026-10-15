@@ -11,6 +11,7 @@ const APP_KEY_PURPOSE = 'c5.app_key';
 const SETTINGS_KEY = 'c5.settings';
 const RUN_STATE_KEY = 'c5.run';
 
+/** dry 是旧版本模拟模式留下的记录(现在不再写入、也不显示);live 是真实下单 */
 export type C5Mode = 'dry' | 'live';
 export type C5PurchaseStatus = 'unknown' | 'ok' | 'failed' | 'cancelled';
 
@@ -91,8 +92,6 @@ export interface C5Store {
 	totals(mode: C5Mode): Map<string, C5Total>;
 	/** 已经下过单(含结果未知)的在售 id,不再重复买 */
 	productIds(mode: C5Mode): Set<string>;
-	/** 返回删了几笔 */
-	clearPurchases(mode: C5Mode): number;
 }
 
 const UPDATABLE: Record<keyof C5PurchaseUpdate, string> = {
@@ -149,7 +148,6 @@ export function createC5Store(db: Db, vault: Vault, settings: SettingsStore): C5
 	const selectPurchase = db.prepare('SELECT * FROM c5_purchases WHERE out_trade_no = ?');
 	const selectByMode = db.prepare('SELECT * FROM c5_purchases WHERE mode = ? ORDER BY ts, rowid');
 	const selectRecent = db.prepare('SELECT * FROM c5_purchases WHERE mode = ? ORDER BY ts DESC, rowid DESC LIMIT ?');
-	const deleteByMode = db.prepare('DELETE FROM c5_purchases WHERE mode = ?');
 
 	function selectPurchases(mode: C5Mode, statuses?: readonly C5PurchaseStatus[]): C5Purchase[] {
 		const rows = selectByMode.all(mode).map(toPurchase);
@@ -229,9 +227,6 @@ export function createC5Store(db: Db, vault: Vault, settings: SettingsStore): C5
 		},
 		productIds(mode) {
 			return new Set(selectPurchases(mode, C5_COUNTED).map(purchase => purchase.productId).filter(Boolean));
-		},
-		clearPurchases(mode) {
-			return Number(deleteByMode.run(mode).changes);
 		}
 	};
 }

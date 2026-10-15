@@ -5,7 +5,7 @@ import {computed, reactive} from 'vue';
 import {api} from '../api/http.ts';
 import {socket} from '../api/socket.ts';
 import {draftPayload, draftsDirty, newDraft, toDrafts} from '../lib/c5.ts';
-import type {C5CheckResult, C5Listing, C5RunState, C5Settings, C5State, DraftRow} from '../lib/c5.ts';
+import type {C5CheckResult, C5Listing, C5NameOption, C5RunState, C5Settings, C5State, DraftRow} from '../lib/c5.ts';
 import {addLog} from './logs.ts';
 
 const POLL_MS = 2500;
@@ -73,7 +73,7 @@ export function leaveC5(): void {
 
 // ===== 监控列表 =====
 
-export function addDraft(init: {name: string; maxPrice: number | null; maxQty: number | null}): void {
+export function addDraft(init: {name: string; zh: string | null; maxPrice: number | null; maxQty: number | null}): void {
 	c5.drafts.push(newDraft(newUid, init));
 }
 
@@ -122,6 +122,12 @@ export async function checkConnection(): Promise<C5CheckResult> {
 	return data.result;
 }
 
+/** 添加饰品时按中文或英文搜名字 */
+export async function searchNames(q: string): Promise<C5NameOption[]> {
+	const data = await api.get<{options: C5NameOption[]}>('/api/c5/names?q=' + encodeURIComponent(q));
+	return data.options;
+}
+
 export async function fetchListings(name: string): Promise<{name: string; maxPrice: number; listings: C5Listing[]}> {
 	return api.post('/api/c5/listings', {name});
 }
@@ -134,11 +140,6 @@ export async function refreshOrders(): Promise<number> {
 
 export async function resolvePurchase(outTradeNo: string, status: 'ok' | 'failed'): Promise<void> {
 	const data = await api.post<{state: C5State}>('/api/c5/purchases/resolve', {outTradeNo, status});
-	applyState(data.state);
-}
-
-export async function clearDryPurchases(): Promise<void> {
-	const data = await api.post<{state: C5State}>('/api/c5/purchases/clear', {mode: 'dry'});
 	applyState(data.state);
 }
 
