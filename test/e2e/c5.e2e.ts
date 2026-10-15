@@ -181,19 +181,23 @@ describe('C5 扫货', () => {
 		assert.equal(stopped.json.state.run, 'stopped');
 	});
 
-	test('收货账号:从登录着的账号里选,用它的网页会话取交易链接;状态里认得出账号和 C5 绑定', async () => {
+	test('收货账号:账户管理里的账号都列出来,登录过的用网页会话取交易链接;状态里认得出账号和 C5 绑定', async () => {
 		assert.equal((await state()).receiver.account, null, '原来的链接不是本工具的账号');
-		const notOnline = await client.post('/api/c5/trade-url', {account: 'alpha'});
-		assert.equal(notOnline.status, 404, notOnline.text);
+		const listed = await client.get('/api/c5/receivers');
+		assert.deepEqual(listed.json.accounts.map((account: any) => [account.account, account.online, account.selectable]), [['alpha', false, false]], '没登录过也列出来,但不能选');
+		const neverLoggedIn = await client.post('/api/c5/trade-url', {account: 'alpha'});
+		assert.equal(neverLoggedIn.status, 409, neverLoggedIn.text);
 
 		await client.post('/api/login', {accountName: 'alpha'});
 		const deadline = Date.now() + 10000;
 		let receivers = await client.get('/api/c5/receivers');
-		while (!receivers.json.accounts?.length && Date.now() < deadline) {
+		while (!receivers.json.accounts?.[0]?.online && Date.now() < deadline) {
 			await sleep(100);
 			receivers = await client.get('/api/c5/receivers');
 		}
-		assert.deepEqual(receivers.json.accounts.map((account: any) => [account.account, account.steamId, account.c5Bound]), [['alpha', '76561190100005555', true]]);
+		assert.deepEqual(receivers.json.accounts.map((account: any) => [account.account, account.steamId, account.online, account.selectable, account.c5Bound]), [
+			['alpha', '76561190100005555', true, true, true]
+		]);
 
 		const fetched = await client.post('/api/c5/trade-url', {account: 'alpha'});
 		assert.equal(fetched.status, 200, fetched.text);

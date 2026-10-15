@@ -108,20 +108,41 @@ export function listCookieFlowAccounts(attempts: Iterable<Attempt>, cookiesFor: 
 		}));
 }
 
-export interface SteamAccountRef {
+export interface AccountRef {
 	account: string;
+	/** 不知道时为 '' */
 	steamId: string;
 	personaName: string;
+	/** 登录着、有网页会话 */
+	online: boolean;
+	/** 有网页会话 cookie(在线的,或上次登录存下的),能试着去 Steam 取东西 */
+	hasSession: boolean;
 }
 
 /**
- * 知道 SteamID 的账号(C5 扫货认收货账号用),按账号名排序。
- * withWebSession 时只要登录着、有网页会话 cookie 的(能取交易链接)
+ * 账户管理里的全部账号(按名单顺序),补上 SteamID、昵称、在不在线(C5 扫货选收货账号用)。
+ * SteamID 先取在线会话的,没有再问 steamIdOf(maFile、上次登录存下的会话)。
  */
-export function listSteamAccounts(attempts: Iterable<Attempt>, cookiesFor: (attempt: Attempt) => readonly string[], withWebSession: boolean): SteamAccountRef[] {
-	return Array.from(attempts)
-		.filter(attempt => attempt.accountName && /^\d{17}$/.test(String(attempt.steamID || '')))
-		.filter(attempt => !withWebSession || (isAttemptUsableForCookieFlow(attempt) && cookiesFor(attempt).length > 0))
-		.sort((left, right) => String(left.accountName).localeCompare(String(right.accountName), 'zh-CN'))
-		.map(attempt => ({account: attempt.accountName, steamId: String(attempt.steamID), personaName: attempt.personaName || ''}));
+export function listAccountRefs(accountNames: readonly string[], attempts: Iterable<Attempt>, options: {
+	steamIdOf(accountName: string): string;
+	cookiesFor(attempt: Pick<Attempt, 'accountName'> & Partial<Attempt>): readonly string[];
+}): AccountRef[] {
+	const live = new Map<string, Attempt>();
+	for (const attempt of attempts) {
+		if (attempt.accountName) {
+			live.set(attempt.accountName.toLowerCase(), attempt);
+		}
+	}
+	return accountNames.filter(Boolean).map(account => {
+		const attempt = live.get(account.toLowerCase());
+		const online = isAttemptUsableForCookieFlow(attempt) && options.cookiesFor(attempt).length > 0;
+		const steamId = [attempt?.steamID, options.steamIdOf(account)].map(value => String(value || '')).find(value => /^\d{17}$/.test(value)) ?? '';
+		return {
+			account,
+			steamId,
+			personaName: attempt?.personaName || '',
+			online,
+			hasSession: online || options.cookiesFor(attempt ?? {accountName: account}).length > 0
+		};
+	});
 }

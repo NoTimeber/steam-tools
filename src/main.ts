@@ -23,12 +23,12 @@ import {loadNameDb} from './items/names.ts';
 import {describeGcItem, loadItemsGameSchema} from './items/schema.ts';
 import type {ItemSchema} from './items/schema.ts';
 import {createFingerprintStore} from './steam/fingerprint.ts';
-import {createSessionManager} from './steam/session-manager.ts';
+import {createSessionManager, safeName} from './steam/session-manager.ts';
 import type {SteamClient} from './steam/session-manager.ts';
 import {currencyIdToIso} from './steam/currencies.ts';
 import {installMicroTxnHooks} from './steam/microtxn.ts';
 import type {SteamUserClass} from './steam/microtxn.ts';
-import {findAttemptByKey, listCookieFlowAccounts, listSteamAccounts} from './steam/attempts.ts';
+import {findAttemptByKey, listAccountRefs, listCookieFlowAccounts} from './steam/attempts.ts';
 import {STEAM_WEB_USER_AGENT} from './steam/community.ts';
 import {fetchTradeUrl} from './steam/trade-url.ts';
 import {createGcModuleAttacher} from './steam/gc-modules.ts';
@@ -292,18 +292,28 @@ const wallet = createWalletService({
 	emit: payload => io.emit('wallet:redeem', payload)
 });
 
+// 收货账号下拉:账户管理里的全部账号;SteamID 先看在线会话,再看 maFile、上次登录存下的会话
+const c5AccountRefs = () => listAccountRefs(store.accounts.list().map(account => account.accountName), attempts.values(), {
+	steamIdOf: accountName => profiles.local(accountName).steamID
+		|| String(store.sessions.get(safeName(accountName))?.steamID || ''),
+	cookiesFor: profiles.cookiesFor
+});
+
 // C5 扫货:app-key、设置、监控列表、购买流水在加密库(store.c5);到价自动买,运行状态重启后恢复;中文名查随包词库 app/data/cs2-names-zh.json.gz
 const c5 = createC5Service({
 	store: store.c5,
 	names: loadNameDb(join(config.appDir, 'data', 'cs2-names-zh.json.gz')),
 	// 收货账号从本工具登录着的账号里选,交易链接用它的网页会话去 Steam 取
-	localAccounts: withWebSession => listSteamAccounts(attempts.values(), profiles.cookiesFor, withWebSession),
+	localAccounts: c5AccountRefs,
 	fetchTradeUrl: async account => {
+		const ref = c5AccountRefs().find(entry => entry.account === account);
 		const attempt = findAttempt(account);
-		if (!attempt) {
-			throw new Error('没有这个账号的会话');
-		}
-		return fetchTradeUrl({steamId: String(attempt.steamID || ''), cookies: profiles.cookiesFor(attempt), userAgent: STEAM_WEB_USER_AGENT});
+		return fetchTradeUrl({
+			steamId: ref?.steamId ?? '',
+			// 不在线时用上次登录存下的网页会话
+			cookies: profiles.cookiesFor(attempt ?? {accountName: account}),
+			userAgent: STEAM_WEB_USER_AGENT
+		});
 	},
 	emit: (event, payload) => io.emit(event, payload)
 });

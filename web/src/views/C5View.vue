@@ -9,7 +9,7 @@ import type {VNodeChild} from 'vue';
 import {errorText} from '../api/http.ts';
 import {
 	ASSET_TYPE_OPTIONS, budgetText, DELIVERY_OPTIONS, dirtyFields, formatTime, itemLabel, itemStatus, money, priceText, purchaseStatus, receiverC5Note,
-	receiverOptionLabel, receiverText, removedNames, RUN_LABELS, sweepBlocker, sweepConfirmText
+	receiverOptionLabel, receiverText, removedNames, RUN_LABELS, sortReceiverAccounts, sweepBlocker, sweepConfirmText
 } from '../lib/c5.ts';
 import type {C5NameOption, C5Purchase, C5ReceiverAccount, C5RunState, DraftField, DraftRow} from '../lib/c5.ts';
 import {
@@ -64,7 +64,12 @@ async function loadReceivers(): Promise<void> {
 	}
 }
 
-const receiverOptions = computed(() => receiverAccounts.value.map(account => ({value: account.account, label: receiverOptionLabel(account)})));
+// 账户管理里的全部账号:在线的在前;没登录过(取不到交易链接)的灰掉。可以输账号名、昵称搜
+const receiverOptions = computed(() => sortReceiverAccounts(receiverAccounts.value).map(account => ({
+	value: account.account,
+	label: receiverOptionLabel(account),
+	disabled: !account.selectable
+})));
 /** 当前收货账号是下拉里的哪一个;手贴的别人的链接不在下拉里,显示成占位文字 */
 const receiverValue = computed(() => {
 	const account = state.value?.receiver?.account;
@@ -78,8 +83,12 @@ async function pickReceiver(account: string | null): Promise<void> {
 	}
 	switchingReceiver.value = true;
 	try {
-		await switchReceiver(account);
-		message.success(`收货账号已改为 ${account}`);
+		const {warning} = await switchReceiver(account);
+		if (warning) {
+			message.warning(`收货账号已改为 ${account}。${warning}`, {duration: 6000});
+		} else {
+			message.success(`收货账号已改为 ${account}`);
+		}
 	} catch (err) {
 		message.error('换收货账号失败:' + errorText(err));
 	} finally {
@@ -479,6 +488,7 @@ async function copyLogs(): Promise<void> {
 						<NSelect
 							class="receiver-select"
 							size="tiny"
+							filterable
 							:value="receiverValue"
 							:options="receiverOptions"
 							:placeholder="receiverPlaceholder"
@@ -490,7 +500,10 @@ async function copyLogs(): Promise<void> {
 							@update:value="pickReceiver"
 						>
 							<template #empty>
-								<span class="muted">没有登录着的账号,先在「账户管理」里登录</span>
+								<span class="muted">{{ receiverAccounts.length ? '没搜到这个账号' : '账户管理里还没有账号' }}</span>
+							</template>
+							<template v-if="receiverAccounts.some(account => !account.selectable)" #action>
+								<span class="muted price-note">灰色的账号没登录过,取不到交易链接;先在「账户管理」里登录一次</span>
 							</template>
 						</NSelect>
 						<NTag v-if="receiverNote && !receiverNote.ok" size="small" :bordered="false" type="warning">{{ receiverNote.text }}</NTag>

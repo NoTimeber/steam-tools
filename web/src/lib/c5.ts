@@ -104,11 +104,19 @@ export interface C5Receiver {
 	c5Checked: boolean;
 }
 
-/** 收货账号下拉:本工具里登录着的账号;c5Bound 为 null 是没查 C5(没填 app-key 或查失败) */
+/** 收货账号下拉:账户管理里的全部账号;c5Bound 为 null 是没查 C5(没填 app-key 或查失败) */
 export interface C5ReceiverAccount {
 	account: string;
 	steamId: string;
 	personaName: string;
+	/** 登录着、有网页会话 */
+	online: boolean;
+	/** 有网页会话 cookie(在线的,或上次登录存下的) */
+	hasSession: boolean;
+	/** 取到过交易链接 */
+	saved: boolean;
+	/** 能选:能去 Steam 取链接,或者取到过 */
+	selectable: boolean;
 	c5Bound: boolean | null;
 }
 
@@ -189,9 +197,21 @@ export function describeTradeUrl(tradeUrl: string, receivers: C5Receivers | null
 	};
 }
 
-/** 收货账号下拉的一项:「alpha(昵称)」,C5 上没绑定的才标出来 */
+/** 收货账号下拉的一项:「alpha(昵称)」,不在线、没登录过、C5 上没绑定的才标出来 */
 export function receiverOptionLabel(account: C5ReceiverAccount): string {
-	return `${account.account}${account.personaName ? `(${account.personaName})` : ''}${account.c5Bound === false ? ' · C5 未绑定' : ''}`;
+	const notes = [
+		!account.selectable ? '没登录过' : !account.online ? '未在线' : '',
+		account.c5Bound === false ? 'C5 未绑定' : ''
+	].filter(Boolean);
+	return `${account.account}${account.personaName ? `(${account.personaName})` : ''}${notes.map(note => ` · ${note}`).join('')}`;
+}
+
+/** 收货账号下拉的顺序:在线的、能选的在前,同一档按账户管理里的顺序 */
+export function sortReceiverAccounts(accounts: readonly C5ReceiverAccount[]): C5ReceiverAccount[] {
+	const rank = (account: C5ReceiverAccount) => (account.online ? 0 : account.selectable ? 1 : 2);
+	return accounts.map((account, index) => ({account, index}))
+		.sort((a, b) => rank(a.account) - rank(b.account) || a.index - b.index)
+		.map(entry => entry.account);
 }
 
 /** 收货账号一行字:「alpha(昵称) · SteamID 7656…」;不是本工具的账号只给 SteamID */

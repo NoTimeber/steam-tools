@@ -133,17 +133,17 @@ export async function fetchReceivers(): Promise<C5Receivers> {
 	return api.get<C5Receivers>('/api/c5/receivers');
 }
 
-/** 取某个登录着的账号的交易链接(只取不存) */
-export async function fetchTradeUrl(account: string): Promise<{tradeUrl: string; receiver: C5Receiver | null}> {
+/** 取账户管理里某个账号的交易链接(只取,不改设置);warning 是没取到新链接、改用上次取到的原因 */
+export async function fetchTradeUrl(account: string): Promise<{tradeUrl: string; receiver: C5Receiver | null; warning: string | null}> {
 	return api.post('/api/c5/trade-url', {account});
 }
 
 /** 主页面换收货账号:取这个账号的交易链接并马上保存(其它设置不动) */
-export async function switchReceiver(account: string): Promise<C5State> {
-	const {tradeUrl} = await fetchTradeUrl(account);
+export async function switchReceiver(account: string): Promise<{state: C5State; warning: string | null}> {
+	const {tradeUrl, warning} = await fetchTradeUrl(account);
 	const data = await api.post<{state: C5State}>('/api/c5/settings', {tradeUrl});
 	applyState(data.state);
-	return data.state;
+	return {state: data.state, warning};
 }
 
 export async function fetchListings(name: string): Promise<{name: string; maxPrice: number; listings: C5Listing[]}> {

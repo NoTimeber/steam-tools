@@ -10,6 +10,8 @@ const APP_KEY_SETTING = 'c5.appKey';
 const APP_KEY_PURPOSE = 'c5.app_key';
 const SETTINGS_KEY = 'c5.settings';
 const RUN_STATE_KEY = 'c5.run';
+/** 取到过的各账号交易链接 {账号名: 链接}:账号不在线时也能选它当收货账号 */
+const TRADE_URLS_KEY = 'c5.tradeUrls';
 
 /** dry 是旧版本模拟模式留下的记录(现在不再写入、也不显示);live 是真实下单 */
 export type C5Mode = 'dry' | 'live';
@@ -77,6 +79,9 @@ export interface C5Store {
 	saveSettings(settings: object): void;
 	loadRunState(): string | undefined;
 	saveRunState(state: string): void;
+	/** 取到过的交易链接 {账号名: 链接} */
+	loadTradeUrls(): Record<string, string>;
+	saveTradeUrl(account: string, tradeUrl: string): void;
 
 	listItems(): C5WatchItem[];
 	replaceItems(items: readonly C5WatchItem[]): void;
@@ -136,6 +141,12 @@ function toItem(row: Row): C5WatchItem {
 }
 
 export function createC5Store(db: Db, vault: Vault, settings: SettingsStore): C5Store {
+	function loadTradeUrls(): Record<string, string> {
+		const value = settings.get<Record<string, unknown>>(TRADE_URLS_KEY);
+		return Object.fromEntries(Object.entries(value && typeof value === 'object' ? value : {})
+			.filter((entry): entry is [string, string] => typeof entry[1] === 'string'));
+	}
+
 	const selectItems = db.prepare('SELECT * FROM c5_watch_items ORDER BY position');
 	const deleteItems = db.prepare('DELETE FROM c5_watch_items');
 	const insertItem = db.prepare(`
@@ -178,6 +189,10 @@ export function createC5Store(db: Db, vault: Vault, settings: SettingsStore): C5
 		},
 		saveRunState(state) {
 			settings.set(RUN_STATE_KEY, state);
+		},
+		loadTradeUrls,
+		saveTradeUrl(account, tradeUrl) {
+			settings.set(TRADE_URLS_KEY, {...loadTradeUrls(), [account]: tradeUrl});
 		},
 
 		listItems() {

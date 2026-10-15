@@ -78,11 +78,25 @@ export interface C5BoundAccount {
 	status: string;
 }
 
-/** 本工具里登录着的 Steam 账号(有网页会话,能取交易链接) */
+/** 账户管理里的一个账号(src/steam/attempts.ts 的 AccountRef) */
 export interface C5LocalAccount {
 	account: string;
+	/** 不知道时为 '' */
 	steamId: string;
 	personaName: string;
+	/** 登录着、有网页会话 */
+	online: boolean;
+	/** 有网页会话 cookie(在线的,或上次登录存下的),能试着去 Steam 取交易链接 */
+	hasSession: boolean;
+}
+
+/** 收货账号下拉的一项 */
+export interface C5ReceiverAccount extends C5LocalAccount {
+	/** 取到过交易链接(账号不在线也能用) */
+	saved: boolean;
+	/** 能不能选:能去 Steam 取链接,或者取到过 */
+	selectable: boolean;
+	c5Bound: boolean | null;
 }
 
 /** 收货账号:从交易链接里的 partner 算出 SteamID,再对上本工具的账号和 C5 上绑定的账号 */
@@ -128,9 +142,9 @@ export interface C5ServiceOptions {
 	emit(event: 'c5:log', payload: C5LogLine): void;
 	/** 饰品中英文名词库;不给就只显示英文名 */
 	names?: NameDb;
-	/** 本工具里的 Steam 账号:onlyWeb 时只要登录着、有网页会话的(收货账号下拉);否则全部(按 SteamID 认账号) */
-	localAccounts?: (onlyWeb: boolean) => C5LocalAccount[];
-	/** 用账号的网页会话取它自己的交易链接 */
+	/** 账户管理里的全部账号(收货账号下拉;按 SteamID 认交易链接是谁的) */
+	localAccounts?: () => C5LocalAccount[];
+	/** 用账号的网页会话(在线的或上次登录存下的)取它自己的交易链接 */
 	fetchTradeUrl?: (account: string) => Promise<string>;
 	/** 默认是 ./client.ts 的真实客户端;单元测试用假的 */
 	createClient?: (options: {appKey: string; timeoutMs: number}) => C5Api;
@@ -349,7 +363,7 @@ export function createC5Service(options: C5ServiceOptions) {
 		if (!steamId) {
 			return null;
 		}
-		const local = options.localAccounts?.(false).find(account => isTradeUrlOf(tradeUrl, account.steamId)) ?? null;
+		const local = options.localAccounts?.().find(account => isTradeUrlOf(tradeUrl, account.steamId)) ?? null;
 		const c5 = boundAccounts?.list.find(account => isTradeUrlOf(tradeUrl, account.steamId)) ?? null;
 		return {
 			steamId: local?.steamId ?? c5?.steamId ?? steamId,
@@ -565,9 +579,12 @@ export function createC5Service(options: C5ServiceOptions) {
 		return {options: found, priced: !priceError, priceError};
 	}
 
-	/** 收货账号下拉:本工具里登录着的账号,标上 C5 有没有绑定(app-key 有了才查,5 分钟内不重查) */
+	/**
+	 * 收货账号下拉:账户管理里的全部账号,标上能不能选(能去 Steam 取交易链接,或者取到过)、
+	 * C5 有没有绑定(app-key 有了才查,5 分钟内不重查)
+	 */
 	async function receivers(): Promise<{
-		accounts: Array<C5LocalAccount & {c5Bound: boolean | null}>;
+		accounts: C5ReceiverAccount[];
 		/** 查到了 C5 上绑定的账号(没填 app-key、查失败为 false) */
 		checked: boolean;
 		bound: C5BoundAccount[];
@@ -585,29 +602,54 @@ export function createC5Service(options: C5ServiceOptions) {
 			}
 		}
 		const bound = boundAccounts?.list ?? [];
+		const saved = store.loadTradeUrls();
 		return {
-			accounts: (options.localAccounts?.(true) ?? []).map(account => ({
-				...account, c5Bound: boundAccounts ? bound.some(entry => entry.steamId === account.steamId) : null
-			})),
+			accounts: (options.localAccounts?.() ?? []).map(account => {
+				const url = saved[account.account] ?? '';
+				const canFetch = account.hasSession && !!account.steamId && !!options.fetchTradeUrl;
+				const isBound = (entry: C5BoundAccount) => (account.steamId ? entry.steamId === account.steamId : !!url && isTradeUrlOf(url, entry.steamId));
+				return {
+					...account,
+					saved: !!url,
+					selectable: canFetch || !!url,
+					c5Bound: boundAccounts && (account.steamId || url) ? bound.some(isBound) : null
+				};
+			}),
 			checked: !!boundAccounts,
 			bound,
 			boundError
 		};
 	}
 
-	/** 取本工具里某个登录着的账号的交易链接(只取,不保存;页面填进设置后点保存才生效) */
-	async function tradeUrlFor(account: unknown): Promise<{tradeUrl: string; receiver: C5Receiver | null}> {
+	/**
+	 * 取账户管理里某个账号的交易链接(只取,不改设置):能用网页会话就去 Steam 取一次并记下来;
+	 * 账号不在线、会话过期时用上次取到的。warning 是没取到新链接、改用旧链接的原因
+	 */
+	async function tradeUrlFor(account: unknown): Promise<{tradeUrl: string; receiver: C5Receiver | null; warning: string | null}> {
 		const name = String(account ?? '').trim();
-		if (!options.fetchTradeUrl || !options.localAccounts?.(true).some(entry => entry.account === name)) {
-			throw c5Error(404, `${name || '这个账号'} 没有登录着,先在账户管理里登录`);
+		const local = options.localAccounts?.().find(entry => entry.account === name);
+		if (!local) {
+			throw c5Error(404, `账户管理里没有 ${name || '这个账号'}`);
 		}
-		let tradeUrl: string;
-		try {
-			tradeUrl = await options.fetchTradeUrl(name);
-		} catch (err) {
-			throw c5Error(502, `取 ${name} 的交易链接失败: ${err instanceof Error ? err.message : String(err)}`);
+		const saved = store.loadTradeUrls()[name] ?? null;
+		let warning: string | null = null;
+		if (local.hasSession && local.steamId && options.fetchTradeUrl) {
+			try {
+				const tradeUrl = await options.fetchTradeUrl(name);
+				store.saveTradeUrl(name, tradeUrl);
+				return {tradeUrl, receiver: receiverOf(tradeUrl), warning: null};
+			} catch (err) {
+				const reason = err instanceof Error ? err.message : String(err);
+				if (!saved) {
+					throw c5Error(502, `取 ${name} 的交易链接失败: ${reason}`);
+				}
+				warning = `这次没取到新链接(${reason}),用的是上次取到的`;
+			}
 		}
-		return {tradeUrl, receiver: receiverOf(tradeUrl)};
+		if (!saved) {
+			throw c5Error(409, `${name} 还没登录过,先在账户管理里登录一次,才能取到它的交易链接`);
+		}
+		return {tradeUrl: saved, receiver: receiverOf(saved), warning};
 	}
 
 	/** 连通性:app-key、余额、C5 上绑定的 Steam 收货账号 */
