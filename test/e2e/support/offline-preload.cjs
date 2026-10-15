@@ -23,6 +23,7 @@
 //    steam-totp 的 getTimeOffset 换成离线版(返回 0)。
 // 7. 假 Steam 商店结算(store / api / checkout.steampowered.com 上买游戏用到的那几个端点),有状态:
 //    每个账号钱包 10.00 美元、已拥有的包,见 fakeStore();商品可用 FAKE_STORE_PACKAGES 追加。
+//    购买记录页(store.steampowered.com/account/history/ + AjaxLoadMoreHistory):每个账号 37 条,每页 15 条,见 historyRow()。
 // 8. 假社区库存(steamcommunity.com/inventory/<steamID>/730/2):两页共 3 件;FAKE_INVENTORY_FILE 可设成私密(403),见 fakeInventory()。
 //    交易报价隐私设置页(steamcommunity.com/profiles/<steamID>/tradeoffers/privacy):带会话 cookie 时给出这个账号的
 //    交易链接(partner = SteamID 低 32 位),没 cookie 时 302 去登录页,见 fakeTradeUrlPage()。
@@ -525,6 +526,64 @@ function cartTotal(items, packages) {
 	return items.reduce((sum, id) => sum + Number(packages[id].final || 0), 0);
 }
 
+// 购买记录(消费记录用):每个账号 37 条,结构照真实页面(列 class、.wth_payment、g_historyCursor);
+// 第一页 15 条在整页 HTML 里,「加载更多」按游标里的页号每次再给 15 条,最后一页不带游标。
+const HISTORY_TOTAL = 37;
+const HISTORY_PAGE = 15;
+
+function historyRow(index) {
+	const date = new Date(Date.UTC(2026, 9, 14) - index * 3 * 86400000);
+	const dateText = `${date.getUTCFullYear()} 年 ${date.getUTCMonth() + 1} 月 ${date.getUTCDate()} 日`;
+	const balance = `$${(20 + index * 0.37).toFixed(2)}`;
+	const cell = (cls, html) => `<td class="${cls}">${html}</td>`;
+	const divs = texts => texts.map(text => `<div>${text}</div>`).join('');
+	const pay = texts => `<div class="wth_payment">${texts.length > 1 ? divs(texts) : texts.join('')}</div>`;
+	const row = (items, type, payment, total, change, refunded = false) => `
+<tr class="wallet_table_row wallet_table_row_amt_change " onclick="HandleTransactionClick( event, 'https://help.steampowered.com/zh-cn/wizard/HelpWithPurchase?transid=${700000 + index}' )">
+	${cell('wht_date', dateText)}
+	${cell('wht_items', items)}
+	${cell(refunded ? 'wht_type wht_refunded' : 'wht_type ', type + payment)}
+	${cell('wht_total ', total)}
+	${cell('wht_wallet_change wallet_column', change)}
+	${cell('wht_wallet_balance wallet_column', change ? balance : '')}
+</tr>`;
+	switch (index % 6) {
+		case 0: {
+			const count = 1 + (index % 4);
+			const amount = (0.42 * count).toFixed(2);
+			return row(divs(['Counter-Strike 2']) + '<div class="wth_payment">Steam 社区市场</div>', divs([count > 1 ? `${count} 笔市场交易` : '市场交易']), pay([]), `$${amount}`, `+$${amount}`);
+		}
+		case 1:
+			return row(divs([`Fake Game ${index}`]), divs(['购买']), pay(['$1.00 Steam 钱包', '$3.99 Visa']), '$4.99', '-$1.00');
+		case 2:
+			return row(divs(['Counter-Strike 2', '武器箱钥匙']), divs(['游戏内购买']), pay(['Steam 钱包']), '$2.49', '-$2.49');
+		case 3:
+			return row(divs(['Counter-Strike 2']) + '<div class="wth_payment">Steam 社区市场</div>', divs(['市场交易']), pay([]), '$0.35', '-$0.35');
+		case 4:
+			return row(divs(['$10.00 钱包资金']), divs(['购买']), pay(['支付宝']), '$10.00', '+$10.00');
+		default:
+			return index % 12 === 5
+				? row(divs(['Stardew Valley']), divs(['礼物购买']), pay(['Visa']), '$14.99', '')
+				: row(divs([`Fake Game ${index - 10}`]), divs(['退款']), pay(['Steam 钱包']), '$4.99', '+$4.99', true);
+	}
+}
+
+function historyChunk(page) {
+	const start = (page - 1) * HISTORY_PAGE;
+	const html = Array.from({length: Math.max(0, Math.min(HISTORY_PAGE, HISTORY_TOTAL - start))}, (_, i) => historyRow(start + i)).join('');
+	const more = start + HISTORY_PAGE < HISTORY_TOTAL;
+	return {html, ...(more ? {cursor: {wallet_txnid: String(page + 1), timestamp_newest: 1760400000 - page * 86400, balance: '2000', currency: 1}} : {})};
+}
+
+function historyPage(owner, sessionid) {
+	const first = historyChunk(1);
+	return `<!DOCTYPE html><html><body><div id="account_pulldown">${owner}</div>
+<table class="wallet_history_table"><thead><tr><th class="wht_date">日期</th><th class="wht_items">物品</th><th class="wht_type">类型</th><th class="wht_total">总计</th></tr></thead>
+<tbody>${first.html}
+<tr id="more_history"><td colspan="6"><a id="load_more_button">加载更多交易</a></td></tr></tbody></table>
+<script>var g_sessionID = "${sessionid}"; var g_historyCursor = ${first.cursor ? JSON.stringify(first.cursor) : 'null'};</script></body></html>`;
+}
+
 // 不认识的路径返回 null(交给外网拦截)
 function fakeStore(url, init) {
 	const headers = Object.fromEntries(Object.entries((init && init.headers) || {}).map(([key, value]) => [key.toLowerCase(), String(value)]));
@@ -554,6 +613,29 @@ function fakeStore(url, init) {
 				return new Response('', {status: 302, headers: {location: '/account/', 'set-cookie': 'browserid=4242; Path=/'}});
 			}
 			return new Response(`<div id="account_pulldown">${owner}</div><div id="application_config" data-config="{&quot;COUNTRY&quot;:&quot;${country}&quot;}"></div>`, {status: 200});
+		}
+		// 购买记录页:和账户页一样第一次 302 下发 browserid(cookie 里没 sessionid 的也一并下发);
+		// 「加载更多」的表单 sessionid 必须和 cookie 里的一致,否则回 success: false
+		case 'store.steampowered.com/account/history/': {
+			record({event: 'storeRequest', method: 'GET', path: where, owner});
+			if (!owner) {
+				return new Response('', {status: 302, headers: {location: 'https://store.steampowered.com/login/'}});
+			}
+			if (!cookieValue(headers.cookie, 'browserid')) {
+				const setCookies = [['set-cookie', 'browserid=4242; Path=/']];
+				if (!cookieValue(headers.cookie, 'sessionid')) {
+					setCookies.push(['set-cookie', `sessionid=store-${owner}; Path=/`]);
+				}
+				return new Response('', {status: 302, headers: [['location', '/account/history/?l=schinese'], ...setCookies]});
+			}
+			return new Response(historyPage(owner, cookieValue(headers.cookie, 'sessionid')), {status: 200});
+		}
+		case 'store.steampowered.com/account/AjaxLoadMoreHistory/': {
+			record({event: 'storeRequest', method: 'POST', path: where, owner, form});
+			if (!owner || !form.sessionid || form.sessionid !== cookieValue(headers.cookie, 'sessionid')) {
+				return json({success: false});
+			}
+			return json(historyChunk(Number(form['cursor[wallet_txnid]'])));
 		}
 		case 'store.steampowered.com/api/packagedetails': {
 			record({event: 'storeRequest', method: 'GET', path: where, owner, query: Object.fromEntries(url.searchParams)});

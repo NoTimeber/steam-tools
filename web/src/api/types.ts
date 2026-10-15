@@ -55,6 +55,43 @@ export interface AccountProfile {
 	balance: number | null;
 }
 
+/** 消费记录(src/accounts/history.ts) */
+export type HistoryKind = 'purchase' | 'gift' | 'ingame' | 'market_buy' | 'market_sell' | 'wallet' | 'refund' | 'conversion' | 'other';
+
+export interface HistoryMoney {
+	text: string;
+	amount: number | null;
+	currency: string;
+}
+
+export interface HistoryRow {
+	date: string;
+	dateText: string;
+	items: string[];
+	typeText: string;
+	kind: HistoryKind;
+	marketCount: number;
+	payment: string[];
+	refunded: boolean;
+	total: HistoryMoney | null;
+	walletChange: HistoryMoney | null;
+	walletBalance: HistoryMoney | null;
+	transid: string;
+}
+
+export interface PublicHistory {
+	accountName: string;
+	status: 'loading' | 'done' | 'error';
+	pages: number;
+	count: number;
+	truncated: boolean;
+	error: string;
+	startedAt: string;
+	finishedAt: string;
+	/** 读取中不带 */
+	rows?: HistoryRow[];
+}
+
 /** 当前版本和 GitHub 上的最新 Release(后端 src/core/version-check.ts) */
 export interface UpdateStatus {
 	current: string;

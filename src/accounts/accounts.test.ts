@@ -214,6 +214,7 @@ function service(accounts: unknown[] = [], files: Record<string, unknown> = {}, 
 		}, time: () => 1700000017},
 		now: () => Date.parse('2026-10-13T00:00:00Z'),
 		fetch: (async () => new Response('', {status: 500})) as typeof fetch,
+		sleep: async () => {},
 		logger: {warn() {}}
 	});
 	return {svc, sessions, accountStore, ...w};
@@ -347,4 +348,29 @@ test('导入(upsert):按账号名合并,不动其它账号;已有账号只覆盖
 	assert.deepEqual(svc.restoreCredentials('alpha')?.password, 'pw-a');
 	assert.deepEqual(svc.restoreCredentials('alpha')?.profile.sharedSecret, 'SS-new');
 	assert.throws(() => svc.upsertAccounts({accounts: [{accountName: ''}]}), (err: Error & {statusCode?: number}) => err.statusCode === 400);
+});
+
+test('消费记录:只读名单里的账号;没网页会话 409;在线账号用会话的 cookie 在后台读', async () => {
+	const {svc, sessions} = service([{accountName: 'Alpha', password: 'pw'}, {accountName: 'bravo', password: 'pw'}]);
+	const status = (run: () => unknown) => {
+		try {
+			run();
+		} catch (err) {
+			return (err as {statusCode?: number}).statusCode;
+		}
+		return 200;
+	};
+	assert.equal(status(() => svc.loadHistory({accountName: ' '})), 400);
+	assert.equal(status(() => svc.loadHistory({accountName: 'zulu'})), 404);
+	assert.equal(status(() => svc.loadHistory({accountName: 'bravo'})), 409, '没登录过、也没存下 cookie');
+	assert.equal(svc.getHistory('alpha'), null);
+
+	sessions.attempts.set('att-9', {id: 'att-9', accountName: 'Alpha', status: 'web_session', cookies: ['steamLoginSecure=x']} as unknown as Attempt);
+	const started = svc.loadHistory({accountName: 'ALPHA'});
+	assert.deepEqual([started.accountName, started.status], ['Alpha', 'loading'], '用名单里的账号名');
+	for (let i = 0; i < 100 && svc.getHistory('alpha')?.status === 'loading'; i++) {
+		await new Promise(resolve => setImmediate(resolve));
+	}
+	// 测试里的 fetch 一律回 500(重试后)读取失败
+	assert.match(String(svc.getHistory('alpha')?.error), /消费记录页 HTTP 500/);
 });

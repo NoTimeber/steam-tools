@@ -1,16 +1,13 @@
 // 账户真实国家/地区(从 app/server.js 移来):用账号自己的 cookie 请求 Steam 商店账户页,读 #application_config 里的 COUNTRY。
 // 这是账号在 Steam 上设置的商店国家(网页「国家/地区」显示的值),不随登录 IP 变;美元等钱包从币种推断不出国家时靠它。
-//
-// 刚登录的账号只有 steamLoginSecure / sessionid 等,第一次访问 /account/ 会 302 回自己并下发
-// browserid / Steam_Language / steamCountry,带上这些再请求一次才返回 200。fetch 跨重定向不带 Set-Cookie,
-// 所以这里手动跟随重定向并累积 cookie。
+// 刚登录的账号第一次访问会 302 回自己并补发 cookie,由 ./store-session.ts 处理。
 
 import {normalizeCountryCode} from '../steam/currencies.ts';
 import type {Attempt} from '../steam/session-manager.ts';
+import {createStoreSession} from './store-session.ts';
 
 const ACCOUNT_URL = 'https://store.steampowered.com/account/';
 const REQUEST_TIMEOUT_MS = 9000;
-const MAX_REDIRECTS = 5;
 /** 查过(不论成败)的账号 5 分钟内不再查,免得每次刷新账户列表都打 Steam */
 const COOLDOWN_MS = 5 * 60 * 1000;
 /** 补全账户列表国家的总时间预算和并发 */
@@ -48,58 +45,17 @@ export function createCountryLookup(options: CountryLookupOptions) {
 		if (!cookies.length) {
 			return '';
 		}
-		const jar = new Map<string, string>();
-		const putCookie = (raw: string) => {
-			const pair = String(raw).split(';')[0] ?? '';
-			const index = pair.indexOf('=');
-			if (index > 0) {
-				jar.set(pair.slice(0, index).trim(), pair.slice(index + 1).trim());
-			}
-		};
-		cookies.forEach(putCookie);
-		const baseHeaders = {
-			Accept: 'text/html,application/xhtml+xml',
-			'Accept-Language': 'en-US,en;q=0.9',
-			'User-Agent': attempt.userAgent || 'Mozilla/5.0'
-		};
-		const controller = new AbortController();
-		const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-		let url = ACCOUNT_URL;
-		try {
-			for (let hop = 0; hop < MAX_REDIRECTS; hop++) {
-				const cookieHeader = Array.from(jar.entries()).map(([key, value]) => `${key}=${value}`).join('; ');
-				const res = await http(url, {headers: {...baseHeaders, Cookie: cookieHeader}, redirect: 'manual', signal: controller.signal});
-				const setCookies = typeof res.headers.getSetCookie === 'function' ? res.headers.getSetCookie() : [];
-				setCookies.forEach(putCookie);
-				if (res.status >= 300 && res.status < 400) {
-					const location = res.headers.get('location');
-					if (!location) {
-						throw new Error('账户页重定向缺少 location');
-					}
-					url = new URL(location, url).href;
-					if (/\/login\b/i.test(url)) {
-						throw new Error('账户页跳转到登录页(cookie 已失效,需重新登录)');
-					}
-					continue;
-				}
-				if (!res.ok) {
-					throw new Error('账户页 HTTP ' + res.status + '(cookie 可能已失效)');
-				}
-				const html = await res.text();
-				// 必须是已登录的账户页,否则 COUNTRY 可能是按 IP 给访客的值
-				const loggedIn = /account_pulldown/.test(html) || (!!attempt.steamID && html.includes(String(attempt.steamID)));
-				if (!loggedIn) {
-					throw new Error('账户页未登录(cookie 可能已失效)');
-				}
-				const match = html.match(/&quot;COUNTRY&quot;:&quot;([A-Za-z]{2})&quot;/)
-					|| html.match(/"COUNTRY"\s*:\s*"([A-Za-z]{2})"/)
-					|| html.match(/"countrycode"\s*:\s*"([A-Za-z]{2})"/);
-				return match ? normalizeCountryCode(match[1]) : '';
-			}
-			throw new Error('账户页重定向次数过多(cookie 可能已失效)');
-		} finally {
-			clearTimeout(timer);
+		const session = createStoreSession({cookies, userAgent: attempt.userAgent, fetch: http, timeoutMs: REQUEST_TIMEOUT_MS});
+		const html = await session.getHtml(ACCOUNT_URL, '账户页');
+		// 必须是已登录的账户页,否则 COUNTRY 可能是按 IP 给访客的值
+		const loggedIn = /account_pulldown/.test(html) || (!!attempt.steamID && html.includes(String(attempt.steamID)));
+		if (!loggedIn) {
+			throw new Error('账户页未登录(cookie 可能已失效)');
 		}
+		const match = html.match(/&quot;COUNTRY&quot;:&quot;([A-Za-z]{2})&quot;/)
+			|| html.match(/"COUNTRY"\s*:\s*"([A-Za-z]{2})"/)
+			|| html.match(/"countrycode"\s*:\s*"([A-Za-z]{2})"/);
+		return match ? normalizeCountryCode(match[1]) : '';
 	}
 
 	/** 登录拿到 WebSession 后在后台刷新真实国家,变了就更新会话并推送(不阻塞登录) */

@@ -102,6 +102,37 @@ describe('账号与登录', () => {
 		assert.equal((await client.post('/api/web-session/no-such-id')).status, 404);
 	});
 
+	test('消费记录:后台一页页读完(先 302 补 cookie,翻页带 sessionid 和游标);读过的不重读,force 重读', async () => {
+		const read = async (body: Record<string, unknown>) => {
+			const res = await client.post('/api/accounts/history', body);
+			assert.equal(res.status, 200, res.text);
+			const deadline = Date.now() + 15000;
+			let history = res.json.history;
+			while (history.status === 'loading' && Date.now() < deadline) {
+				await sleep(100);
+				history = (await client.get('/api/accounts/history?accountName=hotel')).json.history;
+			}
+			return history;
+		};
+		const done = await read({accountName: 'HOTEL'});
+		assert.deepEqual([done.status, done.accountName, done.pages, done.count, done.error], ['done', 'hotel', 3, 37, '']);
+		const kinds = new Set(done.rows.map((row: {kind: string}) => row.kind));
+		assert.deepEqual([...kinds].sort(), ['gift', 'ingame', 'market_buy', 'market_sell', 'purchase', 'refund', 'wallet']);
+		assert.deepEqual(done.rows[0].total, {text: '$0.42', amount: 0.42, currency: 'USD'});
+
+		const requests = events('storeRequest').filter(e => e.path === 'store.steampowered.com/account/AjaxLoadMoreHistory/');
+		assert.deepEqual(requests.map(e => e.form?.['cursor[wallet_txnid]']), ['2', '3']);
+		assert.ok(requests.every(e => e.form?.sessionid === 'store-' + e.owner), '用商店补发的 sessionid');
+
+		assert.equal((await read({accountName: 'hotel'})).count, 37);
+		assert.equal(events('storeRequest').filter(e => e.path === 'store.steampowered.com/account/history/').length, 2, '读过的不重读');
+		await read({accountName: 'hotel', force: true});
+		assert.equal(events('storeRequest').filter(e => e.path === 'store.steampowered.com/account/history/').length, 4);
+
+		assert.equal((await client.post('/api/accounts/history', {accountName: 'nobody'})).status, 404);
+		assert.equal((await client.get('/api/accounts/history?accountName=golf')).json.history, null);
+	});
+
 	test('账户列表补全国家:钱包币种推断不出来的,用保存的 cookie 查商店账户页', async () => {
 		const res = await client.post('/api/accounts/meta', {accountNames: ['hotel', 'nobody']});
 		assert.equal(res.status, 200, res.text);

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// 账户管理:按「GC 已连接 / 在线 / 未在线」分组的账号表,导入、登录/登出/删除、按序号勾选、Steam Guard、令牌验证码、连接 GC。
+// 账户管理:按「GC 已连接 / 在线 / 未在线」分组的账号表,导入、登录/登出/删除、按序号勾选、Steam Guard、令牌验证码、消费记录、连接 GC。
 import {computed, h, reactive, ref} from 'vue';
 import {NAlert, NButton, NCard, NDataTable, NDropdown, NInput, NModal, NSpace, NTag, useDialog, useMessage} from 'naive-ui';
 import type {DataTableColumns, DataTableRowKey} from 'naive-ui';
@@ -12,6 +12,7 @@ import {
 	importAccountText, importMaFiles, loginAccount, logoutAccount, onlineCount, orderedAccounts, submitGuardCode
 } from '../stores/accounts.ts';
 import type {AccountGroupView, AccountRow} from '../stores/accounts.ts';
+import HistoryModal from './accounts/HistoryModal.vue';
 import TotpModal from './accounts/TotpModal.vue';
 
 const message = useMessage();
@@ -67,6 +68,7 @@ const STATUS_TAG: Record<LoginStatus, 'success' | 'warning' | 'error' | 'default
 };
 
 const totpAccount = ref('');
+const historyAccount = ref('');
 
 function gcCell(row: AccountRow) {
 	const game = canUseGc(row) ? connectedGame(row) : '';
@@ -83,7 +85,7 @@ function gcCell(row: AccountRow) {
 	}, () => h(NButton, {size: 'tiny'}, () => '连接GC'));
 }
 
-const DATA_COLUMNS = 8;
+const DATA_COLUMNS = 9;
 
 const columns: DataTableColumns<TableRow> = [
 	{type: 'selection'},
@@ -124,6 +126,15 @@ const columns: DataTableColumns<TableRow> = [
 	},
 	{title: '国家', key: 'country', width: 70, render: item => (item.kind === 'account' ? item.row.country || '-' : null)},
 	{title: '余额', key: 'balance', width: 110, render: item => (item.kind === 'account' ? formatBalance(item.row) : null)},
+	{
+		title: '消费记录',
+		key: 'history',
+		width: 90,
+		// 不在线也能点:服务端会用上次登录存下的网页会话去读
+		render: item => (item.kind === 'account'
+			? h(NButton, {size: 'tiny', onClick: () => (historyAccount.value = item.row.accountName)}, () => '查看')
+			: null)
+	},
 	{title: 'SteamID', key: 'steamID', width: 170, ellipsis: {tooltip: true}, render: item => (item.kind === 'account' ? h('span', {class: 'mono'}, item.row.steamID || '-') : null)},
 	{title: 'GC操作', key: 'gc', width: 100, render: item => (item.kind === 'account' ? gcCell(item.row) : null)}
 ];
@@ -300,7 +311,7 @@ async function submitGuard(): Promise<void> {
 				:row-class-name="(item: TableRow) => (item.kind === 'group' ? 'group-row' : '')"
 				:row-props="rowProps"
 				:indent="0"
-				:scroll-x="980"
+				:scroll-x="1070"
 				:loading="accounts.loading && !accounts.loaded"
 				virtual-scroll
 				@update:checked-row-keys="onCheckedChange"
@@ -327,6 +338,7 @@ async function submitGuard(): Promise<void> {
 		</NModal>
 
 		<TotpModal :account-name="totpAccount" @close="totpAccount = ''" />
+		<HistoryModal :account-name="historyAccount" @close="historyAccount = ''" />
 	</div>
 </template>
 

@@ -1,6 +1,6 @@
-// 账号与登录的 HTTP 路由:账户名单、账号资料、maFile、令牌验证码、登录/Guard/WebSession/登出、删除账号、连接/断开 GC。
+// 账号与登录的 HTTP 路由:账户名单、账号资料、maFile、令牌验证码、登录/Guard/WebSession/登出、删除账号、消费记录、连接/断开 GC。
 
-import {requestGame, spreadRoute} from '../web/http.ts';
+import {keyedRoute, requestGame, spreadRoute} from '../web/http.ts';
 import type {Handler, Router} from '../web/http.ts';
 import type {AccountService} from './index.ts';
 
@@ -34,6 +34,9 @@ export function accountRoutes(router: Router, {accounts, debug}: AccountRouteDep
 	router.post('/api/logout/:id', spreadRoute(req => accounts.logout(req.params.id!), '登出失败'));
 	// 前端删除账户时调用:登出、移出会话表,删掉保存的 session,并从名单移除。
 	router.post('/api/accounts/cleanup', spreadRoute(req => accounts.cleanup(req.body || {}), '清理失败'));
+	// 消费记录:POST 开始读(后台翻页,force 重读),GET 查进度/结果
+	router.post('/api/accounts/history', keyedRoute('history', req => accounts.loadHistory(req.body || {}), '读取消费记录失败'));
+	router.get('/api/accounts/history', keyedRoute('history', req => accounts.getHistory(req.query.accountName), '读取消费记录失败'));
 	router.post('/api/gc/connect/:id', spreadRoute(req => accounts.connectGc(req.params.id!, requestGame(req)), '连接 GC 失败'));
 	router.post('/api/gc/disconnect/:id', spreadRoute(req => accounts.disconnectGc(req.params.id!, requestGame(req)), '断开 GC 失败'));
 	router.get('/api/cookies/:id', debug, spreadRoute(req => accounts.cookies(req.params.id!), '读取 cookies 失败'));

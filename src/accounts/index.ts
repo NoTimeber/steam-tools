@@ -4,6 +4,7 @@
 
 import {randomUUID} from 'node:crypto';
 import {createRequire} from 'node:module';
+import {findAttemptByKey} from '../steam/attempts.ts';
 import {gameConfig, normalizeGame} from '../steam/games.ts';
 import {disconnectGameSession, ensureGameSession} from '../steam/gc-client.ts';
 import {safeName} from '../steam/session-manager.ts';
@@ -13,6 +14,8 @@ import type {AccountStore, StoredAccount} from '../store/accounts.ts';
 import type {MaFileStore} from '../store/mafiles.ts';
 import type {SteamSessionStore} from '../store/steam-sessions.ts';
 import {createCountryLookup} from './country.ts';
+import {createPurchaseHistory} from './history.ts';
+import type {PublicHistory} from './history.ts';
 import {findStoredAccount, mergeClientAccountSecrets, publicAccountProfile, publicStoredAccount} from './profiles.ts';
 import type {Profiles, PublicProfile, PublicStoredAccount} from './profiles.ts';
 
@@ -44,6 +47,8 @@ export interface AccountServiceOptions {
 	totp?: Totp;
 	fetch?: typeof fetch;
 	now?: () => number;
+	/** 消费记录翻页之间的等待(测试里给立即返回的) */
+	sleep?: (ms: number) => Promise<void>;
 	logger?: Pick<Console, 'warn'>;
 }
 
@@ -58,6 +63,15 @@ export function createAccountService(options: AccountServiceOptions) {
 		cookiesFor: attempt => profiles.cookiesFor(attempt),
 		events: sessions,
 		fetch: options.fetch,
+		now
+	});
+	// 消费记录:在线的用内存里的会话,不在线的用上次登录存下的 cookie
+	const history = createPurchaseHistory({
+		findAttempt: accountName => findAttemptByKey(sessions.attempts, accountName),
+		cookiesFor: attempt => profiles.cookiesFor(attempt),
+		currencyOf: accountName => profiles.local(accountName).currencyISO,
+		fetch: options.fetch,
+		sleep: options.sleep,
 		now
 	});
 
@@ -396,6 +410,35 @@ export function createAccountService(options: AccountServiceOptions) {
 		return sessions.list().map(attempt => sessions.publicAttempt(attempt));
 	}
 
+	// ===== 消费记录 =====
+
+	function historyAccount(raw: unknown): string {
+		const name = String(raw || '').trim();
+		if (!name) {
+			throw accountError(400, '缺少账号名');
+		}
+		const stored = findStoredAccount(store.accounts, name);
+		if (!stored) {
+			throw accountError(404, '账号不在账户名单里');
+		}
+		return stored.accountName;
+	}
+
+	/** 开始读(后台翻页);读过的直接返回上次的结果,force 重读 */
+	function loadHistory(body: {accountName?: unknown; force?: unknown}): PublicHistory {
+		const accountName = historyAccount(body.accountName);
+		try {
+			return history.load(accountName, !!body.force);
+		} catch (err) {
+			throw accountError(409, errorText(err) || '读取消费记录失败');
+		}
+	}
+
+	/** 读取进度或结果;没读过为 null */
+	function getHistory(accountName: unknown): PublicHistory | null {
+		return history.get(historyAccount(accountName));
+	}
+
 	/**
 	 * 重启后自动恢复登录要的凭据:优先用保存的 refreshToken,失效再用名单里的密码 + maFile 令牌。
 	 * 账号已从名单删除返回 null。
@@ -428,7 +471,7 @@ export function createAccountService(options: AccountServiceOptions) {
 	return {
 		listAccounts, saveAccounts, upsertAccounts, meta, importMaFiles, authCode,
 		login, loginWithRefreshToken, submitGuard, requestWebSession, logout, cleanup, connectGc, disconnectGc, cookies, listAttempts,
-		restoreCredentials,
+		loadHistory, getHistory, restoreCredentials,
 		/** 拿到 WebSession 后后台刷新真实账户国家 */
 		refreshCountry: country.refresh,
 		findStoredAccount: (accountName: unknown) => findStoredAccount(store.accounts, accountName)

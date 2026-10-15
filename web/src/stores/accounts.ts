@@ -4,7 +4,7 @@
 import {computed, reactive} from 'vue';
 import {api, errorText} from '../api/http.ts';
 import {socket} from '../api/socket.ts';
-import type {AccountProfile, GameId, PublicAttempt, StoredAccount} from '../api/types.ts';
+import type {AccountProfile, GameId, PublicAttempt, PublicHistory, StoredAccount} from '../api/types.ts';
 import {ACCOUNT_GROUPS, accountGroup, collapseAttemptStatus, lastErrorMessage, parseAccountText} from '../lib/accounts.ts';
 import type {AccountGroup, LoginStatus} from '../lib/accounts.ts';
 import {addLog} from './logs.ts';
@@ -448,6 +448,18 @@ export interface AuthCode {
 /** 令牌验证码(服务端用 maFile 或名单里的 shared_secret 生成) */
 export function fetchAuthCode(accountName: string): Promise<AuthCode> {
 	return api.post<AuthCode>('/api/auth-code', {accountName});
+}
+
+/** 消费记录:上次读取的结果或进度,没读过为 null */
+export async function fetchHistory(accountName: string): Promise<PublicHistory | null> {
+	const data = await api.get<{history: PublicHistory | null}>(`/api/accounts/history?accountName=${encodeURIComponent(accountName)}`);
+	return data.history;
+}
+
+/** 开始读消费记录(服务端后台翻页,用 fetchHistory 轮询);读过的直接返回上次的,force 重读 */
+export async function startHistory(accountName: string, force = false): Promise<PublicHistory> {
+	const data = await api.post<{history: PublicHistory}>('/api/accounts/history', {accountName, force});
+	return data.history;
 }
 
 /** 当前 GC 连着哪个游戏(两个都连着时算 TF2,和旧版一致) */
