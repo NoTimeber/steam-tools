@@ -8,9 +8,10 @@ inspect_key.txt
 secrets/
 *.pem
 
-# app/data 只有 cs2-skin-db.json 随代码分发,其余是一次性脚本写的 session/token
+# app/data 只有 cs2-skin-db.json、cs2-names-zh.json.gz 随代码分发,其余是一次性脚本写的 session/token
 app/data/*
 !app/data/cs2-skin-db.json
+!app/data/cs2-names-zh.json.gz
 
 # 开发用,不进镜像(web/ 在镜像里重新装依赖、重新构建)
 .git/
