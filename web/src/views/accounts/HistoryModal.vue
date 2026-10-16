@@ -1,18 +1,21 @@
 <script setup lang="ts">
-// 消费记录:服务端在后台一页页读完 Steam「购买记录」,这里轮询进度;读完显示按类型的汇总和明细(可按类型、关键字筛选)。
+// 消费记录:服务端在后台一页页读完 Steam「购买记录」,这里轮询进度;读完显示按类型的汇总和明细
+// (可按日期范围、类型、关键字筛选),当前列表可导出 CSV。
 import {computed, h, onBeforeUnmount, reactive, watch} from 'vue';
 import type {VNode} from 'vue';
-import {NAlert, NButton, NCard, NDataTable, NInput, NModal, NSelect, NSpace, NSpin, NTag} from 'naive-ui';
+import {NAlert, NButton, NCard, NDataTable, NDatePicker, NInput, NModal, NSelect, NSpace, NSpin, NTag, useMessage} from 'naive-ui';
 import type {DataTableColumns} from 'naive-ui';
 import {errorText} from '../../api/http.ts';
 import type {HistoryKind, HistoryMoney, HistoryRow, PublicHistory} from '../../api/types.ts';
-import {filterHistory, formatAmount, kindLabel, summarizeHistory} from '../../lib/history.ts';
+import {csvFileName, filterHistory, formatAmount, historyCsv, inDateRange, kindLabel, summarizeHistory} from '../../lib/history.ts';
 import {fetchHistory, startHistory} from '../../stores/accounts.ts';
 
 const props = defineProps<{accountName: string}>();
 const emit = defineEmits<{close: []}>();
+const message = useMessage();
 
 const POLL_MS = 1500;
+const DAY_MS = 86400000;
 
 const view = reactive({
 	history: null as PublicHistory | null,
@@ -20,7 +23,9 @@ const view = reactive({
 	error: '',
 	starting: false,
 	kind: null as HistoryKind | null,
-	keyword: ''
+	keyword: '',
+	/** 日期范围(YYYY-MM-DD,含两端);null 不限 */
+	range: null as [string, string] | null
 });
 
 let timer: number | undefined;
@@ -83,7 +88,7 @@ async function start(force: boolean): Promise<void> {
 watch(() => props.accountName, name => {
 	generation++;
 	stop();
-	Object.assign(view, {history: null, error: '', starting: false, kind: null, keyword: ''});
+	Object.assign(view, {history: null, error: '', starting: false, kind: null, keyword: '', range: null});
 	if (name) {
 		start(false);
 	}
@@ -96,8 +101,10 @@ onBeforeUnmount(() => {
 
 const loading = computed(() => view.history?.status === 'loading');
 const rows = computed(() => view.history?.rows ?? []);
-const summary = computed(() => summarizeHistory(rows.value));
-const filtered = computed(() => filterHistory(rows.value, view.kind ?? '', view.keyword));
+/** 日期范围内的;汇总卡片按它算(看一段时间花了多少),类型和关键字再在它上面筛 */
+const ranged = computed(() => inDateRange(rows.value, view.range));
+const summary = computed(() => summarizeHistory(ranged.value));
+const filtered = computed(() => filterHistory(ranged.value, view.kind ?? '', view.keyword));
 /** 行的 key:在全部记录里的序号(筛选后不变) */
 const rowIndex = computed(() => new Map(rows.value.map((row, index) => [row, index])));
 /** 记录多时表格固定高度,筛选时弹窗不跟着变高变矮、上下跳 */
@@ -106,6 +113,37 @@ const kindOptions = computed(() => summary.value.map(item => ({label: `${item.la
 
 function toggleKind(kind: HistoryKind): void {
 	view.kind = view.kind === kind ? null : kind;
+}
+
+/** 日期选择器的快捷范围(点的时候才算,跨天开着也对) */
+function lastDays(days: number): [number, number] {
+	const now = Date.now();
+	return [now - (days - 1) * DAY_MS, now];
+}
+
+function yearRange(offset: number): [number, number] {
+	const year = new Date().getFullYear() - offset;
+	return [new Date(year, 0, 1).getTime(), offset ? new Date(year, 11, 31).getTime() : Date.now()];
+}
+
+const rangeShortcuts = {
+	'近 7 天': () => lastDays(7),
+	'近 30 天': () => lastDays(30),
+	'近 90 天': () => lastDays(90),
+	'今年': () => yearRange(0),
+	'去年': () => yearRange(1)
+};
+
+/** 导出当前列表(日期范围、类型、关键字筛过的) */
+function exportCsv(): void {
+	const list = filtered.value;
+	const url = URL.createObjectURL(new Blob([historyCsv(list)], {type: 'text/csv;charset=utf-8'}));
+	const link = document.createElement('a');
+	link.href = url;
+	link.download = csvFileName(props.accountName, view.range);
+	link.click();
+	window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+	message.success(`已导出 ${list.length} 条`);
 }
 
 function formatTime(iso: string): string {
@@ -180,6 +218,21 @@ const columns: DataTableColumns<HistoryRow> = [
 			</NAlert>
 
 			<template v-if="rows.length">
+				<NSpace :size="8" align="center" class="block">
+					<NDatePicker
+						v-model:formatted-value="view.range"
+						type="daterange"
+						value-format="yyyy-MM-dd"
+						size="small"
+						clearable
+						:shortcuts="rangeShortcuts"
+						start-placeholder="开始日期"
+						end-placeholder="结束日期"
+						class="range"
+					/>
+					<span class="muted">{{ view.range ? `${view.range[0]} 至 ${view.range[1]} 共 ${ranged.length} 条,汇总和下面的列表都按这个范围` : '不限时间' }}</span>
+				</NSpace>
+
 				<div class="summary">
 					<button
 						v-for="item in summary"
@@ -197,11 +250,16 @@ const columns: DataTableColumns<HistoryRow> = [
 					</button>
 				</div>
 
-				<NSpace :size="8" align="center" class="block">
-					<NSelect v-model:value="view.kind" :options="kindOptions" clearable placeholder="全部类型" size="small" class="kind-select" />
-					<NInput v-model:value="view.keyword" clearable placeholder="搜索商品、类型、付款方式、日期" size="small" class="keyword" />
-					<span class="muted">显示 {{ filtered.length }} / {{ rows.length }} 条</span>
-				</NSpace>
+				<div class="toolbar block">
+					<NSpace :size="8" align="center">
+						<NSelect v-model:value="view.kind" :options="kindOptions" clearable placeholder="全部类型" size="small" class="kind-select" />
+						<NInput v-model:value="view.keyword" clearable placeholder="搜索商品、类型、付款方式、日期" size="small" class="keyword" />
+						<span class="muted">显示 {{ filtered.length }} / {{ rows.length }} 条</span>
+					</NSpace>
+					<NButton size="small" :disabled="!filtered.length" title="导出当前列表(按日期范围、类型、搜索筛过的)" @click="exportCsv">
+						导出 CSV({{ filtered.length }} 条)
+					</NButton>
+				</div>
 
 				<NDataTable
 					size="small"
@@ -285,6 +343,18 @@ const columns: DataTableColumns<HistoryRow> = [
 .summary-amount {
 	font-size: 15px;
 	font-weight: 600;
+}
+
+.toolbar {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+}
+
+.range {
+	width: 260px;
 }
 
 .kind-select {

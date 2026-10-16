@@ -1,4 +1,4 @@
-// 消费记录的纯逻辑(不依赖 Vue,单元测试直接用 node 跑):类型名、按类型汇总、金额显示、筛选。
+// 消费记录的纯逻辑(不依赖 Vue,单元测试直接用 node 跑):类型名、按类型汇总、金额显示、筛选、导出 CSV。
 
 import type {HistoryKind, HistoryMoney, HistoryRow} from '../api/types.ts';
 
@@ -92,4 +92,65 @@ export function filterHistory(rows: readonly HistoryRow[], kind: HistoryKind | '
 		}
 		return [...row.items, row.typeText, ...row.payment, row.date, row.dateText].some(text => text.toLowerCase().includes(needle));
 	});
+}
+
+/** 日期范围(YYYY-MM-DD,含两端);null 表示不限 */
+export type DateRange = readonly [string, string] | null;
+
+/** 按日期范围筛选;设了范围时,日期解析不出来的记录排除 */
+export function inDateRange(rows: readonly HistoryRow[], range: DateRange): HistoryRow[] {
+	if (!range) {
+		return [...rows];
+	}
+	const [from, to] = range[0] <= range[1] ? range : [range[1], range[0]];
+	return rows.filter(row => !!row.date && row.date >= from && row.date <= to);
+}
+
+const CSV_HEADER = ['日期', '类型', 'Steam 类型', '商品', '付款方式', '总额', '钱包变动', '钱包余额', '币种', '市场交易笔数', '含退款', '交易号'];
+
+function csvCell(value: string): string {
+	return /[",\r\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
+}
+
+/** 文字列:= + - @ 开头的前面加 ',免得 Excel 当公式执行 */
+function textCell(text: string): string {
+	return csvCell(/^[=+\-@\t\r]/.test(text) ? `'${text}` : text);
+}
+
+/** 金额列:解析出数值的写数值(带正负号,表格里能直接求和),解析不了的写原文 */
+function moneyCell(money: HistoryMoney | null): string {
+	if (!money) {
+		return '';
+	}
+	return money.amount != null ? String(money.amount) : textCell(money.text);
+}
+
+/** 导出 CSV:带 BOM(Excel 直接打开中文不乱码),CRLF 换行;多个商品、付款方式用「 / 」连起来 */
+export function historyCsv(rows: readonly HistoryRow[]): string {
+	const lines = [CSV_HEADER.join(',')];
+	for (const row of rows) {
+		const currency = [row.total, row.walletChange, row.walletBalance].find(money => money?.currency)?.currency ?? '';
+		lines.push([
+			textCell(row.date || row.dateText),
+			textCell(kindLabel(row.kind)),
+			textCell(row.typeText),
+			textCell(row.items.join(' / ')),
+			textCell(row.payment.join(' / ')),
+			moneyCell(row.total),
+			moneyCell(row.walletChange),
+			moneyCell(row.walletBalance),
+			currency,
+			row.marketCount ? String(row.marketCount) : '',
+			row.refunded ? '是' : '',
+			row.transid
+		].join(','));
+	}
+	return String.fromCharCode(0xfeff) + lines.join('\r\n') + '\r\n';
+}
+
+/** 导出文件名:账号-消费记录-起止日期(不限时间为「全部」) */
+export function csvFileName(accountName: string, range: DateRange): string {
+	const name = accountName.replace(/[\\/:*?"<>|\s]+/g, '_') || '账号';
+	const span = range ? (range[0] <= range[1] ? `${range[0]}至${range[1]}` : `${range[1]}至${range[0]}`) : '全部';
+	return `${name}-消费记录-${span}.csv`;
 }
