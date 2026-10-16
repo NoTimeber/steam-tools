@@ -29,7 +29,7 @@ import {currencyIdToIso} from './steam/currencies.ts';
 import {installMicroTxnHooks} from './steam/microtxn.ts';
 import type {SteamUserClass} from './steam/microtxn.ts';
 import {findAttemptByKey, listAccountRefs, listCookieFlowAccounts} from './steam/attempts.ts';
-import {STEAM_WEB_USER_AGENT} from './steam/community.ts';
+import {STEAM_WEB_USER_AGENT, useCommunityProxy} from './steam/community.ts';
 import {fetchTradeUrl} from './steam/trade-url.ts';
 import {createGcModuleAttacher} from './steam/gc-modules.ts';
 import {LOCAL_CM_FALLBACKS} from './steam/cm-fallback.ts';
@@ -51,6 +51,8 @@ import {createWalletService} from './wallet/index.ts';
 import {walletRoutes} from './wallet/routes.ts';
 import {createC5Service} from './c5/index.ts';
 import {c5Routes} from './c5/routes.ts';
+import {createProxyService} from './proxy/index.ts';
+import {proxyRoutes} from './proxy/routes.ts';
 import {createWebApp} from './web/app.ts';
 import {debugOnly} from './web/http.ts';
 import {systemRoutes} from './web/system-routes.ts';
@@ -153,10 +155,30 @@ const profiles = createProfiles({
 	readJson
 });
 
+// Steam 代理:全局 + 按账号覆盖,只给 Steam 的请求用(C5 / 悠悠照旧直连)。走 fetch 的 Steam 请求按 Cookie 里的 SteamID 认账号;
+// steamcommunity(手机确认、交易报价)按要设的 cookie 选
+const proxy = createProxyService({
+	store: store.proxies,
+	accountForSteamId: steamId => {
+		for (const attempt of sessions.attempts.values()) {
+			if (attempt.steamID === steamId) {
+				return attempt.accountName;
+			}
+		}
+		const stored = store.accounts.list().find(account => profiles.local(account.accountName).steamID === steamId
+			|| String(store.sessions.get(safeName(account.accountName))?.steamID || '') === steamId);
+		return stored?.accountName ?? '';
+	},
+	testUrl: config.proxyTestUrl || undefined,
+	steamTestUrl: config.proxySteamTestUrl || undefined
+});
+useCommunityProxy(cookies => proxy.proxyForCookies(cookies));
+
 // 库存:CS2 物品名靠本地 schema 描述 GC 物品;库存数量变了推送会话
 const inventory = createInventoryService({
 	describeGcItem: item => describeGcItem(cs2Schema, item),
 	cookiesFor: profiles.cookiesFor,
+	fetch: proxy.fetch,
 	emit: attempt => sessions.emit(attempt)
 });
 
@@ -185,7 +207,7 @@ const gcModules = createGcModuleAttacher({
 
 // Steam 登录会话。sessions.attempts 是会话表(id -> attempt),内购/库存/UU 等直接读它。
 const sessions = createSessionManager({
-	createClient(fingerprint) {
+	createClient(fingerprint, accountName) {
 		const clientOptions: Record<string, unknown> = {
 			dataDirectory: config.steamUserDir,
 			// 长连接因空闲/CM 轮换/网络抖动断开后,让 steam-user 用已存的 refreshToken 自动重连重登
@@ -201,6 +223,11 @@ const sessions = createSessionManager({
 		}
 		if (fingerprint.userAgent) {
 			clientOptions.additionalHeaders = {'User-Agent': fingerprint.userAgent};
+		}
+		// 登录连接(CM WebSocket)和取网页 cookie 都走这个账号的 Steam 代理;改了代理要重新登录才换
+		const httpProxy = proxy.proxyFor(accountName);
+		if (httpProxy) {
+			clientOptions.httpProxy = httpProxy;
 		}
 		return new SteamUser(clientOptions);
 	},
@@ -236,7 +263,8 @@ const findAttempt = (key: unknown) => findAttemptByKey(attempts, key);
 const cookieFlowAccounts = () => listCookieFlowAccounts(attempts.values(), profiles.cookiesFor);
 
 // 账号与登录路由的逻辑;拿到 WebSession 后查真实账户国家也在这里
-const accounts = createAccountService({store, sessions, profiles});
+// 手动登录时(固定 IP 代理模式下)给账号换一个代理编号
+const accounts = createAccountService({store, sessions, profiles, fetch: proxy.fetch, onNewLogin: accountName => proxy.renew(accountName)});
 
 // ===== 业务模块 =====
 // GC 内购下单时要响应 Steam 的钱包扣款授权请求(steam-user 本身不处理这条消息)
@@ -271,6 +299,7 @@ const uu = createUuService({
 const market = createMarketService({
 	findAttempt,
 	cookiesFor: profiles.cookiesFor,
+	fetch: proxy.fetch,
 	ledgerFile: join(config.dataDir, 'market-buyorders.json'),
 	nameIdCacheFile: join(config.dataDir, 'market-nameids.json'),
 	nameIdDbDir: join(config.appDir, 'services', 'nameid-db'),
@@ -283,12 +312,14 @@ const market = createMarketService({
 const buyGame = createBuyGameService({
 	findAttempt,
 	cookiesFor: profiles.cookiesFor,
+	fetch: proxy.fetch,
 	emit: (event, task) => io.emit(event, task)
 });
 
 // 充值码兑换:没填密码的账号用本地 maFile / 旧 cookies 文件里的 refreshToken 登录,有 shared_secret 自动过令牌
 const wallet = createWalletService({
 	profileFor: accountName => profiles.local(accountName),
+	proxyFor: accountName => proxy.proxyFor(accountName),
 	emit: payload => io.emit('wallet:redeem', payload)
 });
 
@@ -312,7 +343,8 @@ const c5 = createC5Service({
 			steamId: ref?.steamId ?? '',
 			// 不在线时用上次登录存下的网页会话
 			cookies: profiles.cookiesFor(attempt ?? {accountName: account}),
-			userAgent: STEAM_WEB_USER_AGENT
+			userAgent: STEAM_WEB_USER_AGENT,
+			fetch: proxy.fetch
 		});
 	},
 	emit: (event, payload) => io.emit(event, payload)
@@ -339,7 +371,8 @@ const app = createWebApp({
 		router => marketRoutes(router, {market, listAccounts: cookieFlowAccounts}),
 		router => uuRoutes(router, {uu}),
 		router => walletRoutes(router, {wallet}),
-		router => c5Routes(router, {c5})
+		router => c5Routes(router, {c5}),
+		router => proxyRoutes(router, {proxy})
 	]
 });
 

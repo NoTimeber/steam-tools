@@ -15,6 +15,8 @@ import type {LoginIntentStore} from './login-intents.ts';
 import type {ImportReport, LegacyPaths} from './legacy-import.ts';
 import {createMaFileStore} from './mafiles.ts';
 import type {MaFileStore} from './mafiles.ts';
+import {createProxyStore} from './proxies.ts';
+import type {ProxyStore} from './proxies.ts';
 import {MIGRATIONS} from './schema.ts';
 import {createSettingsStore} from './settings.ts';
 import type {SettingsStore} from './settings.ts';
@@ -54,6 +56,7 @@ export interface Store {
 	sessions: SteamSessionStore;
 	uu: UuStore;
 	c5: C5Store;
+	proxies: ProxyStore;
 	loginIntents: LoginIntentStore;
 	legacyImport: ImportReport | null;
 	close(): void;
@@ -89,6 +92,7 @@ export function openStore(options: OpenStoreOptions): Store {
 		const sessions = createSteamSessionStore(db, vault);
 		const uu = createUuStore(db, vault, settings);
 		const c5 = createC5Store(db, vault, settings);
+		const proxies = createProxyStore(settings, vault);
 		const loginIntents = createLoginIntentStore(db);
 		const legacyImport = options.legacy
 			? importLegacyFiles({db, accounts, mafiles, sessions, uu}, options.legacy, options.dataDir, logger)
@@ -104,6 +108,7 @@ export function openStore(options: OpenStoreOptions): Store {
 			sessions,
 			uu,
 			c5,
+			proxies,
 			loginIntents,
 			legacyImport,
 			close: () => db.close()

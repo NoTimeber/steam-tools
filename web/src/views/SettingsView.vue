@@ -1,9 +1,12 @@
 <script setup lang="ts">
-// 运行设置:当前版本和检查新版本、修改访问口令、退出登录。
-import {computed, reactive, ref} from 'vue';
-import {NAlert, NButton, NCard, NForm, NFormItem, NInput, NModal, NSpace, useMessage} from 'naive-ui';
+// 运行设置:当前版本和检查新版本、修改访问口令、退出登录、Steam 代理。
+import {computed, onMounted, reactive, ref} from 'vue';
+import {NAlert, NButton, NCard, NForm, NFormItem, NInput, NInputNumber, NModal, NSpace, useMessage} from 'naive-ui';
 import {api, errorText} from '../api/http.ts';
+import type {ProxyTestResult} from '../api/types.ts';
+import {steamCheckView} from '../lib/proxy.ts';
 import {addLog} from '../stores/logs.ts';
+import {loadProxy, proxy, saveGlobalProxy, testProxy} from '../stores/proxy.ts';
 import {checkForUpdate, update} from '../stores/update.ts';
 
 const message = useMessage();
@@ -59,6 +62,69 @@ async function savePassword(): Promise<void> {
 	}
 }
 
+// ===== Steam 代理(全局;账号的单独设置在账户管理页) =====
+const proxyForm = reactive({
+	input: '',
+	/** 固定 IP 模式({n})的编号范围 */
+	from: 1 as number | null,
+	to: 1 as number | null,
+	busy: '' as '' | 'save' | 'clear' | 'test',
+	error: '',
+	result: null as ProxyTestResult | null
+});
+
+onMounted(async () => {
+	await loadProxy();
+	proxyForm.from = proxy.config.range.from;
+	proxyForm.to = proxy.config.range.to;
+});
+
+/** 输入框里写了 {n},或者没输入、现在就是固定 IP 模式:要填编号范围 */
+const templateMode = computed(() => proxyForm.input.includes('{n}') || (!proxyForm.input.trim() && proxy.config.sticky));
+const rangeBody = () => ({from: Number(proxyForm.from), to: Number(proxyForm.to)});
+/** 测试结果里的 Steam 社区检查(这里测的是全局代理,不针对哪个账号,不提示重新登录) */
+const steamView = computed(() => (proxyForm.result ? steamCheckView(proxyForm.result.steam, false) : null));
+const rangeChanged = computed(() => proxy.config.sticky && (proxyForm.from !== proxy.config.range.from || proxyForm.to !== proxy.config.range.to));
+
+async function runProxy(kind: 'save' | 'clear' | 'test', action: () => Promise<void>): Promise<void> {
+	proxyForm.busy = kind;
+	proxyForm.error = '';
+	try {
+		await action();
+	} catch (err) {
+		proxyForm.error = errorText(err);
+	} finally {
+		proxyForm.busy = '';
+	}
+}
+
+/** 输入了地址就换地址;没输入只改编号范围(不用再输一遍密码) */
+function saveProxy(): Promise<void> {
+	return runProxy('save', async () => {
+		const input = proxyForm.input.trim();
+		await saveGlobalProxy(input || undefined, templateMode.value ? rangeBody() : undefined);
+		proxyForm.input = '';
+		proxyForm.result = null;
+		message.success('全局代理已保存');
+	});
+}
+
+function clearProxy(): Promise<void> {
+	return runProxy('clear', async () => {
+		await saveGlobalProxy('');
+		proxyForm.result = null;
+		message.success('已清除全局代理,Steam 请求改为直连');
+	});
+}
+
+/** 输入框里有地址测输入的(保存前先试),没有测现在的全局代理 */
+function checkProxy(): Promise<void> {
+	return runProxy('test', async () => {
+		proxyForm.result = null;
+		proxyForm.result = await testProxy({proxy: proxyForm.input.trim(), ...(templateMode.value ? rangeBody() : {})});
+	});
+}
+
 async function logout(): Promise<void> {
 	try {
 		await fetch('/api/auth/logout', {method: 'POST'});
@@ -86,6 +152,46 @@ async function logout(): Promise<void> {
 			<NButton @click="logout">退出登录</NButton>
 		</NSpace>
 
+		<NCard title="Steam 代理" size="small" class="proxy-card">
+			<p class="muted proxy-hint">
+				Steam 的登录连接和网页请求(商店、社区、市场、库存、交易报价、充值码)走这个代理;C5、悠悠等国内平台照旧直连。
+				单个账号要用别的代理或者不走代理,在「账户管理」的「代理」列里改。改了代理,已登录的账号要重新登录,登录连接才会换。
+			</p>
+			<p class="muted proxy-hint">
+				固定 IP:地址里用 <span class="mono">{n}</span> 代表代理编号(webshare 就是把用户名里的 -rotate 换成 -{n},编号 1 到你的代理数量),
+				每个账号分到一个编号一直用,尽量不和别的账号重复;只有新加的账号第一次用、或者手动重新登录时才换一个。
+			</p>
+			<div class="proxy-current">
+				当前:<span v-if="proxy.config.global" class="mono">{{ proxy.config.global }}</span><span v-else class="muted">没有设置,Steam 请求直连</span>
+				<span v-if="proxy.config.sticky" class="muted">(固定 IP,编号 {{ proxy.config.range.from }}-{{ proxy.config.range.to }},已分配 {{ Object.keys(proxy.config.assigned).filter(key => key).length }} 个账号)</span>
+			</div>
+			<NInput
+				v-model:value="proxyForm.input"
+				placeholder="http://用户名:密码@主机:端口"
+				clearable
+				:input-props="{autocomplete: 'off', spellcheck: false}"
+				@keyup.enter="proxyForm.input.trim() && saveProxy()"
+			/>
+			<NSpace v-if="templateMode" align="center" :size="6" class="proxy-row">
+				<span>编号范围</span>
+				<NInputNumber v-model:value="proxyForm.from" :min="1" :max="100000" :precision="0" size="small" class="index-input" />
+				<span class="muted">到</span>
+				<NInputNumber v-model:value="proxyForm.to" :min="1" :max="100000" :precision="0" size="small" class="index-input" />
+			</NSpace>
+			<NAlert v-if="proxyForm.error" type="error" :bordered="false" class="proxy-row">{{ proxyForm.error }}</NAlert>
+			<template v-else-if="proxyForm.result && steamView">
+				<NAlert type="success" :bordered="false" class="proxy-row">
+					代理可用:出口 IP <span class="mono">{{ proxyForm.result.ip }}</span>,用时 {{ proxyForm.result.ms }} ms({{ proxyForm.result.proxy }})
+				</NAlert>
+				<NAlert :type="steamView.type" :bordered="false" class="proxy-row">{{ steamView.text }}</NAlert>
+			</template>
+			<NSpace class="proxy-row">
+				<NButton :loading="proxyForm.busy === 'test'" :disabled="!proxyForm.input.trim() && !proxy.config.global" @click="checkProxy">测试</NButton>
+				<NButton type="primary" :loading="proxyForm.busy === 'save'" :disabled="!proxyForm.input.trim() && !rangeChanged" @click="saveProxy">保存</NButton>
+				<NButton :loading="proxyForm.busy === 'clear'" :disabled="!proxy.config.global" @click="clearProxy">清除</NButton>
+			</NSpace>
+		</NCard>
+
 		<NModal v-model:show="password.open" :mask-closable="!password.saving">
 			<NCard title="修改访问口令" style="width: 420px" :bordered="false" role="dialog" aria-modal="true">
 				<NForm label-placement="top" @submit.prevent="savePassword">
@@ -110,3 +216,26 @@ async function logout(): Promise<void> {
 		</NModal>
 	</div>
 </template>
+
+<style scoped>
+.proxy-card {
+	max-width: 680px;
+}
+
+.proxy-hint {
+	margin: 0 0 10px;
+	line-height: 1.6;
+}
+
+.proxy-current {
+	margin-bottom: 8px;
+}
+
+.proxy-row {
+	margin-top: 10px;
+}
+
+.index-input {
+	width: 110px;
+}
+</style>

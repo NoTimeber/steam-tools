@@ -44,7 +44,8 @@ export interface Totp {
 }
 
 export interface ConfirmerOptions {
-	createCommunity?: () => ConfirmationCommunity;
+	/** cookies 是之后要设的那份(按它选代理) */
+	createCommunity?: (cookies: readonly string[]) => ConfirmationCommunity;
 	totp?: Totp;
 	sleep?: (ms: number) => Promise<void>;
 	now?: () => number;
@@ -72,7 +73,7 @@ function describe(confirmations: readonly Confirmation[]): string {
 }
 
 export function createBuyOrderConfirmer(options: ConfirmerOptions = {}) {
-	const createCommunity = options.createCommunity ?? (() => createSteamCommunity() as unknown as ConfirmationCommunity);
+	const createCommunity = options.createCommunity ?? (cookies => createSteamCommunity(cookies) as unknown as ConfirmationCommunity);
 	// 用到时才加载,并且每次都经模块对象调用(e2e 的离线环境会替换 getTimeOffset)
 	const totp = (): Totp => options.totp ?? require('steam-totp') as Totp;
 	const sleep = options.sleep ?? ((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)));
@@ -121,7 +122,7 @@ export function createBuyOrderConfirmer(options: ConfirmerOptions = {}) {
 	}
 
 	function signedInCommunity(cookies: readonly string[]): ConfirmationCommunity {
-		const community = createCommunity();
+		const community = createCommunity(cookies);
 		community.setCookies([...cookies]);   // 从 steamLoginSecure 解析 steamID,getConfirmations 要用
 		return community;
 	}

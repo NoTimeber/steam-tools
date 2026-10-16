@@ -12,6 +12,8 @@ import {marketRoutes} from '../market/routes.ts';
 import type {MarketService} from '../market/index.ts';
 import {purchaseRoutes} from '../purchase/routes.ts';
 import type {PurchaseService} from '../purchase/index.ts';
+import {proxyRoutes} from '../proxy/routes.ts';
+import type {ProxyService} from '../proxy/index.ts';
 import type {Attempt} from '../steam/session-manager.ts';
 import {terminalRoutes} from '../terminal/routes.ts';
 import type {TerminalService} from '../terminal/index.ts';
@@ -101,10 +103,11 @@ function registerAll(overrides: {
 	marketRoutes(router, {market: stub<MarketService>(overrides.market ?? {}), listAccounts: () => []});
 	uuRoutes(router, {uu: stub<UuService>(overrides.uu ?? {})});
 	walletRoutes(router, {wallet: stub<WalletService>({})});
+	proxyRoutes(router, {proxy: stub<ProxyService>({})});
 	return table;
 }
 
-test('路由表:拆分前 app/server.js 注册的全部保留,另加新版前端用的 /api/accounts/upsert、/api/accounts/history', () => {
+test('路由表:拆分前 app/server.js 注册的全部保留,另加新版前端用的 /api/accounts/upsert、/api/accounts/history、/api/proxy/*', () => {
 	const purchaseAliases = ['purchase', 'cs2', 'tf2'].flatMap(prefix => [
 		`GET /api/${prefix}/online-accounts`,
 		`GET /api/${prefix}/items`,
@@ -127,7 +130,8 @@ test('路由表:拆分前 app/server.js 注册的全部保留,另加新版前端
 		'GET /api/uu/state', 'POST /api/uu/bind', 'POST /api/uu/auto', 'POST /api/uu/scan', 'GET /api/uu/orders/:account',
 		'POST /api/uu/list/auto', 'POST /api/uu/list/scan', 'POST /api/uu/poll-interval', 'POST /api/uu/login/start',
 		'POST /api/uu/login/verify', 'POST /api/uu/login/cancel', 'POST /api/uu/token/acquire', 'GET /api/uu/tokens', 'DELETE /api/uu/token',
-		'POST /api/wallet/redeem'
+		'POST /api/wallet/redeem',
+		'GET /api/proxy', 'POST /api/proxy/global', 'POST /api/proxy/account', 'POST /api/proxy/test'
 	];
 	assert.deepEqual([...registerAll().keys()].sort(), [...expected].sort());
 });

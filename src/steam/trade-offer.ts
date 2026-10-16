@@ -152,7 +152,7 @@ export async function acceptVerifiedTradeOffer(opts: AcceptOfferOptions): Promis
 	}
 
 	const TradeOfferManager = require('steam-tradeoffer-manager') as TradeOfferManagerClass;
-	const community: SteamCommunity = createSteamCommunity();
+	const community: SteamCommunity = createSteamCommunity(cookies);
 	const manager = new TradeOfferManager({community, language: 'en', pollInterval: -1, savePollData: false});
 	// 完成后清掉超时定时器(旧代码不清,每次接受都留下几个 30 秒的定时器)
 	const withTimeout = <T>(promise: Promise<T>, label: string): Promise<T> => {

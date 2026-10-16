@@ -92,6 +92,29 @@ export interface PublicHistory {
 	rows?: HistoryRow[];
 }
 
+/** Steam 代理设置(src/proxy/index.ts;代理密码打码成 ****) */
+export interface PublicProxyConfig {
+	/** 全局代理,'' 为没设;带 {n} 时是固定 IP 模式 */
+	global: string;
+	sticky: boolean;
+	/** 固定 IP 模式的编号范围 */
+	range: {from: number; to: number};
+	/** 单独设置过的账号(账号名小写) */
+	accounts: Record<string, {mode: 'direct' | 'custom'; url: string}>;
+	/** 固定 IP 模式下各账号分到的编号(账号名小写) */
+	assigned: Record<string, number>;
+}
+
+export type AccountProxyMode = 'global' | 'direct' | 'custom';
+
+export interface ProxyTestResult {
+	ip: string;
+	ms: number;
+	proxy: string;
+	/** 经代理打开 Steam 社区:429 是这个 IP 被限流;没打开时 status 为 0 */
+	steam: {status: number; ms: number; error: string};
+}
+
 /** 当前版本和 GitHub 上的最新 Release(后端 src/core/version-check.ts) */
 export interface UpdateStatus {
 	current: string;

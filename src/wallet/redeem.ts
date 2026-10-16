@@ -5,6 +5,7 @@
 // (批量全自动流程没法让人输验证码)。
 
 import {createRequire} from 'node:module';
+import {createProxyRequest} from '../core/proxy.ts';
 import {LOCAL_CM_FALLBACKS, patchCmFallback} from '../steam/cm-fallback.ts';
 
 const require = createRequire(import.meta.url);
@@ -73,7 +74,7 @@ interface Totp {
 
 export interface RedeemDeps {
 	SteamUser?: SteamUserClass;
-	SteamStore?: new () => SteamStoreInstance;
+	SteamStore?: new (options?: {request?: unknown}) => SteamStoreInstance;
 	totp?: Totp;
 }
 
@@ -85,6 +86,8 @@ export interface LoginOptions {
 	/** maFile 的 shared_secret(自动 2FA) */
 	sharedSecret?: string;
 	dataDirectory?: string | null;
+	/** 这个账号的 Steam 代理(http://...),'' 直连;登录和兑换都走它 */
+	proxy?: string;
 	timeoutMs?: number;
 	logger?: RedeemLog;
 }
@@ -119,7 +122,7 @@ function toCookieArray(cookies: unknown): string[] {
 export function createWalletRedeemer(deps: RedeemDeps = {}) {
 	// 用到时才加载(e2e 的离线环境会替换这几个库)
 	const SteamUser = () => deps.SteamUser ?? require('steam-user') as SteamUserClass;
-	const SteamStore = () => deps.SteamStore ?? require('steamstore') as new () => SteamStoreInstance;
+	const SteamStore = () => deps.SteamStore ?? require('steamstore') as new (options?: {request?: unknown}) => SteamStoreInstance;
 	const totp = () => deps.totp ?? require('steam-totp') as Totp;
 
 	/** 登录一个账号拿 cookies;登录失败、要人工 Guard、超时都 reject(并登出) */
@@ -138,7 +141,8 @@ export function createWalletRedeemer(deps: RedeemDeps = {}) {
 				autoRelogin: false,
 				renewRefreshTokens: true,
 				webCompatibilityMode: true,
-				protocol: UserClass.EConnectionProtocol.WebSocket
+				protocol: UserClass.EConnectionProtocol.WebSocket,
+				...(opts.proxy ? {httpProxy: opts.proxy} : {})
 			});
 			let warned = false;
 			patchCmFallback(client, LOCAL_CM_FALLBACKS, () => {
@@ -255,7 +259,7 @@ export function createWalletRedeemer(deps: RedeemDeps = {}) {
 				throw new Error('未获取到 WebSession cookies');
 			}
 			const StoreClass = SteamStore();
-			const store = new StoreClass();
+			const store = new StoreClass(opts.proxy ? {request: createProxyRequest(opts.proxy)} : undefined);
 			store.setCookies(toCookieArray(cookies));
 
 			log('info', '正在兑换充值码…');

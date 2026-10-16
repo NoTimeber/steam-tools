@@ -36,6 +36,8 @@ export interface WalletEvent {
 export interface WalletServiceOptions {
 	/** 本地 maFile / 旧 cookies 文件里的 shared_secret 和 refreshToken(没填密码时用 refreshToken 登录) */
 	profileFor(accountName: string): {sharedSecret?: string; refreshToken?: string};
+	/** 这个账号的 Steam 代理,'' 直连 */
+	proxyFor?(accountName: string): string;
 	emit(payload: WalletEvent): void;
 	redeem?: (opts: RedeemOptions) => Promise<RedeemResult>;
 	randomId?: () => string;
@@ -58,6 +60,7 @@ export function createWalletService(options: WalletServiceOptions) {
 				password: pair.password,
 				refreshToken: pair.password ? '' : (profile.refreshToken || ''),
 				sharedSecret: profile.sharedSecret || '',
+				proxy: options.proxyFor?.(pair.account) ?? '',
 				code: pair.code,
 				timeoutMs: REDEEM_TIMEOUT_MS,
 				logger: (level, message) => options.emit({...base, status: 'processing', logLevel: level, logMessage: message})

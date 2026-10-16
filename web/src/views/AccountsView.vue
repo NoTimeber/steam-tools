@@ -1,6 +1,6 @@
 <script setup lang="ts">
-// 账户管理:按「GC 已连接 / 在线 / 未在线」分组的账号表,导入、登录/登出/删除、按序号勾选、Steam Guard、令牌验证码、消费记录、连接 GC。
-import {computed, h, reactive, ref} from 'vue';
+// 账户管理:按「GC 已连接 / 在线 / 未在线」分组的账号表,导入、登录/登出/删除、按序号勾选、Steam Guard、令牌验证码、消费记录、Steam 代理、连接 GC。
+import {computed, h, onMounted, reactive, ref} from 'vue';
 import {NAlert, NButton, NCard, NDataTable, NDropdown, NInput, NModal, NSpace, NTag, useDialog, useMessage} from 'naive-ui';
 import type {DataTableColumns, DataTableRowKey} from 'naive-ui';
 import {errorText} from '../api/http.ts';
@@ -12,7 +12,10 @@ import {
 	importAccountText, importMaFiles, loginAccount, logoutAccount, onlineCount, orderedAccounts, submitGuardCode
 } from '../stores/accounts.ts';
 import type {AccountGroupView, AccountRow} from '../stores/accounts.ts';
+import {accountProxy} from '../lib/proxy.ts';
+import {loadProxy, proxy} from '../stores/proxy.ts';
 import HistoryModal from './accounts/HistoryModal.vue';
+import ProxyModal from './accounts/ProxyModal.vue';
 import TotpModal from './accounts/TotpModal.vue';
 
 const message = useMessage();
@@ -69,6 +72,9 @@ const STATUS_TAG: Record<LoginStatus, 'success' | 'warning' | 'error' | 'default
 
 const totpAccount = ref('');
 const historyAccount = ref('');
+const proxyAccount = ref('');
+
+onMounted(loadProxy);
 
 function gcCell(row: AccountRow) {
 	const game = canUseGc(row) ? connectedGame(row) : '';
@@ -85,7 +91,7 @@ function gcCell(row: AccountRow) {
 	}, () => h(NButton, {size: 'tiny'}, () => '连接GC'));
 }
 
-const DATA_COLUMNS = 9;
+const DATA_COLUMNS = 10;
 
 const columns: DataTableColumns<TableRow> = [
 	{type: 'selection'},
@@ -134,6 +140,16 @@ const columns: DataTableColumns<TableRow> = [
 		render: item => (item.kind === 'account'
 			? h(NButton, {size: 'tiny', onClick: () => (historyAccount.value = item.row.accountName)}, () => '查看')
 			: null)
+	},
+	{
+		title: '代理',
+		key: 'proxy',
+		width: 130,
+		render: item => {
+			if (item.kind !== 'account') return null;
+			const view = accountProxy(proxy.config, item.row.accountName);
+			return h(NButton, {size: 'tiny', quaternary: view.mode === 'global', title: view.title, onClick: () => (proxyAccount.value = item.row.accountName)}, () => view.label);
+		}
 	},
 	{title: 'SteamID', key: 'steamID', width: 170, ellipsis: {tooltip: true}, render: item => (item.kind === 'account' ? h('span', {class: 'mono'}, item.row.steamID || '-') : null)},
 	{title: 'GC操作', key: 'gc', width: 100, render: item => (item.kind === 'account' ? gcCell(item.row) : null)}
@@ -184,6 +200,10 @@ async function run(kind: 'login' | 'logout', action: (row: AccountRow) => Promis
 		await forSelected(action);
 	} finally {
 		busy.value = '';
+	}
+	if (kind === 'login') {
+		// 固定 IP 代理:登录时服务端会给账号分 / 换编号,刷新一下「代理」列
+		loadProxy();
 	}
 }
 
@@ -311,7 +331,7 @@ async function submitGuard(): Promise<void> {
 				:row-class-name="(item: TableRow) => (item.kind === 'group' ? 'group-row' : '')"
 				:row-props="rowProps"
 				:indent="0"
-				:scroll-x="1070"
+				:scroll-x="1200"
 				:loading="accounts.loading && !accounts.loaded"
 				virtual-scroll
 				@update:checked-row-keys="onCheckedChange"
@@ -339,6 +359,7 @@ async function submitGuard(): Promise<void> {
 
 		<TotpModal :account-name="totpAccount" @close="totpAccount = ''" />
 		<HistoryModal :account-name="historyAccount" @close="historyAccount = ''" />
+		<ProxyModal :account-name="proxyAccount" @close="proxyAccount = ''" />
 	</div>
 </template>
 

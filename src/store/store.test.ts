@@ -97,6 +97,16 @@ test('maFile 与 session:加密存取、按账号名不区分大小写', () => {
 	store.close();
 });
 
+test('代理设置:没存过是空的;加密存取,代理密码不明文落盘', () => {
+	const {store, dir} = freshStore();
+	assert.deepEqual(store.proxies.load(), {global: '', range: {from: 1, to: 1}, accounts: {}, assigned: {}});
+	const config = {global: 'http://user-{n}:PROXY-PLAINTEXT@p.example.io:80', range: {from: 1, to: 100}, accounts: {alpha: 'direct', bravo: 'http://u:p@1.2.3.4:8080'}, assigned: {charlie: 7}};
+	store.proxies.save(config);
+	assert.deepEqual(store.proxies.load(), config);
+	assert.ok(!dbBytes(dir).includes('PROXY-PLAINTEXT'), '代理密码不能明文落盘');
+	store.close();
+});
+
 test('UU token:按 userId 去重(后写覆盖)、按 id 查找、没有 userId 时用哈希', () => {
 	const {store, dir} = freshStore();
 	store.uu.replaceTokens([

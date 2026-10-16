@@ -85,6 +85,10 @@ export interface Config {
 	};
 	/** 新版本提示查这个 GitHub 仓库(owner/repo)的最新 Release;UPDATE_CHECK=0 时为空,不检查 */
 	updateRepo: string;
+	/** 测试 Steam 代理时请求的地址(回出口 IP);空为默认的 api.ipify.org。PROXY_TEST_URL */
+	proxyTestUrl: string;
+	/** 测试 Steam 代理时顺带请求的 Steam 社区地址(看出口 IP 有没有被限流);空为默认的市场页。PROXY_STEAM_TEST_URL */
+	proxySteamTestUrl: string;
 }
 
 /** 数字型环境变量:没给或不是数字用缺省值,再夹到下限 */
@@ -166,6 +170,8 @@ export function loadConfig(env: Env, dirs: ConfigDirs): Config {
 			inspectUrl: env.INSPECT_SERVICE_URL || '',
 			inspectKey: env.INSPECT_KEY || ''
 		},
-		updateRepo: String(env.UPDATE_CHECK || '1') === '0' ? '' : (env.GITHUB_REPO || '').trim() || 'NoTimeber/steam-tools'
+		updateRepo: String(env.UPDATE_CHECK || '1') === '0' ? '' : (env.GITHUB_REPO || '').trim() || 'NoTimeber/steam-tools',
+		proxyTestUrl: (env.PROXY_TEST_URL || '').trim(),
+		proxySteamTestUrl: (env.PROXY_STEAM_TEST_URL || '').trim()
 	};
 }

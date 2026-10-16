@@ -142,7 +142,8 @@ export interface SessionManagerTiming {
 }
 
 export interface SessionManagerOptions {
-	createClient(fingerprint: Fingerprint): SteamClient;
+	/** accountName 用来按账号选 Steam 代理 */
+	createClient(fingerprint: Fingerprint, accountName: string): SteamClient;
 	getFingerprint(accountName: string): Fingerprint;
 	generateAuthCode(sharedSecret: string): string;
 	/** 视为"不要自动重连"的 EResult(被顶号、封禁、密码错误等) */
@@ -404,7 +405,7 @@ export function createSessionManager(options: SessionManagerOptions) {
 		const fingerprint = getFingerprintSafe(attempt.accountName);
 		attempt.userAgent = fingerprint.userAgent || '';    // 供自有 web 请求(取库存等)复用同一 UA
 
-		const client = options.createClient(fingerprint);
+		const client = options.createClient(fingerprint, attempt.accountName);
 		withCmFallback(attempt, client);
 		attempt.client = client;
 		attempt.status = 'connecting';
