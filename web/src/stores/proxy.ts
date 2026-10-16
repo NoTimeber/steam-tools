@@ -1,17 +1,41 @@
-// Steam 代理设置:全局代理(运行设置页)和账号的单独设置(账户管理页)。服务端只下发打码后的地址。
+// Steam 代理设置:全局代理(运行设置 → Steam 代理)和账号的单独设置(账户管理页)。服务端不下发密码,地址里的密码打码。
 
 import {reactive} from 'vue';
 import {api, errorText} from '../api/http.ts';
-import type {AccountProxyMode, ProxyTestResult, PublicProxyConfig} from '../api/types.ts';
+import type {AccountProxyMode, GlobalProxySettings, ProxyKind, ProxyProtocol, ProxyTestResult, PublicProxyConfig} from '../api/types.ts';
 import {addLog} from './logs.ts';
 
+const emptySettings = (): GlobalProxySettings => ({
+	enabled: false, protocol: 'http', host: '', port: 0, type: 'rotating', username: '', hasPassword: false, loginsPerMinute: 0
+});
+
 const state = reactive({
-	config: {global: '', sticky: false, range: {from: 1, to: 1}, accounts: {}, assigned: {}} as PublicProxyConfig,
+	config: {global: '', settings: emptySettings(), sticky: false, range: {from: 1, to: 1}, accounts: {}, assigned: {}} as PublicProxyConfig,
 	loaded: false,
 	error: ''
 });
 
 export const proxy = state;
+
+/** 代理设置页提交的各项;password 留空保留原来的,数字留空为 null(端口没填、登录不限) */
+export interface GlobalProxyForm {
+	enabled: boolean;
+	protocol: ProxyProtocol;
+	host: string;
+	port: number | null;
+	type: ProxyKind;
+	username: string;
+	password: string;
+	loginsPerMinute: number | null;
+	/** 按账号固定 IP 的编号范围 */
+	from: number | null;
+	to: number | null;
+}
+
+/** 表单各项转成接口参数(空的数字传 '') */
+function formBody(form: GlobalProxyForm) {
+	return {...form, port: form.port ?? '', loginsPerMinute: form.loginsPerMinute ?? '', from: form.from ?? '', to: form.to ?? ''};
+}
 
 /** 读代理设置;读不到时页面上照样能用(当作没设) */
 export async function loadProxy(): Promise<void> {
@@ -24,14 +48,14 @@ export async function loadProxy(): Promise<void> {
 	}
 }
 
-/**
- * 设全局代理;'' 清除,undefined 只改编号范围(带 {n} 的固定 IP 模式用)。
- * 地址不对服务端回 400,错误抛给页面显示
- */
-export async function saveGlobalProxy(proxyUrl: string | undefined, range?: {from: number; to: number}): Promise<void> {
-	state.config = (await api.post<{proxy: PublicProxyConfig}>('/api/proxy/global', {proxy: proxyUrl, ...range})).proxy;
-	const sticky = state.config.sticky ? `(固定 IP,编号 ${state.config.range.from}-${state.config.range.to})` : '';
-	addLog('success', proxyUrl === '' ? '已清除全局 Steam 代理' : `全局 Steam 代理已设为 ${state.config.global}${sticky}`);
+/** 保存全局代理;不对的服务端回 400,错误抛给页面显示 */
+export async function saveGlobalProxy(form: GlobalProxyForm): Promise<void> {
+	state.config = (await api.post<{proxy: PublicProxyConfig}>('/api/proxy/global', formBody(form))).proxy;
+	const {settings, sticky, range} = state.config;
+	addLog('success', settings.enabled
+		? `全局 Steam 代理已设为 ${state.config.global}` + (sticky ? `(按账号固定 IP,编号 ${range.from}-${range.to})` : '')
+			+ (settings.loginsPerMinute ? `,登录每分钟最多 ${settings.loginsPerMinute} 次` : '')
+		: '全局 Steam 代理已关闭,Steam 请求直连');
 }
 
 /** 设账号的代理:global 跟全局、direct 不走代理、custom 用填的(没填沿用原来的单独代理) */
@@ -41,7 +65,7 @@ export async function saveAccountProxy(accountName: string, mode: AccountProxyMo
 	addLog('success', `${accountName}: Steam 代理改为 ${label}(登录连接要重新登录才换)`);
 }
 
-/** 测代理:填了地址测填的,没填测这个账号(或全局)现在用的 */
-export function testProxy(body: {proxy?: string; accountName?: string; from?: number; to?: number}): Promise<ProxyTestResult> {
-	return api.post<ProxyTestResult>('/api/proxy/test', body);
+/** 测代理:传 form 测设置页上还没保存的各项;传 proxy 测填的地址;都没有测这个账号(或全局)现在用的 */
+export function testProxy(body: {form?: GlobalProxyForm; proxy?: string; accountName?: string}): Promise<ProxyTestResult> {
+	return api.post<ProxyTestResult>('/api/proxy/test', body.form ? formBody(body.form) : {proxy: body.proxy, accountName: body.accountName});
 }

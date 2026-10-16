@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import EventEmitter from 'node:events';
 import {createWalletRedeemer, createWalletService, describeRedeemError} from './index.ts';
 import type {RedeemOptions, RedeemResult} from './redeem.ts';
-import type {WalletEvent} from './index.ts';
+import type {WalletEvent, WalletServiceOptions} from './index.ts';
 
 type Login = 'ok' | 'error' | 'guardMobile' | 'guardEmail' | 'guardWrong' | 'hang' | 'cmFail';
 
@@ -127,12 +127,13 @@ test('错误码翻译', () => {
 	assert.equal(describeRedeemError(null), '未知错误');
 });
 
-function service(redeem: (opts: RedeemOptions) => Promise<RedeemResult>) {
+function service(redeem: (opts: RedeemOptions) => Promise<RedeemResult>, queueLogin?: WalletServiceOptions['queueLogin']) {
 	const events: WalletEvent[] = [];
 	const wallet = createWalletService({
 		profileFor: name => name === 'bravo' ? {sharedSecret: 'SS-b', refreshToken: 'RT-b'} : {},
 		emit: payload => void events.push(payload),
 		redeem,
+		queueLogin,
 		randomId: () => 'job-1',
 		logger: {error() {}}
 	});
@@ -181,4 +182,23 @@ test('参数校验:没有有效配对、超过 500 条报 400;并发缺省 3,上
 	assert.equal(wallet.start({pairs: many}).concurrency, 3);
 	assert.equal(wallet.start({pairs: many, concurrency: 99}).concurrency, 10);
 	assert.equal(wallet.start({pairs: many.slice(0, 2), concurrency: 5}).concurrency, 2);
+});
+
+test('代理的登录速率限制:要排队的先推一条排队中,轮到再登录兑换', async () => {
+	let release!: (granted: boolean) => void;
+	const ready = new Promise<boolean>(resolve => (release = resolve));
+	const redeemed: string[] = [];
+	const {wallet, events, done} = service(async opts => {
+		redeemed.push(opts.accountName);
+		return {ok: true, eresult: 1, detail: 0, formattedNewWalletBalance: '$5.00', amount: 500, message: '兑换成功'};
+	}, accountName => (accountName === 'bravo' ? {waitMs: 30500, ready} : null));
+	wallet.start({pairs: [{account: 'alpha', password: 'pw', code: 'A'}, {account: 'bravo', password: 'pw', code: 'B'}], concurrency: 2});
+	for (let i = 0; i < 20; i++) {
+		await new Promise(resolve => setImmediate(resolve));
+	}
+	assert.deepEqual(redeemed, ['alpha'], 'bravo 在排队');
+	assert.ok(events.some(e => e.account === 'bravo' && /排队中\(约 31 秒\)/.test(e.message ?? '')));
+	release(true);
+	await done();
+	assert.deepEqual(redeemed, ['alpha', 'bravo']);
 });

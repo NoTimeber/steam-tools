@@ -66,6 +66,43 @@ export function normalizeProxyUrl(raw: unknown): string {
 	return withPlaceholder(`${url.protocol}//${auth}${url.hostname}:${url.port || (url.protocol === 'https:' ? '443' : '80')}`);
 }
 
+export type ProxyProtocol = 'http' | 'https';
+
+/** 代理地址拆开的各项;账号密码是解码后的原文 */
+export interface ProxyParts {
+	protocol: ProxyProtocol;
+	host: string;
+	port: number;
+	username: string;
+	password: string;
+}
+
+/** 拆开代理地址(先按 normalizeProxyUrl 校验,不对的抛错);{n} 原样保留 */
+export function parseProxyUrl(raw: unknown): ProxyParts {
+	const normalized = normalizeProxyUrl(raw);
+	if (!normalized) {
+		throw new Error('代理地址为空');
+	}
+	const url = new URL(withMark(normalized));
+	return {
+		protocol: url.protocol === 'https:' ? 'https' : 'http',
+		host: withPlaceholder(url.hostname),
+		port: Number(url.port) || (url.protocol === 'https:' ? 443 : 80),
+		username: withPlaceholder(decodeURIComponent(url.username)),
+		password: withPlaceholder(decodeURIComponent(url.password))
+	};
+}
+
+/** 各项拼成代理地址(账号密码 URL 编码,{n} 原样保留);没有主机为 '' */
+export function buildProxyUrl(parts: ProxyParts): string {
+	if (!parts.host) {
+		return '';
+	}
+	const encode = (text: string) => withPlaceholder(encodeURIComponent(withMark(text)));
+	const auth = parts.username ? `${encode(parts.username)}${parts.password ? ':' + encode(parts.password) : ''}@` : '';
+	return `${parts.protocol}://${auth}${parts.host}:${parts.port}`;
+}
+
 /** 给人看的代理地址:密码换成 ****({n} 原样保留);解析不了返回空串 */
 export function maskProxyUrl(proxyUrl: string): string {
 	if (!proxyUrl) {

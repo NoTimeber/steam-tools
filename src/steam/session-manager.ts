@@ -155,6 +155,11 @@ export interface SessionManagerOptions {
 	onChange(attempt: Attempt): void;
 	/** 客户端建好、logOn 之前调用:挂 CS2/TF2 GC 模块等 */
 	onClientCreated?(attempt: Attempt, client: SteamClient): void;
+	/**
+	 * 每次 logOn 之前调(代理的登录速率限制):返回 null 马上登;否则排队,ready 为 true 时再登。
+	 * cancelled 在轮到时检查,为真就跳过(不占次数)
+	 */
+	queueLogon?(accountName: string, cancelled: () => boolean): {waitMs: number; ready: Promise<boolean>} | null;
 	/** 拿到 WebSession 之后调用 */
 	onWebSession?(attempt: Attempt): void;
 	currencyIdToIso(currency: unknown): string;
@@ -397,6 +402,32 @@ export function createSessionManager(options: SessionManagerOptions) {
 		});
 	}
 
+	/** 每个会话最近一次排队登录的编号:排着队又发起了新的登录(重试、重新登录)时,旧的那次轮到了也不登 */
+	const logonTickets = new WeakMap<Attempt, number>();
+
+	/**
+	 * 开始一次 logOn:代理这分钟的登录次数用完了就先排队(写一条日志),轮到再登(begin 的参数为 true:排过队)。
+	 * 排队期间会话被删、登出、换了客户端、又发起了新的登录,或者已经在线了(steam-user 自己重登回来了),这次就不登了
+	 */
+	function whenLogonAllowed(attempt: Attempt, client: SteamClient, begin: (queued: boolean) => void): void {
+		const ticket = (logonTickets.get(attempt) ?? 0) + 1;
+		logonTickets.set(attempt, ticket);
+		const stale = () => attempt.disposed || attempt.status === 'logged_out' || attempt.status === 'web_session'
+			|| attempt.client !== client || logonTickets.get(attempt) !== ticket;
+		const slot = options.queueLogon?.(attempt.accountName, stale);
+		if (!slot) {
+			begin(false);
+			return;
+		}
+		addLog(attempt, 'info', `代理的登录次数到了每分钟上限,排队中(约 ${Math.max(1, Math.ceil(slot.waitMs / 1000))} 秒后开始)`);
+		emit(attempt);
+		void slot.ready.then(granted => {
+			if (granted && !stale()) {
+				begin(true);
+			}
+		});
+	}
+
 	function startLogon(attempt: Attempt, details: LogonDetails): void {
 		attempt.loginDetails = details;            // 记下凭据,供超时重试复用
 		if (attempt.loginRetries == null) {
@@ -414,15 +445,25 @@ export function createSessionManager(options: SessionManagerOptions) {
 		addLog(attempt, 'info', '正在连接 Steam');
 		emit(attempt);
 
-		armLoginWatchdog(attempt);
-		try {
-			client.logOn(buildLogOnDetails(details, fingerprint));
-		} catch (err) {
-			clearLoginWatchdog(attempt);
-			attempt.status = 'failed';
-			addLog(attempt, 'error', '登录启动失败: ' + errorMessage(err));
-			emit(attempt);
-		}
+		whenLogonAllowed(attempt, client, queued => {
+			// 排过队的话预先生成的移动令牌验证码可能过期了,重新生成
+			if (queued && details.twoFactorCode && attempt.sharedSecret) {
+				try {
+					details.twoFactorCode = options.generateAuthCode(attempt.sharedSecret);
+				} catch {
+					// 生成失败就用原来的,不对时交给 steamGuard 事件
+				}
+			}
+			armLoginWatchdog(attempt);
+			try {
+				client.logOn(buildLogOnDetails(details, fingerprint));
+			} catch (err) {
+				clearLoginWatchdog(attempt);
+				attempt.status = 'failed';
+				addLog(attempt, 'error', '登录启动失败: ' + errorMessage(err));
+				emit(attempt);
+			}
+		});
 	}
 
 	// 登录看门狗:启动后若在超时内没拿到 WebSession(也没在等验证码),判定卡住并重试。
@@ -474,18 +515,21 @@ export function createSessionManager(options: SessionManagerOptions) {
 			if (!attempt.client || attempt.disposed || attempt.status === 'logged_out') {
 				return;   // 期间被手动登出/删除/替换
 			}
-			const fingerprint = getFingerprintSafe(attempt.accountName);
-			const retryDetails: LogonDetails = {...details};
-			delete retryDetails.twoFactorCode;   // 一次性验证码已过期,丢弃
-			armLoginWatchdog(attempt);
-			try {
-				attempt.client.logOn(buildLogOnDetails(retryDetails, fingerprint));
-			} catch (err) {
-				clearLoginWatchdog(attempt);
-				attempt.status = 'failed';
-				addLog(attempt, 'error', '重试登录启动失败: ' + errorMessage(err));
-				emit(attempt);
-			}
+			const client = attempt.client;
+			whenLogonAllowed(attempt, client, () => {
+				const fingerprint = getFingerprintSafe(attempt.accountName);
+				const retryDetails: LogonDetails = {...details};
+				delete retryDetails.twoFactorCode;   // 一次性验证码已过期,丢弃
+				armLoginWatchdog(attempt);
+				try {
+					client.logOn(buildLogOnDetails(retryDetails, fingerprint));
+				} catch (err) {
+					clearLoginWatchdog(attempt);
+					attempt.status = 'failed';
+					addLog(attempt, 'error', '重试登录启动失败: ' + errorMessage(err));
+					emit(attempt);
+				}
+			});
 		}, timing.retryDelayMs);
 	}
 

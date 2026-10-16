@@ -242,6 +242,8 @@ const sessions = createSessionManager({
 	intents: store.loginIntents,
 	onChange: attempt => io.emit('attempt:update', sessions.publicAttempt(attempt)),
 	onClientCreated: (attempt, client) => gcModules.attach(attempt, client),
+	// 代理设了登录速率限制:这分钟的次数用完了就排队
+	queueLogon: (accountName, cancelled) => proxy.queueLogin(accountName, cancelled),
 	onWebSession: attempt => accounts.refreshCountry(attempt),   // 后台查真实账户国家(USD 等无法从货币推断)
 	currencyIdToIso,
 	resolveWalletCountry: attempt => resolveAccountCountry({
@@ -320,6 +322,7 @@ const buyGame = createBuyGameService({
 const wallet = createWalletService({
 	profileFor: accountName => profiles.local(accountName),
 	proxyFor: accountName => proxy.proxyFor(accountName),
+	queueLogin: accountName => proxy.queueLogin(accountName),
 	emit: payload => io.emit('wallet:redeem', payload)
 });
 

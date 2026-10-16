@@ -38,6 +38,8 @@ export interface WalletServiceOptions {
 	profileFor(accountName: string): {sharedSecret?: string; refreshToken?: string};
 	/** 这个账号的 Steam 代理,'' 直连 */
 	proxyFor?(accountName: string): string;
+	/** 登录前调(代理的登录速率限制):返回 null 马上登,否则等 ready 再登 */
+	queueLogin?(accountName: string): {waitMs: number; ready: Promise<boolean>} | null;
 	emit(payload: WalletEvent): void;
 	redeem?: (opts: RedeemOptions) => Promise<RedeemResult>;
 	randomId?: () => string;
@@ -55,6 +57,12 @@ export function createWalletService(options: WalletServiceOptions) {
 		options.emit({...base, status: 'processing', message: '正在登录并兑换…'});
 		const profile = options.profileFor(pair.account);
 		try {
+			const slot = options.queueLogin?.(pair.account);
+			if (slot) {
+				options.emit({...base, status: 'processing', message: `代理的登录次数到了每分钟上限,排队中(约 ${Math.max(1, Math.ceil(slot.waitMs / 1000))} 秒)`});
+				await slot.ready;
+				options.emit({...base, status: 'processing', message: '正在登录并兑换…'});
+			}
 			const result = await redeem({
 				accountName: pair.account,
 				password: pair.password,

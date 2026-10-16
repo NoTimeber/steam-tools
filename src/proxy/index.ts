@@ -6,14 +6,20 @@
 //     按请求 Cookie 里 steamLoginSecure 的 SteamID 找到账号再取;没带 cookie 的(查价格、nameid)用全局代理;
 //   - steamcommunity(手机确认、交易报价)和充值码的 steamstore:建实例时按 cookie / 账号名取。
 // 设置马上对新请求生效;已经建好的 Steam 登录连接不变。
+// 全局代理按各项存(协议、主机、端口、类型、账号密码、登录速率限制、启用),用的时候拼成地址;关了就直连,填的留着。
+// 登录速率限制:走全局代理开始的 Steam 登录每分钟最多几次,超出的排队(./login-limit.ts);手动登录、超时重试、掉线重连、
+// 重启恢复、充值码兑换的登录都算,steam-user 自己断线后的自动重登不经过这里,不受限。
 //
-// 固定 IP(粘性)模式:全局代理地址里写 {n}(如 webshare 的 http://用户名-{n}:密码@p.webshare.io:80,一个编号对应一个固定 IP),
+// 按账号固定 IP(粘性)模式:类型选它,用户名里写 {n}(如 webshare 的 用户名-{n},一个编号对应一个固定 IP),
 // 每个账号分到一个编号并记住(尽量不和别的账号重复),之后一直用它;只有新账号第一次用、手动重新登录(renew)时才换编号。
 // 认不出账号的请求(查价格、nameid)也固定用一个。断线自动重连、重启后自动恢复登录都不换。
 
-import {createProxyFetch, fillProxyTemplate, isProxyTemplate, maskProxyUrl, normalizeProxyUrl} from '../core/proxy.ts';
+import {buildProxyUrl, createProxyFetch, fillProxyTemplate, isProxyTemplate, maskProxyUrl, normalizeProxyUrl, parseProxyUrl} from '../core/proxy.ts';
 import {STEAM_WEB_USER_AGENT} from '../steam/community.ts';
-import type {ProxyConfig, ProxyStore} from '../store/proxies.ts';
+import {PROXY_KINDS} from '../store/proxies.ts';
+import type {GlobalProxySettings, ProxyConfig, ProxyKind, ProxyStore} from '../store/proxies.ts';
+import {createLoginLimiter} from './login-limit.ts';
+import type {LoginLimiterOptions, LoginSlot} from './login-limit.ts';
 
 const STEAM_HOST = /(^|\.)(steampowered\.com|steamcommunity\.com|steamstatic\.com|steamcontent\.com|steamserver\.net|steam-chat\.com)$/i;
 /** 测试代理时请求的地址:回出口 IP */
@@ -27,6 +33,8 @@ const DEFAULT_STEAM_TEST_URL = 'https://steamcommunity.com/market/';
 const TEST_TIMEOUT_MS = 15000;
 /** 编号范围的上限(webshare 之类按代理数量编号,够用了) */
 const MAX_INDEX = 100000;
+/** 登录速率限制的上限(每分钟) */
+const MAX_LOGINS_PER_MINUTE = 10000;
 
 export function isSteamHost(hostname: string): boolean {
 	return STEAM_HOST.test(hostname);
@@ -46,9 +54,16 @@ export function steamIdFromCookies(cookies: string | readonly string[]): string 
 	}
 }
 
+/** 下发给页面的全局代理各项:不带密码,只说有没有 */
+export interface PublicGlobalProxy extends Omit<GlobalProxySettings, 'password'> {
+	hasPassword: boolean;
+}
+
 export interface PublicProxyConfig {
-	/** 全局代理(密码打码),'' 为没设 */
+	/** 全局代理现在用的地址(密码打码),'' 为没设或没启用 */
 	global: string;
+	/** 全局代理各项(设置页的表单) */
+	settings: PublicGlobalProxy;
 	/** 全局代理带 {n}:固定 IP 模式 */
 	sticky: boolean;
 	/** 固定 IP 模式的编号范围 */
@@ -82,6 +97,22 @@ export interface ProxyServiceOptions {
 	now?: () => number;
 	/** 挑编号用的随机数(测试注入) */
 	random?: () => number;
+	/** 登录速率限制用的时钟和定时器(测试注入) */
+	loginClock?: Pick<LoginLimiterOptions, 'now' | 'setTimer' | 'clearTimer'>;
+}
+
+/** 设全局代理(或测还没保存的设置)时页面传的各项;不传的照旧,password 不传或 '' 保留原来的 */
+export interface GlobalProxyBody {
+	enabled?: unknown;
+	protocol?: unknown;
+	host?: unknown;
+	port?: unknown;
+	type?: unknown;
+	username?: unknown;
+	password?: unknown;
+	loginsPerMinute?: unknown;
+	from?: unknown;
+	to?: unknown;
 }
 
 function proxyError(statusCode: number, message: string): Error & {statusCode: number} {
@@ -101,6 +132,49 @@ function checkedProxyUrl(raw: unknown): string {
 	}
 }
 
+/** 主机:域名或 IP(IPv6 带方括号),可以带 {n};协议、端口、账号密码不能混进来 */
+function checkedHost(raw: unknown): string {
+	const text = String(raw ?? '').trim();
+	if (!text) {
+		return '';
+	}
+	if (!/^\[[0-9a-f:.]+\]$/i.test(text) && /[:/@\s]/.test(text)) {
+		throw proxyError(400, '主机只填域名或 IP(如 p.webshare.io),协议、端口、账号密码分开填');
+	}
+	try {
+		return parseProxyUrl(`http://${text}:80`).host;
+	} catch {
+		throw proxyError(400, `主机「${text}」格式不对`);
+	}
+}
+
+/** 端口:1–65535;填了主机就必须填 */
+function checkedPort(raw: unknown, host: string): number {
+	if (raw === undefined || raw === null || raw === '' || raw === 0) {
+		if (host) {
+			throw proxyError(400, '请填写端口');
+		}
+		return 0;
+	}
+	const port = Number(raw);
+	if (!Number.isInteger(port) || port < 1 || port > 65535) {
+		throw proxyError(400, '端口要是 1 到 65535 的整数');
+	}
+	return port;
+}
+
+/** 登录速率限制:每分钟次数,留空(或 0)不限 */
+function checkedLoginLimit(raw: unknown): number {
+	if (raw === undefined || raw === null || raw === '' || raw === 0) {
+		return 0;
+	}
+	const limit = Number(raw);
+	if (!Number.isInteger(limit) || limit < 1 || limit > MAX_LOGINS_PER_MINUTE) {
+		throw proxyError(400, '登录速率限制填每分钟次数(正整数),留空不限');
+	}
+	return limit;
+}
+
 /** 校验编号范围;没给的用现在的 */
 function checkedRange(body: {from?: unknown; to?: unknown}, current: {from: number; to: number}): {from: number; to: number} {
 	const from = body.from === undefined || body.from === '' ? current.from : Number(body.from);
@@ -117,6 +191,10 @@ export function createProxyService(options: ProxyServiceOptions) {
 	const now = options.now ?? Date.now;
 	const random = options.random ?? Math.random;
 	let config: ProxyConfig = options.store.load();
+	/** 全局代理现在用的地址:没启用、没填主机为 ''(直连) */
+	const globalUrl = () => (config.global.enabled && config.global.host ? buildProxyUrl(config.global) : '');
+	/** 走全局代理开始的 Steam 登录:每分钟次数限制;全局代理没启用时不限 */
+	const logins = createLoginLimiter({limit: () => (globalUrl() ? config.global.loginsPerMinute : 0), ...options.loginClock});
 	/**
 	 * 「账号 + 代理地址」→ 走它的 fetch。每个账号各用各的长连接:轮换代理每个新连接换一个出口 IP,
 	 * 共用连接的话几个账号会从同一个 IP 出去;分开后同一账号一段时间内 IP 稳定,账号之间不混。
@@ -150,7 +228,7 @@ export function createProxyService(options: ProxyServiceOptions) {
 		config = next;
 	}
 
-	const isSticky = () => isProxyTemplate(config.global);
+	const isSticky = () => isProxyTemplate(globalUrl());
 	const inRange = (index: unknown): index is number =>
 		Number.isInteger(index) && (index as number) >= config.range.from && (index as number) <= config.range.to;
 
@@ -194,7 +272,23 @@ export function createProxyService(options: ProxyServiceOptions) {
 		if (override && override !== 'global') {
 			return override;
 		}
-		return isSticky() ? fillProxyTemplate(config.global, indexFor(key)) : config.global;
+		const global = globalUrl();
+		return isProxyTemplate(global) ? fillProxyTemplate(global, indexFor(key)) : global;
+	}
+
+	/** 这个账号的 Steam 请求走全局代理(没单独设置,全局代理也开着) */
+	function usesGlobal(accountName: unknown): boolean {
+		const key = String(accountName || '').trim().toLowerCase();
+		const override = key ? config.accounts[key] : undefined;
+		return !!globalUrl() && (!override || override === 'global');
+	}
+
+	/**
+	 * 开始一次 Steam 登录前调(登录速率限制):走全局代理、设了每分钟次数的,超出就排队。
+	 * 返回 null 直接登录;否则等 ready,false 表示轮到时 cancelled() 已经为真(不用登录了)
+	 */
+	function queueLogin(accountName: unknown, cancelled?: () => boolean): LoginSlot | null {
+		return usesGlobal(accountName) ? logins.acquire(cancelled) : null;
 	}
 
 	/** 手动登录(新建会话)前调:固定 IP 模式下给走全局代理的账号换一个编号(也就是换一个 IP) */
@@ -251,7 +345,15 @@ export function createProxyService(options: ProxyServiceOptions) {
 				accounts[key] = {mode: 'custom', url: maskProxyUrl(value)};
 			}
 		}
-		return {global: maskProxyUrl(config.global), sticky: isSticky(), range: {...config.range}, accounts, assigned: {...config.assigned}};
+		const {password, ...settings} = config.global;
+		return {
+			global: maskProxyUrl(globalUrl()),
+			settings: {...settings, hasPassword: !!password},
+			sticky: isSticky(),
+			range: {...config.range},
+			accounts,
+			assigned: {...config.assigned}
+		};
 	}
 
 	function save(next: ProxyConfig): PublicProxyConfig {
@@ -260,14 +362,62 @@ export function createProxyService(options: ProxyServiceOptions) {
 	}
 
 	/**
-	 * 设全局代理:proxy 为 '' 清除,不传只改编号范围(不用再输一遍密码);带 {n} 时要编号范围 from / to。
-	 * 已分的编号在新范围里的照旧,范围外的下次用时重新分
+	 * 页面传的各项和现在的合起来校验;requireHost:测试时必须有主机(保存时关着可以不填)。
+	 * 密码不传或 '' 保留原来的,用户名清空时密码一起清
 	 */
-	function setGlobal(body: {proxy?: unknown; from?: unknown; to?: unknown}): PublicProxyConfig {
-		const global = body.proxy === undefined ? config.global : checkedProxyUrl(body.proxy);
-		const range = isProxyTemplate(global) ? checkedRange(body, config.range) : config.range;
+	function checkedGlobal(body: GlobalProxyBody, requireHost: boolean): GlobalProxySettings {
+		const current = config.global;
+		const pick = (key: keyof GlobalProxySettings): unknown => (body[key] === undefined ? current[key] : body[key]);
+		const protocol = String(pick('protocol') ?? '').trim().toLowerCase();
+		if (/^socks/.test(protocol)) {
+			throw proxyError(400, '暂不支持 SOCKS 代理,协议选 HTTP');
+		}
+		if (protocol !== 'http' && protocol !== 'https') {
+			throw proxyError(400, '协议只能是 HTTP 或 HTTPS');
+		}
+		const host = checkedHost(pick('host'));
+		const port = checkedPort(pick('port'), host);
+		const type = String(pick('type') ?? '') as ProxyKind;
+		if (!PROXY_KINDS.includes(type)) {
+			throw proxyError(400, '类型只能是 静态 / 轮换 / 按账号固定 IP');
+		}
+		const username = String(pick('username') ?? '').trim();
+		const typed = body.password === undefined || body.password === null ? '' : String(body.password).trim();
+		const enabled = body.enabled === undefined ? current.enabled : body.enabled === true;
+		if (!host && (enabled || requireHost)) {
+			throw proxyError(400, '请填写主机');
+		}
+		const settings: GlobalProxySettings = {
+			enabled,
+			protocol,
+			host,
+			port,
+			type,
+			username,
+			password: username ? typed || current.password : '',
+			loginsPerMinute: checkedLoginLimit(pick('loginsPerMinute'))
+		};
+		const template = isProxyTemplate(buildProxyUrl(settings));
+		if (type === 'sticky' && host && !template) {
+			throw proxyError(400, '按账号固定 IP 要在用户名里写 {n}(如 kxkviurm-{n}),{n} 换成每个账号分到的编号');
+		}
+		if (type !== 'sticky' && template) {
+			throw proxyError(400, '写了 {n} 的是按账号固定 IP:类型选「按账号固定 IP」,或者把 {n} 换成具体编号');
+		}
+		return settings;
+	}
+
+	/**
+	 * 设全局代理:各项不传的照旧(密码留空保留原来的),enabled 关了就直连;按账号固定 IP 要编号范围 from / to。
+	 * 已分的编号在新范围里的照旧,范围外的下次用时重新分。登录速率限制改了马上按新的放行排队的登录
+	 */
+	function setGlobal(body: GlobalProxyBody): PublicProxyConfig {
+		const global = checkedGlobal(body, false);
+		const range = isProxyTemplate(buildProxyUrl(global)) ? checkedRange(body, config.range) : config.range;
 		const assigned = Object.fromEntries(Object.entries(config.assigned).filter(([, index]) => index >= range.from && index <= range.to));
-		return save({...config, global, range, assigned});
+		const result = save({...config, global, range, assigned});
+		logins.update();
+		return result;
 	}
 
 	/**
@@ -322,18 +472,21 @@ export function createProxyService(options: ProxyServiceOptions) {
 	}
 
 	/**
-	 * 测代理:填了地址测填的(保存前先试;带 {n} 的随机挑范围里一个编号),没填测这个账号(或全局)现在用的;
+	 * 测代理:传了 host 测页面上还没保存的全局代理各项,传了 proxy 测填的地址(账号的单独代理),
+	 * 都没有测这个账号(或全局)现在用的;带 {n} 的随机挑范围里一个编号。
 	 * 回出口 IP 和耗时,再顺带打开一次 Steam 社区看这个 IP 有没有被限流。
 	 * 固定 IP 模式下两次请求是同一个 IP;轮换代理每个连接换 IP,两次不一定是同一个
 	 */
-	async function test(body: {proxy?: unknown; accountName?: unknown; from?: unknown; to?: unknown}): Promise<ProxyTestResult> {
-		let proxyUrl = String(body.proxy ?? '').trim() ? checkedProxyUrl(body.proxy) : proxyFor(body.accountName);
+	async function test(body: GlobalProxyBody & {proxy?: unknown; accountName?: unknown}): Promise<ProxyTestResult> {
+		let proxyUrl = body.host !== undefined
+			? buildProxyUrl(checkedGlobal(body, true))
+			: String(body.proxy ?? '').trim() ? checkedProxyUrl(body.proxy) : proxyFor(body.accountName);
 		if (isProxyTemplate(proxyUrl)) {
 			const {from, to} = checkedRange(body, config.range);
 			proxyUrl = fillProxyTemplate(proxyUrl, from + Math.min(to - from, Math.floor(random() * (to - from + 1))));
 		}
 		if (!proxyUrl) {
-			throw proxyError(400, body.accountName ? '这个账号现在不走代理' : '还没有设置代理');
+			throw proxyError(400, body.accountName ? '这个账号现在不走代理' : config.global.host ? '全局代理没启用' : '还没有设置代理');
 		}
 		const controller = new AbortController();
 		const timer = setTimeout(() => controller.abort(), TEST_TIMEOUT_MS);
@@ -362,7 +515,7 @@ export function createProxyService(options: ProxyServiceOptions) {
 		return {ip: ip.slice(0, 64), ms, proxy: maskProxyUrl(proxyUrl), steam: await checkSteam(proxyUrl)};
 	}
 
-	return {proxyFor, proxyForCookies, renew, fetch: steamFetch, publicConfig, setGlobal, setAccount, test};
+	return {proxyFor, proxyForCookies, renew, queueLogin, fetch: steamFetch, publicConfig, setGlobal, setAccount, test};
 }
 
 export type ProxyService = ReturnType<typeof createProxyService>;

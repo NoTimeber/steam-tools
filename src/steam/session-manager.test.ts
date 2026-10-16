@@ -356,3 +356,77 @@ test('停服:登出全部会话、取消待执行的恢复,不改登录意图', 
 	assert.equal(intents.isOnline('alice'), true);
 	assert.equal(intents.isOnline('bob'), true);
 });
+
+test('代理的登录速率限制:排队时先不 logOn、不计登录超时,轮到再登(移动令牌重新生成);排队中登出或重试的那次不再登', async t => {
+	const queued: Array<{accountName: string; cancelled: () => boolean; release(granted: boolean): void}> = [];
+	const {manager, last, tick} = setup(t, {
+		queueLogon: (accountName, cancelled) => {
+			let release!: (granted: boolean) => void;
+			const ready = new Promise<boolean>(resolve => (release = resolve));
+			queued.push({accountName, cancelled, release});
+			return {waitMs: 42000, ready};
+		}
+	});
+	const flush = () => new Promise<void>(resolve => setImmediate(resolve));
+
+	const attempt = loginWithPassword(manager, 'alice', {sharedSecret: 'secretXYZ'});
+	const client = last();
+	assert.deepEqual(queued.map(item => item.accountName), ['alice']);
+	assert.equal(client.logOnCalls.length, 0, '排队时不登');
+	assert.equal(attempt.status, 'connecting');
+	assert.match(attempt.logs.at(-1)?.message ?? '', /排队中\(约 42 秒后开始\)/);
+	tick(5000);
+	assert.equal(client.logOffCalls, 0, '排队的时间不算登录超时');
+
+	queued[0]!.release(true);
+	await flush();
+	assert.deepEqual(client.logOnCalls[0], {accountName: 'alice', password: 'pw', twoFactorCode: 'CSECR', machineName: 'DESKTOP-TEST'}, '排过队的验证码重新生成');
+	tick(1000);
+	tick(100);
+	assert.equal(queued.length, 2, '超时重试也排队');
+	assert.equal(client.logOnCalls.length, 1);
+	manager.logout(attempt);
+	assert.equal(queued[1]!.cancelled(), true, '登出了,轮到时跳过');
+	queued[1]!.release(true);
+	await flush();
+	assert.equal(client.logOnCalls.length, 1, '登出后不再登');
+
+	const bob = loginWithPassword(manager, 'bob');
+	const bobClient = last();
+	manager.startLogon(bob, {accountName: 'bob', password: 'pw2'});
+	assert.equal(queued[2]!.cancelled(), true, '同一会话又发起了登录(换了客户端),前一次作废');
+	assert.equal(bobClient.logOnCalls.length, 0);
+});
+
+test('代理的登录速率限制:掉线重连排着队时 steam-user 自己重登回来了,轮到时不再登', async t => {
+	const queued: Array<{cancelled: () => boolean; release(granted: boolean): void}> = [];
+	let limited = false;
+	const {manager, last, tick} = setup(t, {
+		timing: {loginTimeoutMs: 600_000},
+		queueLogon: (_accountName, cancelled) => {
+			if (!limited) {
+				return null;
+			}
+			let release!: (granted: boolean) => void;
+			const ready = new Promise<boolean>(resolve => (release = resolve));
+			queued.push({cancelled, release});
+			return {waitMs: 60000, ready};
+		}
+	});
+	const attempt = loginWithPassword(manager);
+	const client = last();
+	client.succeed();
+	assert.equal(attempt.status, 'web_session');
+	limited = true;
+	client.emit('disconnected', 3, 'NoConnection');
+	tick(5000);
+	manager.reconnectTick();
+	tick(100);
+	assert.equal(queued.length, 1, '掉线重连在排队');
+	client.succeed();
+	assert.equal(queued[0]!.cancelled(), true, '已经在线了,这次作废');
+	queued[0]!.release(true);
+	await new Promise<void>(resolve => setImmediate(resolve));
+	assert.equal(client.logOnCalls.length, 1, '不再 logOn');
+	assert.equal(attempt.status, 'web_session');
+});

@@ -99,11 +99,37 @@ test('maFile 与 session:加密存取、按账号名不区分大小写', () => {
 
 test('代理设置:没存过是空的;加密存取,代理密码不明文落盘', () => {
 	const {store, dir} = freshStore();
-	assert.deepEqual(store.proxies.load(), {global: '', range: {from: 1, to: 1}, accounts: {}, assigned: {}});
-	const config = {global: 'http://user-{n}:PROXY-PLAINTEXT@p.example.io:80', range: {from: 1, to: 100}, accounts: {alpha: 'direct', bravo: 'http://u:p@1.2.3.4:8080'}, assigned: {charlie: 7}};
-	store.proxies.save(config);
+	const empty = {enabled: false, protocol: 'http', host: '', port: 0, type: 'rotating', username: '', password: '', loginsPerMinute: 0} as const;
+	assert.deepEqual(store.proxies.load(), {global: empty, range: {from: 1, to: 1}, accounts: {}, assigned: {}});
+	const config = {
+		global: {enabled: true, protocol: 'http', host: 'p.example.io', port: 80, type: 'sticky', username: 'user-{n}', password: 'PROXY-PLAINTEXT', loginsPerMinute: 5},
+		range: {from: 1, to: 100},
+		accounts: {alpha: 'direct', bravo: 'http://u:p@1.2.3.4:8080'},
+		assigned: {charlie: 7}
+	} as const;
+	store.proxies.save(structuredClone(config) as never);
 	assert.deepEqual(store.proxies.load(), config);
 	assert.ok(!dbBytes(dir).includes('PROXY-PLAINTEXT'), '代理密码不能明文落盘');
+	store.close();
+});
+
+test('代理设置:1.6.8–1.6.10 存的整串全局地址读出来拆成各项(开着;带 {n} 是按账号固定 IP,其它当轮换),账号设置和编号照旧', () => {
+	const {store} = freshStore();
+	const old = (global: string) => ({global, range: {from: 2, to: 9}, accounts: {alpha: 'direct'}, assigned: {bravo: 3}});
+	store.proxies.save(old('http://kxk-rotate:p%40ss%3Aword@p.webshare.io:80') as never);
+	assert.deepEqual(store.proxies.load(), {
+		global: {enabled: true, protocol: 'http', host: 'p.webshare.io', port: 80, type: 'rotating', username: 'kxk-rotate', password: 'p@ss:word', loginsPerMinute: 0},
+		range: {from: 2, to: 9},
+		accounts: {alpha: 'direct'},
+		assigned: {bravo: 3}
+	});
+	store.proxies.save(old('https://kxk-{n}:pw@P.Example.io:8443') as never);
+	assert.deepEqual(store.proxies.load().global, {enabled: true, protocol: 'https', host: 'p.example.io', port: 8443, type: 'sticky', username: 'kxk-{n}', password: 'pw', loginsPerMinute: 0});
+	store.proxies.save(old('10.0.0.1:3128') as never);
+	assert.deepEqual(store.proxies.load().global, {enabled: true, protocol: 'http', host: '10.0.0.1', port: 3128, type: 'rotating', username: '', password: '', loginsPerMinute: 0});
+	store.proxies.save(old('') as never);
+	assert.equal(store.proxies.load().global.enabled, false, '没设过的还是没设');
+	assert.equal(store.proxies.load().global.host, '');
 	store.close();
 });
 

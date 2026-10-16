@@ -1,13 +1,13 @@
 <script setup lang="ts">
-// 运行设置:当前版本和检查新版本、修改访问口令、退出登录、Steam 代理。
+// 运行设置:当前版本和检查新版本、修改访问口令、Steam 代理(点开是代理设置页)、退出登录。
 import {computed, onMounted, reactive, ref} from 'vue';
-import {NAlert, NButton, NCard, NForm, NFormItem, NInput, NInputNumber, NModal, NSpace, NTooltip, useMessage} from 'naive-ui';
+import {NAlert, NButton, NCard, NForm, NFormItem, NInput, NModal, NSpace, useMessage} from 'naive-ui';
 import {api, errorText} from '../api/http.ts';
-import type {ProxyTestResult} from '../api/types.ts';
-import {steamCheckView} from '../lib/proxy.ts';
+import {proxySummary} from '../lib/proxy.ts';
 import {addLog} from '../stores/logs.ts';
-import {loadProxy, proxy, saveGlobalProxy, testProxy} from '../stores/proxy.ts';
+import {loadProxy, proxy} from '../stores/proxy.ts';
 import {checkForUpdate, update} from '../stores/update.ts';
+import ProxySettingsModal from './settings/ProxySettingsModal.vue';
 
 const message = useMessage();
 const checking = ref(false);
@@ -63,67 +63,9 @@ async function savePassword(): Promise<void> {
 }
 
 // ===== Steam 代理(全局;账号的单独设置在账户管理页) =====
-const proxyForm = reactive({
-	input: '',
-	/** 固定 IP 模式({n})的编号范围 */
-	from: 1 as number | null,
-	to: 1 as number | null,
-	busy: '' as '' | 'save' | 'clear' | 'test',
-	error: '',
-	result: null as ProxyTestResult | null
-});
-
-onMounted(async () => {
-	await loadProxy();
-	proxyForm.from = proxy.config.range.from;
-	proxyForm.to = proxy.config.range.to;
-});
-
-/** 输入框里写了 {n},或者没输入、现在就是固定 IP 模式:要填编号范围 */
-const templateMode = computed(() => proxyForm.input.includes('{n}') || (!proxyForm.input.trim() && proxy.config.sticky));
-const rangeBody = () => ({from: Number(proxyForm.from), to: Number(proxyForm.to)});
-/** 测试结果里的 Steam 社区检查(这里测的是全局代理,不针对哪个账号,不提示重新登录) */
-const steamView = computed(() => (proxyForm.result ? steamCheckView(proxyForm.result.steam, false) : null));
-const rangeChanged = computed(() => proxy.config.sticky && (proxyForm.from !== proxy.config.range.from || proxyForm.to !== proxy.config.range.to));
-
-async function runProxy(kind: 'save' | 'clear' | 'test', action: () => Promise<void>): Promise<void> {
-	proxyForm.busy = kind;
-	proxyForm.error = '';
-	try {
-		await action();
-	} catch (err) {
-		proxyForm.error = errorText(err);
-	} finally {
-		proxyForm.busy = '';
-	}
-}
-
-/** 输入了地址就换地址;没输入只改编号范围(不用再输一遍密码) */
-function saveProxy(): Promise<void> {
-	return runProxy('save', async () => {
-		const input = proxyForm.input.trim();
-		await saveGlobalProxy(input || undefined, templateMode.value ? rangeBody() : undefined);
-		proxyForm.input = '';
-		proxyForm.result = null;
-		message.success('全局代理已保存');
-	});
-}
-
-function clearProxy(): Promise<void> {
-	return runProxy('clear', async () => {
-		await saveGlobalProxy('');
-		proxyForm.result = null;
-		message.success('已清除,改为直连');
-	});
-}
-
-/** 输入框里有地址测输入的(保存前先试),没有测现在的全局代理 */
-function checkProxy(): Promise<void> {
-	return runProxy('test', async () => {
-		proxyForm.result = null;
-		proxyForm.result = await testProxy({proxy: proxyForm.input.trim(), ...(templateMode.value ? rangeBody() : {})});
-	});
-}
+const proxyOpen = ref(false);
+onMounted(loadProxy);
+const proxyText = computed(() => proxySummary(proxy.config));
 
 async function logout(): Promise<void> {
 	try {
@@ -143,54 +85,18 @@ async function logout(): Promise<void> {
 				<div class="module-counts">
 					<span>当前版本:{{ update.current ? 'v' + update.current : '读取中' }}</span>
 					<span v-if="latestText">{{ latestText }}</span>
+					<span>Steam 代理:{{ proxyText }}</span>
 				</div>
 			</div>
 		</header>
 		<NSpace>
 			<NButton :loading="checking" :disabled="update.disabled" @click="check">检查更新</NButton>
 			<NButton @click="openPassword">修改口令</NButton>
+			<NButton @click="proxyOpen = true">Steam 代理</NButton>
 			<NButton @click="logout">退出登录</NButton>
 		</NSpace>
 
-		<NCard title="Steam 代理" size="small" class="proxy-card">
-			<template #header-extra>
-				<NTooltip placement="bottom-end" :style="{maxWidth: '360px'}">
-					<template #trigger>
-						<span class="muted help">说明</span>
-					</template>
-					只有 Steam 的请求走代理,C5、悠悠直连。<br>
-					单个账号在「账户管理 → 代理」里改。<br>
-					地址里写 {n} 是固定 IP:每个账号一个编号,新账号或重新登录才换(webshare 把 -rotate 改成 -{n})。<br>
-					改了以后,已登录的账号要重新登录才生效。
-				</NTooltip>
-			</template>
-			<div class="proxy-current">
-				<span v-if="proxy.config.global" class="mono">{{ proxy.config.global }}</span><span v-else class="muted">未设置,直连</span>
-				<span v-if="proxy.config.sticky" class="muted"> · 编号 {{ proxy.config.range.from }}-{{ proxy.config.range.to }} · 已分配 {{ Object.keys(proxy.config.assigned).filter(key => key).length }}</span>
-			</div>
-			<NInput
-				v-model:value="proxyForm.input"
-				placeholder="http://用户名:密码@主机:端口(写 {n} 为固定 IP)"
-				clearable
-				:input-props="{autocomplete: 'off', spellcheck: false}"
-				@keyup.enter="proxyForm.input.trim() && saveProxy()"
-			/>
-			<NSpace v-if="templateMode" align="center" :size="6" class="proxy-row">
-				<span>编号</span>
-				<NInputNumber v-model:value="proxyForm.from" :min="1" :max="100000" :precision="0" size="small" class="index-input" />
-				<span class="muted">-</span>
-				<NInputNumber v-model:value="proxyForm.to" :min="1" :max="100000" :precision="0" size="small" class="index-input" />
-			</NSpace>
-			<NAlert v-if="proxyForm.error" type="error" :bordered="false" class="proxy-row">{{ proxyForm.error }}</NAlert>
-			<NAlert v-else-if="proxyForm.result && steamView" :type="steamView.type" :bordered="false" class="proxy-row">
-				<span :title="steamView.detail"><span class="mono">{{ proxyForm.result.ip }}</span> · {{ proxyForm.result.ms }} ms · {{ steamView.text }}</span>
-			</NAlert>
-			<NSpace class="proxy-row">
-				<NButton :loading="proxyForm.busy === 'test'" :disabled="!proxyForm.input.trim() && !proxy.config.global" @click="checkProxy">测试</NButton>
-				<NButton type="primary" :loading="proxyForm.busy === 'save'" :disabled="!proxyForm.input.trim() && !rangeChanged" @click="saveProxy">保存</NButton>
-				<NButton :loading="proxyForm.busy === 'clear'" :disabled="!proxy.config.global" @click="clearProxy">清除</NButton>
-			</NSpace>
-		</NCard>
+		<ProxySettingsModal :show="proxyOpen" @close="proxyOpen = false" />
 
 		<NModal v-model:show="password.open" :mask-closable="!password.saving">
 			<NCard title="修改访问口令" style="width: 420px" :bordered="false" role="dialog" aria-modal="true">
@@ -216,26 +122,3 @@ async function logout(): Promise<void> {
 		</NModal>
 	</div>
 </template>
-
-<style scoped>
-.proxy-card {
-	max-width: 680px;
-}
-
-.proxy-current {
-	margin-bottom: 8px;
-}
-
-.help {
-	cursor: help;
-	font-size: 12px;
-}
-
-.proxy-row {
-	margin-top: 10px;
-}
-
-.index-input {
-	width: 110px;
-}
-</style>

@@ -1,4 +1,4 @@
-// Steam 代理:设置的读写和校验、测代理(经本地假代理拿出口 IP)、设了全局代理后 Steam 请求真的走代理(带认证)、清掉后恢复直连。
+// Steam 代理:按各项读写和校验(密码不下发、留空保留)、测代理(经本地假代理拿出口 IP)、设了全局代理后 Steam 请求真的走代理(带认证)、关掉后恢复直连。
 // 假代理在测试进程里:普通请求(HTTP 目标)由它当源站回出口 IP;CONNECT(HTTPS 目标)记下来就拒绝,
 // 所以走代理的 Steam 请求会失败,但能看到它确实连到了代理、带了账号密码。
 
@@ -19,6 +19,8 @@ describe('Steam 代理', () => {
 	const connects: Array<{target: string; auth: string}> = [];
 	let proxyServer: http.Server;
 	let proxyUrl: string;
+	/** 全局代理各项(指向本地假代理) */
+	let fields: Record<string, unknown>;
 	let appRoot: string;
 	let server: TestServer;
 	let client: Client;
@@ -53,7 +55,9 @@ describe('Steam 代理', () => {
 			socket.end('HTTP/1.1 403 Forbidden\r\n\r\n');
 		});
 		await new Promise<void>(resolve => proxyServer.listen(0, '127.0.0.1', resolve));
-		proxyUrl = `http://e2e-user:e2e%3Apass@127.0.0.1:${(proxyServer.address() as AddressInfo).port}`;
+		const port = (proxyServer.address() as AddressInfo).port;
+		proxyUrl = `http://e2e-user:e2e%3Apass@127.0.0.1:${port}`;
+		fields = {enabled: true, protocol: 'http', host: '127.0.0.1', port, type: 'rotating', username: 'e2e-user', password: 'e2e:pass', loginsPerMinute: ''};
 
 		appRoot = tempDir('proxy');
 		mkdirSync(join(appRoot, 'data', 'config'), {recursive: true});
@@ -70,15 +74,21 @@ describe('Steam 代理', () => {
 		await new Promise<void>(resolve => proxyServer?.close(() => resolve()));
 	});
 
-	test('设置:没设时为空;地址不对 400;保存后下发打码的地址', async () => {
-		assert.deepEqual((await client.get('/api/proxy')).json.proxy, {global: '', sticky: false, range: {from: 1, to: 1}, accounts: {}, assigned: {}});
-		const bad = await client.post('/api/proxy/global', {proxy: 'socks5://h:1080'});
+	test('设置:没设时为空;不对的 400;保存后下发各项(不带密码)和打码的地址;密码留空保留', async () => {
+		const empty = {enabled: false, protocol: 'http', host: '', port: 0, type: 'rotating', username: '', hasPassword: false, loginsPerMinute: 0};
+		assert.deepEqual((await client.get('/api/proxy')).json.proxy, {global: '', settings: empty, sticky: false, range: {from: 1, to: 1}, accounts: {}, assigned: {}});
+		const bad = await client.post('/api/proxy/global', {...fields, protocol: 'socks5'});
 		assert.equal(bad.status, 400);
 		assert.match(bad.json.error, /SOCKS/);
-		const saved = await client.post('/api/proxy/global', {proxy: proxyUrl});
+		assert.equal((await client.post('/api/proxy/global', {...fields, port: ''})).status, 400, '端口必填');
+		const saved = await client.post('/api/proxy/global', fields);
 		assert.equal(saved.status, 200, saved.text);
 		assert.equal(saved.json.proxy.global, proxyUrl.replace('e2e%3Apass', '****'));
-		assert.ok(!JSON.stringify((await client.get('/api/proxy')).json).includes('e2e%3Apass'), '密码不下发');
+		assert.deepEqual([saved.json.proxy.settings.username, saved.json.proxy.settings.hasPassword], ['e2e-user', true]);
+		const again = await client.post('/api/proxy/global', {...fields, password: '', type: 'static'});
+		assert.equal(again.json.proxy.settings.type, 'static');
+		const body = JSON.stringify((await client.get('/api/proxy')).json);
+		assert.ok(!body.includes('e2e%3Apass') && !body.includes('e2e:pass'), '密码不下发');
 
 		const account = await client.post('/api/proxy/account', {accountName: 'Hotel', mode: 'direct'});
 		assert.deepEqual(account.json.proxy.accounts, {hotel: {mode: 'direct', url: ''}});
@@ -110,14 +120,14 @@ describe('Steam 代理', () => {
 		assert.match(proxied.error, /通过代理请求失败/);
 		assert.ok(connects.some(c => c.target === 'store.steampowered.com:443' && c.auth === auth), JSON.stringify(connects));
 
-		assert.equal((await client.post('/api/proxy/global', {proxy: ''})).json.proxy.global, '');
+		const off = await client.post('/api/proxy/global', {enabled: false});
+		assert.deepEqual([off.json.proxy.global, off.json.proxy.settings.host], ['', '127.0.0.1'], '关了直连,填的留着');
 		const directly = await readHistory(true);
 		assert.deepEqual([directly.status, directly.count], ['done', 37]);
 	});
 
-	test('固定 IP:地址带 {n},账号分到的编号记下来;手动重新登录换一个,测试按编号连代理', async () => {
-		const template = proxyUrl.replace('e2e-user', 'e2e-{n}');
-		const saved = await client.post('/api/proxy/global', {proxy: template, from: 1, to: 5});
+	test('按账号固定 IP:用户名带 {n},账号分到的编号记下来;手动重新登录换一个,测试按编号连代理', async () => {
+		const saved = await client.post('/api/proxy/global', {enabled: true, type: 'sticky', username: 'e2e-{n}', from: 1, to: 5});
 		assert.equal(saved.status, 200, saved.text);
 		assert.deepEqual([saved.json.proxy.sticky, saved.json.proxy.range], [true, {from: 1, to: 5}]);
 
@@ -135,6 +145,6 @@ describe('Steam 代理', () => {
 		const again = await client.post('/api/login', {accountName: 'hotel'});
 		assert.equal(again.json.reused, true);
 		assert.equal((await client.get('/api/proxy')).json.proxy.assigned.hotel, second, '在线时再点登录不换');
-		await client.post('/api/proxy/global', {proxy: ''});
+		await client.post('/api/proxy/global', {enabled: false});
 	});
 });
