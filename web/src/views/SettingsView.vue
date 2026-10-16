@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // 运行设置:当前版本和检查新版本、修改访问口令、退出登录、Steam 代理。
 import {computed, onMounted, reactive, ref} from 'vue';
-import {NAlert, NButton, NCard, NForm, NFormItem, NInput, NInputNumber, NModal, NSpace, useMessage} from 'naive-ui';
+import {NAlert, NButton, NCard, NForm, NFormItem, NInput, NInputNumber, NModal, NSpace, NTooltip, useMessage} from 'naive-ui';
 import {api, errorText} from '../api/http.ts';
 import type {ProxyTestResult} from '../api/types.ts';
 import {steamCheckView} from '../lib/proxy.ts';
@@ -113,7 +113,7 @@ function clearProxy(): Promise<void> {
 	return runProxy('clear', async () => {
 		await saveGlobalProxy('');
 		proxyForm.result = null;
-		message.success('已清除全局代理,Steam 请求改为直连');
+		message.success('已清除,改为直连');
 	});
 }
 
@@ -153,38 +153,38 @@ async function logout(): Promise<void> {
 		</NSpace>
 
 		<NCard title="Steam 代理" size="small" class="proxy-card">
-			<p class="muted proxy-hint">
-				Steam 的登录连接和网页请求(商店、社区、市场、库存、交易报价、充值码)走这个代理;C5、悠悠等国内平台照旧直连。
-				单个账号要用别的代理或者不走代理,在「账户管理」的「代理」列里改。改了代理,已登录的账号要重新登录,登录连接才会换。
-			</p>
-			<p class="muted proxy-hint">
-				固定 IP:地址里用 <span class="mono">{n}</span> 代表代理编号(webshare 就是把用户名里的 -rotate 换成 -{n},编号 1 到你的代理数量),
-				每个账号分到一个编号一直用,尽量不和别的账号重复;只有新加的账号第一次用、或者手动重新登录时才换一个。
-			</p>
+			<template #header-extra>
+				<NTooltip placement="bottom-end" :style="{maxWidth: '360px'}">
+					<template #trigger>
+						<span class="muted help">说明</span>
+					</template>
+					只有 Steam 的请求走代理,C5、悠悠直连。<br>
+					单个账号在「账户管理 → 代理」里改。<br>
+					地址里写 {n} 是固定 IP:每个账号一个编号,新账号或重新登录才换(webshare 把 -rotate 改成 -{n})。<br>
+					改了以后,已登录的账号要重新登录才生效。
+				</NTooltip>
+			</template>
 			<div class="proxy-current">
-				当前:<span v-if="proxy.config.global" class="mono">{{ proxy.config.global }}</span><span v-else class="muted">没有设置,Steam 请求直连</span>
-				<span v-if="proxy.config.sticky" class="muted">(固定 IP,编号 {{ proxy.config.range.from }}-{{ proxy.config.range.to }},已分配 {{ Object.keys(proxy.config.assigned).filter(key => key).length }} 个账号)</span>
+				<span v-if="proxy.config.global" class="mono">{{ proxy.config.global }}</span><span v-else class="muted">未设置,直连</span>
+				<span v-if="proxy.config.sticky" class="muted"> · 编号 {{ proxy.config.range.from }}-{{ proxy.config.range.to }} · 已分配 {{ Object.keys(proxy.config.assigned).filter(key => key).length }}</span>
 			</div>
 			<NInput
 				v-model:value="proxyForm.input"
-				placeholder="http://用户名:密码@主机:端口"
+				placeholder="http://用户名:密码@主机:端口(写 {n} 为固定 IP)"
 				clearable
 				:input-props="{autocomplete: 'off', spellcheck: false}"
 				@keyup.enter="proxyForm.input.trim() && saveProxy()"
 			/>
 			<NSpace v-if="templateMode" align="center" :size="6" class="proxy-row">
-				<span>编号范围</span>
+				<span>编号</span>
 				<NInputNumber v-model:value="proxyForm.from" :min="1" :max="100000" :precision="0" size="small" class="index-input" />
-				<span class="muted">到</span>
+				<span class="muted">-</span>
 				<NInputNumber v-model:value="proxyForm.to" :min="1" :max="100000" :precision="0" size="small" class="index-input" />
 			</NSpace>
 			<NAlert v-if="proxyForm.error" type="error" :bordered="false" class="proxy-row">{{ proxyForm.error }}</NAlert>
-			<template v-else-if="proxyForm.result && steamView">
-				<NAlert type="success" :bordered="false" class="proxy-row">
-					代理可用:出口 IP <span class="mono">{{ proxyForm.result.ip }}</span>,用时 {{ proxyForm.result.ms }} ms({{ proxyForm.result.proxy }})
-				</NAlert>
-				<NAlert :type="steamView.type" :bordered="false" class="proxy-row">{{ steamView.text }}</NAlert>
-			</template>
+			<NAlert v-else-if="proxyForm.result && steamView" :type="steamView.type" :bordered="false" class="proxy-row">
+				<span :title="steamView.detail"><span class="mono">{{ proxyForm.result.ip }}</span> · {{ proxyForm.result.ms }} ms · {{ steamView.text }}</span>
+			</NAlert>
 			<NSpace class="proxy-row">
 				<NButton :loading="proxyForm.busy === 'test'" :disabled="!proxyForm.input.trim() && !proxy.config.global" @click="checkProxy">测试</NButton>
 				<NButton type="primary" :loading="proxyForm.busy === 'save'" :disabled="!proxyForm.input.trim() && !rangeChanged" @click="saveProxy">保存</NButton>
@@ -222,13 +222,13 @@ async function logout(): Promise<void> {
 	max-width: 680px;
 }
 
-.proxy-hint {
-	margin: 0 0 10px;
-	line-height: 1.6;
-}
-
 .proxy-current {
 	margin-bottom: 8px;
+}
+
+.help {
+	cursor: help;
+	font-size: 12px;
 }
 
 .proxy-row {

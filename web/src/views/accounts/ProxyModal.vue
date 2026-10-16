@@ -38,7 +38,7 @@ async function run(kind: 'save' | 'test', action: () => Promise<void>): Promise<
 function save(): Promise<void> {
 	return run('save', async () => {
 		await saveAccountProxy(props.accountName, form.mode, form.mode === 'custom' ? form.input.trim() : '');
-		message.success('已保存,重新登录这个账号后登录连接才会换代理');
+		message.success('已保存,重新登录后生效');
 		emit('close');
 	});
 }
@@ -66,11 +66,11 @@ const canTest = computed(() => (form.mode === 'custom' ? !!form.input.trim() || 
 
 <template>
 	<NModal :show="!!accountName" @update:show="(show: boolean) => !show && emit('close')">
-		<NCard :title="`${accountName} 的 Steam 代理`" style="width: 480px; max-width: calc(100vw - 32px)" :bordered="false" role="dialog" aria-modal="true">
-			<div class="muted row">现在:{{ current.title }}</div>
+		<NCard :title="`${accountName} 代理`" style="width: 440px; max-width: calc(100vw - 32px)" :bordered="false" role="dialog" aria-modal="true">
+			<div class="muted row" :title="current.title">当前:{{ current.label }}</div>
 			<NRadioGroup v-model:value="form.mode" class="row" @update:value="form.result = null">
-				<NSpace vertical :size="6">
-					<NRadio value="global">跟随全局<span class="muted">({{ proxy.config.global || '没设全局代理,直连' }})</span></NRadio>
+				<NSpace :size="16">
+					<NRadio value="global">跟随全局</NRadio>
 					<NRadio value="custom">单独代理</NRadio>
 					<NRadio value="direct">不走代理</NRadio>
 				</NSpace>
@@ -84,13 +84,9 @@ const canTest = computed(() => (form.mode === 'custom' ? !!form.input.trim() || 
 				:input-props="{autocomplete: 'off', spellcheck: false}"
 			/>
 			<NAlert v-if="form.error" type="error" :bordered="false" class="row">{{ form.error }}</NAlert>
-			<template v-else-if="form.result && steamView">
-				<NAlert type="success" :bordered="false" class="row">
-					代理可用:出口 IP <span class="mono">{{ form.result.ip }}</span>,用时 {{ form.result.ms }} ms
-				</NAlert>
-				<NAlert :type="steamView.type" :bordered="false" class="row">{{ steamView.text }}</NAlert>
-			</template>
-			<p class="muted note">改了以后,已登录的账号要重新登录,登录连接才会换代理;网页请求马上就用新的。</p>
+			<NAlert v-else-if="form.result && steamView" :type="steamView.type" :bordered="false" class="row">
+				<span :title="steamView.detail"><span class="mono">{{ form.result.ip }}</span> · {{ form.result.ms }} ms · {{ steamView.text }}</span>
+			</NAlert>
 			<template #footer>
 				<NSpace justify="end">
 					<NButton :loading="form.busy === 'test'" :disabled="!canTest" @click="check">测试</NButton>
@@ -105,10 +101,5 @@ const canTest = computed(() => (form.mode === 'custom' ? !!form.input.trim() || 
 <style scoped>
 .row {
 	margin-bottom: 10px;
-}
-
-.note {
-	margin: 0;
-	font-size: 12px;
 }
 </style>

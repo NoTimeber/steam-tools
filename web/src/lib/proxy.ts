@@ -38,7 +38,10 @@ export function accountProxy(config: PublicProxyConfig, accountName: string): Ac
 
 export interface SteamCheckView {
 	type: 'success' | 'warning' | 'error';
+	/** 跟在出口 IP 后面的短句 */
 	text: string;
+	/** 鼠标悬停的完整说明 */
+	detail: string;
 }
 
 /**
@@ -49,16 +52,15 @@ export function steamCheckView(steam: ProxyTestResult['steam'], relogin: boolean
 	if (steam.status === 429) {
 		return {
 			type: 'warning',
-			text: 'Steam 社区市场回 429:经这个代理,工具台的市场、库存请求会被 Steam 拒绝'
-				+ '(这个 IP 被限流,或者 Steam 不放行机房代理 IP 上的非浏览器请求;登录、商店、手机确认不受影响)。'
-				+ (relogin ? '可以重新登录这个账号换一个编号(IP)再试。' : '')
+			text: '市场 429,市场和库存用不了' + (relogin ? ',可重新登录换 IP' : ''),
+			detail: 'Steam 社区市场回 429:经这个代理,工具台的市场、库存请求会被拒(IP 被限流,或 Steam 不放行机房代理上的非浏览器请求);登录、商店、手机确认不受影响'
 		};
 	}
 	if (steam.status >= 200 && steam.status < 400) {
-		return {type: 'success', text: `Steam 社区市场正常(HTTP ${steam.status},${steam.ms} ms)`};
+		return {type: 'success', text: '市场正常', detail: `Steam 社区市场 HTTP ${steam.status},${steam.ms} ms`};
 	}
 	if (steam.status) {
-		return {type: 'warning', text: `Steam 社区市场回 HTTP ${steam.status}`};
+		return {type: 'warning', text: `市场 HTTP ${steam.status}`, detail: `Steam 社区市场回 HTTP ${steam.status}`};
 	}
-	return {type: 'error', text: `Steam 社区市场打不开:${steam.error || '原因未知'}`};
+	return {type: 'error', text: '市场打不开', detail: `Steam 社区市场打不开:${steam.error || '原因未知'}`};
 }
