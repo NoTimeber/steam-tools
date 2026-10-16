@@ -1,13 +1,13 @@
 <script setup lang="ts">
 // 消费记录:服务端在后台一页页读完 Steam「购买记录」,这里轮询进度;读完显示明细
-// (可按日期范围、类型、关键字筛选),当前列表可导出 CSV。
+// (可按日期范围、类型、关键字筛选),当前列表里花钱的记录可导出 CSV(日期、商品、金额和合计)。
 import {computed, h, onBeforeUnmount, reactive, watch} from 'vue';
 import type {VNode} from 'vue';
 import {NAlert, NButton, NCard, NDataTable, NInput, NModal, NSelect, NSpace, NSpin, NTag, useMessage} from 'naive-ui';
 import type {DataTableColumns} from 'naive-ui';
 import {errorText} from '../../api/http.ts';
 import type {HistoryKind, HistoryMoney, HistoryRow, PublicHistory} from '../../api/types.ts';
-import {countKinds, csvFileName, filterHistory, historyCsv, inDateRange, kindLabel} from '../../lib/history.ts';
+import {countKinds, csvFileName, filterHistory, historyCsv, inDateRange, kindLabel, spendingRows} from '../../lib/history.ts';
 import {fetchHistory, startHistory} from '../../stores/accounts.ts';
 import DateRangePicker from './DateRangePicker.vue';
 
@@ -110,9 +110,12 @@ const rowIndex = computed(() => new Map(rows.value.map((row, index) => [row, ind
 const tallTable = computed(() => rows.value.length > 10);
 const kindOptions = computed(() => countKinds(ranged.value).map(item => ({label: `${item.label}(${item.count})`, value: item.kind})));
 
-/** 导出当前列表(日期范围、类型、关键字筛过的) */
+/** 当前列表里花钱的记录,导出 CSV 用 */
+const spending = computed(() => spendingRows(filtered.value));
+
+/** 导出当前列表(日期范围、类型、关键字筛过的)里花钱的记录和合计 */
 function exportCsv(): void {
-	const list = filtered.value;
+	const list = spending.value;
 	const url = URL.createObjectURL(new Blob([historyCsv(list)], {type: 'text/csv;charset=utf-8'}));
 	const link = document.createElement('a');
 	link.href = url;
@@ -201,8 +204,13 @@ const columns: DataTableColumns<HistoryRow> = [
 						<NInput v-model:value="view.keyword" clearable placeholder="搜索商品、类型、付款方式、日期" size="small" class="keyword" />
 						<span class="muted">显示 {{ filtered.length }} / {{ rows.length }} 条</span>
 					</NSpace>
-					<NButton size="small" :disabled="!filtered.length" title="导出当前列表(按日期范围、类型、搜索筛过的)" @click="exportCsv">
-						导出 CSV({{ filtered.length }} 条)
+					<NButton
+						size="small"
+						:disabled="!spending.length"
+						title="导出当前列表里花钱的记录(商店购买、礼物购买、游戏内购买、市场买入):日期、商品、金额,最后一行合计"
+						@click="exportCsv"
+					>
+						导出 CSV({{ spending.length }} 条)
 					</NButton>
 				</div>
 

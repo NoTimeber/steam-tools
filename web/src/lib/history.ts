@@ -56,7 +56,18 @@ export function inDateRange(rows: readonly HistoryRow[], range: DateRange): Hist
 	return rows.filter(row => !!row.date && row.date >= from && row.date <= to);
 }
 
-const CSV_HEADER = ['日期', '类型', 'Steam 类型', '商品', '付款方式', '总额', '钱包变动', '钱包余额', '币种', '市场交易笔数', '含退款', '交易号'];
+/** 花钱的类型;导出只要这些(市场卖出、充值、退款、货币转换不算花费) */
+const SPEND_KINDS: ReadonlySet<HistoryKind> = new Set(['purchase', 'gift', 'ingame', 'market_buy']);
+
+/** 花钱的记录 */
+export function spendingRows(rows: readonly HistoryRow[]): HistoryRow[] {
+	return rows.filter(row => SPEND_KINDS.has(row.kind));
+}
+
+/** 一行花了多少:优先总额,没有用钱包变动(取绝对值);都解析不出返回 null */
+function spentMoney(row: HistoryRow): HistoryMoney | null {
+	return [row.total, row.walletChange].find(money => money?.amount != null) ?? null;
+}
 
 function csvCell(value: string): string {
 	return /[",\r\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
@@ -67,33 +78,35 @@ function textCell(text: string): string {
 	return csvCell(/^[=+\-@\t\r]/.test(text) ? `'${text}` : text);
 }
 
-/** 金额列:解析出数值的写数值(带正负号,表格里能直接求和),解析不了的写原文 */
-function moneyCell(money: HistoryMoney | null): string {
-	if (!money) {
-		return '';
-	}
-	return money.amount != null ? String(money.amount) : textCell(money.text);
-}
-
-/** 导出 CSV:带 BOM(Excel 直接打开中文不乱码),CRLF 换行;多个商品、付款方式用「 / 」连起来 */
+/**
+ * 导出 CSV:只导花钱的记录,列是日期、商品、金额,最后一行合计。金额写数值(表格里能直接求和),解析不出的写原文、不进合计。
+ * 只有一种币种时币种写在表头;混了几种币种时加一列币种,合计按币种各一行。
+ * 带 BOM(Excel 直接打开中文不乱码),CRLF 换行;多个商品用「 / 」连起来。
+ */
 export function historyCsv(rows: readonly HistoryRow[]): string {
-	const lines = [CSV_HEADER.join(',')];
-	for (const row of rows) {
-		const currency = [row.total, row.walletChange, row.walletBalance].find(money => money?.currency)?.currency ?? '';
-		lines.push([
-			textCell(row.date || row.dateText),
-			textCell(kindLabel(row.kind)),
-			textCell(row.typeText),
-			textCell(row.items.join(' / ')),
-			textCell(row.payment.join(' / ')),
-			moneyCell(row.total),
-			moneyCell(row.walletChange),
-			moneyCell(row.walletBalance),
-			currency,
-			row.marketCount ? String(row.marketCount) : '',
-			row.refunded ? '是' : '',
-			row.transid
-		].join(','));
+	const spent = spendingRows(rows).map(row => ({row, money: spentMoney(row)}));
+	const totals = new Map<string, number>();
+	for (const {money} of spent) {
+		if (money) {
+			totals.set(money.currency, (totals.get(money.currency) ?? 0) + Math.abs(money.amount!));
+		}
+	}
+	const currencies = [...totals.keys()];
+	const mixed = currencies.length > 1;
+	const amountText = (amount: number): string => (Math.round(amount * 100) / 100).toFixed(2);
+
+	const lines = [mixed ? '日期,商品,金额,币种' : `日期,商品,${textCell(currencies[0] ? `金额(${currencies[0]})` : '金额')}`];
+	for (const {row, money} of spent) {
+		const amount = money ? amountText(Math.abs(money.amount!)) : textCell(row.total?.text ?? '');
+		const cells = [textCell(row.date || row.dateText), textCell(row.items.join(' / ')), amount];
+		lines.push((mixed ? [...cells, textCell(money?.currency ?? '')] : cells).join(','));
+	}
+	if (!currencies.length) {
+		lines.push('合计,,0.00');
+	}
+	for (const currency of currencies) {
+		const cells = ['合计', '', amountText(totals.get(currency)!)];
+		lines.push((mixed ? [...cells, textCell(currency)] : cells).join(','));
 	}
 	return String.fromCharCode(0xfeff) + lines.join('\r\n') + '\r\n';
 }
