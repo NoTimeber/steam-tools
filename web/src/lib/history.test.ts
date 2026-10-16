@@ -2,7 +2,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import type {HistoryKind, HistoryRow} from '../api/types.ts';
-import {csvFileName, filterHistory, formatAmount, historyCsv, inDateRange, kindLabel, summarizeHistory} from './history.ts';
+import {countKinds, csvFileName, filterHistory, historyCsv, inDateRange, kindLabel} from './history.ts';
 
 const money = (amount: number, currency = 'CNY') => ({text: String(amount), amount, currency});
 
@@ -13,23 +13,15 @@ function row(kind: HistoryKind, fields: Partial<HistoryRow> = {}): HistoryRow {
 	};
 }
 
-test('汇总:按类型顺序、只列有记录的;市场交易按合并的笔数;金额按币种分开取绝对值', () => {
-	const rows = [
-		row('market_sell', {marketCount: 3, total: money(12.5), walletChange: money(12.5)}),
-		row('purchase', {total: money(68)}),
-		row('market_sell', {marketCount: 1, total: money(0.11)}),
-		row('purchase', {total: money(4.99, 'USD')}),
-		row('ingame', {walletChange: money(-17)}),
-		row('purchase', {total: money(100)}),
-		row('other')
-	];
-	assert.deepEqual(summarizeHistory(rows), [
-		{kind: 'purchase', label: '商店购买', count: 3, trades: 3, totals: [{currency: 'CNY', amount: 168}, {currency: 'USD', amount: 4.99}]},
-		{kind: 'ingame', label: '游戏内购买', count: 1, trades: 1, totals: [{currency: 'CNY', amount: 17}]},
-		{kind: 'market_sell', label: '市场卖出', count: 2, trades: 4, totals: [{currency: 'CNY', amount: 12.61}]},
-		{kind: 'other', label: '其它', count: 1, trades: 1, totals: []}
+test('按类型计数:按类型顺序、只列有记录的', () => {
+	const rows = [row('market_sell', {marketCount: 3}), row('purchase'), row('market_sell'), row('ingame'), row('purchase'), row('other')];
+	assert.deepEqual(countKinds(rows), [
+		{kind: 'purchase', label: '商店购买', count: 2},
+		{kind: 'ingame', label: '游戏内购买', count: 1},
+		{kind: 'market_sell', label: '市场卖出', count: 2},
+		{kind: 'other', label: '其它', count: 1}
 	]);
-	assert.deepEqual(summarizeHistory([]), []);
+	assert.deepEqual(countKinds([]), []);
 });
 
 test('筛选:按类型,再按关键字(商品、类型、付款方式、日期,不分大小写)', () => {
@@ -46,12 +38,8 @@ test('筛选:按类型,再按关键字(商品、类型、付款方式、日期,�
 	assert.deepEqual(filterHistory(rows, 'gift', 'portal'), []);
 });
 
-test('显示:类型名、金额', () => {
+test('显示:类型名', () => {
 	assert.equal(kindLabel('market_buy'), '市场买入');
-	assert.equal(formatAmount(168, 'CNY'), '¥168.00');
-	assert.equal(formatAmount(-0.03, 'USD'), '-$0.03');
-	assert.equal(formatAmount(12, 'BRL'), 'BRL 12.00');
-	assert.equal(formatAmount(5, ''), '5.00');
 });
 
 test('按日期范围:含两端,起止颠倒也行;设了范围时没日期的排除', () => {
