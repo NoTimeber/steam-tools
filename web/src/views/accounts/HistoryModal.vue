@@ -15,7 +15,6 @@ const emit = defineEmits<{close: []}>();
 const message = useMessage();
 
 const POLL_MS = 1500;
-const DAY_MS = 86400000;
 
 const view = reactive({
 	history: null as PublicHistory | null,
@@ -115,25 +114,6 @@ function toggleKind(kind: HistoryKind): void {
 	view.kind = view.kind === kind ? null : kind;
 }
 
-/** 日期选择器的快捷范围(点的时候才算,跨天开着也对) */
-function lastDays(days: number): [number, number] {
-	const now = Date.now();
-	return [now - (days - 1) * DAY_MS, now];
-}
-
-function yearRange(offset: number): [number, number] {
-	const year = new Date().getFullYear() - offset;
-	return [new Date(year, 0, 1).getTime(), offset ? new Date(year, 11, 31).getTime() : Date.now()];
-}
-
-const rangeShortcuts = {
-	'近 7 天': () => lastDays(7),
-	'近 30 天': () => lastDays(30),
-	'近 90 天': () => lastDays(90),
-	'今年': () => yearRange(0),
-	'去年': () => yearRange(1)
-};
-
 /** 导出当前列表(日期范围、类型、关键字筛过的) */
 function exportCsv(): void {
 	const list = filtered.value;
@@ -225,7 +205,6 @@ const columns: DataTableColumns<HistoryRow> = [
 						value-format="yyyy-MM-dd"
 						size="small"
 						clearable
-						:shortcuts="rangeShortcuts"
 						start-placeholder="开始日期"
 						end-placeholder="结束日期"
 						class="range"
