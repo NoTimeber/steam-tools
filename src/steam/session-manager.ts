@@ -160,6 +160,8 @@ export interface SessionManagerOptions {
 	 * cancelled 在轮到时检查,为真就跳过(不占次数)
 	 */
 	queueLogon?(accountName: string, cancelled: () => boolean): {waitMs: number; ready: Promise<boolean>} | null;
+	/** 每次 logOn 之前调:返回非空(原因)就不登,会话记为失败(账号绑定的代理都停用了) */
+	refuseLogon?(accountName: string): string;
 	/** 拿到 WebSession 之后调用 */
 	onWebSession?(attempt: Attempt): void;
 	currencyIdToIso(currency: unknown): string;
@@ -410,6 +412,9 @@ export function createSessionManager(options: SessionManagerOptions) {
 	 * 排队期间会话被删、登出、换了客户端、又发起了新的登录,或者已经在线了(steam-user 自己重登回来了),这次就不登了
 	 */
 	function whenLogonAllowed(attempt: Attempt, client: SteamClient, begin: (queued: boolean) => void): void {
+		if (refusedLogon(attempt)) {
+			return;
+		}
 		const ticket = (logonTickets.get(attempt) ?? 0) + 1;
 		logonTickets.set(attempt, ticket);
 		const stale = () => attempt.disposed || attempt.status === 'logged_out' || attempt.status === 'web_session'
@@ -428,10 +433,26 @@ export function createSessionManager(options: SessionManagerOptions) {
 		});
 	}
 
+	/** 不让登(账号绑定的代理都停用了):会话记为失败、写原因 */
+	function refusedLogon(attempt: Attempt): boolean {
+		const reason = options.refuseLogon?.(attempt.accountName) ?? '';
+		if (!reason) {
+			return false;
+		}
+		clearLoginWatchdog(attempt);
+		attempt.status = 'failed';
+		addLog(attempt, 'error', `没有登录:${reason}`);
+		emit(attempt);
+		return true;
+	}
+
 	function startLogon(attempt: Attempt, details: LogonDetails): void {
 		attempt.loginDetails = details;            // 记下凭据,供超时重试复用
 		if (attempt.loginRetries == null) {
 			attempt.loginRetries = 0;
+		}
+		if (refusedLogon(attempt)) {
+			return;
 		}
 		const fingerprint = getFingerprintSafe(attempt.accountName);
 		attempt.userAgent = fingerprint.userAgent || '';    // 供自有 web 请求(取库存等)复用同一 UA

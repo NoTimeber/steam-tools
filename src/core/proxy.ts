@@ -3,13 +3,14 @@
 // Node 自带的 fetch 不能按请求指定代理,这里用 node:http(s) 的 Agent(Node 24.5 起支持 proxyEnv:
 // HTTPS 目标走 CONNECT 隧道,HTTP 目标发绝对地址;代理地址里的账号密码自动带成 Proxy-Authorization),
 // 外面包一层和 fetch 一样的接口,调用方不用改。只实现了这里用到的部分:字符串 / URLSearchParams / 二进制请求体、
-// redirect follow/manual、AbortSignal、gzip/deflate/br 解压。
+// redirect follow/manual、AbortSignal、gzip/deflate/br 解压。每个请求的收发字节数(估算:请求行 + 头 + 体、
+// 状态行 + 头 + 解压前的体,不含 TLS 和 CONNECT 握手)可以报给 onTraffic,代理用量统计用。
 // 只支持 HTTP 代理(http:// 或 https://),SOCKS 不支持。
 
 import {createRequire} from 'node:module';
 import http from 'node:http';
 import https from 'node:https';
-import {Readable} from 'node:stream';
+import {Readable, Transform} from 'node:stream';
 import zlib from 'node:zlib';
 
 const require = createRequire(import.meta.url);
@@ -145,18 +146,48 @@ function requestBody(body: FetchInit['body'], headers: Headers): Buffer | undefi
 	throw new TypeError('走代理的请求不支持这种请求体');
 }
 
-function decoded(res: http.IncomingMessage): Readable {
+function decoded(res: http.IncomingMessage, raw: Readable): Readable {
 	switch (String(res.headers['content-encoding'] || '').trim().toLowerCase()) {
 		case 'gzip':
 		case 'x-gzip':
-			return res.pipe(zlib.createGunzip());
+			return raw.pipe(zlib.createGunzip());
 		case 'deflate':
-			return res.pipe(zlib.createInflate());
+			return raw.pipe(zlib.createInflate());
 		case 'br':
-			return res.pipe(zlib.createBrotliDecompress());
+			return raw.pipe(zlib.createBrotliDecompress());
 		default:
-			return res;
+			return raw;
 	}
+}
+
+/** 原样转发,顺便数字节 */
+function byteCounter(): Transform & {bytes: number} {
+	const counter = new Transform({
+		transform(chunk: Buffer, _encoding, callback) {
+			counter.bytes += chunk.length;
+			callback(null, chunk);
+		}
+	}) as Transform & {bytes: number};
+	counter.bytes = 0;
+	return counter;
+}
+
+/** 请求行 + 头的字节数(估算) */
+function requestHeadBytes(url: URL, method: string, headers: Record<string, string>): number {
+	let size = Buffer.byteLength(`${method} ${url.pathname}${url.search} HTTP/1.1\r\nhost: ${url.host}\r\n\r\n`);
+	for (const [key, value] of Object.entries(headers)) {
+		size += Buffer.byteLength(`${key}: ${value}\r\n`);
+	}
+	return size;
+}
+
+/** 状态行 + 头的字节数(估算) */
+function responseHeadBytes(res: http.IncomingMessage): number {
+	let size = Buffer.byteLength(`HTTP/1.1 ${res.statusCode} ${res.statusMessage ?? ''}\r\n\r\n`);
+	for (let index = 0; index < res.rawHeaders.length; index += 2) {
+		size += Buffer.byteLength(`${res.rawHeaders[index]}: ${res.rawHeaders[index + 1]}\r\n`);
+	}
+	return size;
 }
 
 async function readAll(stream: Readable): Promise<Buffer> {
@@ -169,11 +200,24 @@ async function readAll(stream: Readable): Promise<Buffer> {
 
 const NULL_BODY_STATUS = new Set([101, 204, 205, 304]);
 
+/** 一个请求的收发字节数(估算) */
+export interface ProxyTraffic {
+	url: string;
+	sent: number;
+	received: number;
+}
+
+export interface ProxyFetchOptions {
+	keepAlive?: boolean;
+	/** 每个请求收完响应时报一次(跳转的每一跳各算一次);请求失败的不报 */
+	onTraffic?: (traffic: ProxyTraffic) => void;
+}
+
 /**
  * 走指定 HTTP 代理的 fetch。每次调用建一套自己的 Agent:keepAlive 时同一个 fetch 的请求复用连接,
  * 轮换代理(每个新连接换一个出口 IP)下也就是同一个出口 IP;想让谁和谁分开 IP,就给谁各建一个
  */
-export function createProxyFetch(proxyUrl: string, options: {keepAlive?: boolean} = {}): typeof fetch {
+export function createProxyFetch(proxyUrl: string, options: ProxyFetchOptions = {}): typeof fetch {
 	// @types/node 还没有 proxyEnv 这个选项
 	const agentOptions = (env: Record<string, string>) => ({keepAlive: options.keepAlive ?? true, proxyEnv: env}) as http.AgentOptions;
 	const agents = {
@@ -198,8 +242,11 @@ export function createProxyFetch(proxyUrl: string, options: {keepAlive?: boolean
 			if (body) {
 				outgoing['content-length'] = String(body.length);
 			}
+			const sent = requestHeadBytes(url, method, outgoing) + (body?.length ?? 0);
 			const request = (url.protocol === 'https:' ? https : http).request(url, {method, headers: outgoing, agent, signal}, res => {
-				readAll(decoded(res)).then(buffer => {
+				const counter = byteCounter();
+				readAll(decoded(res, res.pipe(counter))).then(buffer => {
+					options.onTraffic?.({url: url.href, sent, received: responseHeadBytes(res) + counter.bytes});
 					const responseHeaders = new Headers();
 					for (const [key, value] of Object.entries(res.headers)) {
 						// 已经解压过,长度和编码头不再对得上

@@ -10,14 +10,14 @@ import type {IconName} from '../../components/AppIcon.vue';
 import {dropdownWithTip, withTip} from '../../components/tip.ts';
 import {ALL_ACCOUNTS, NO_GROUP, SESSION_LABEL, STATUS_TAG, activeFilterCount, currencySymbol, formatBalance, padSeq, resolveSeqRange, walletTotals} from '../../lib/accounts.ts';
 import type {AccountFilters, LoginStatus, SortKey} from '../../lib/accounts.ts';
-import {accountProxy} from '../../lib/proxy.ts';
+import {accountProxyView} from '../../lib/proxy.ts';
 import {
 	accounts, canUseGc, connectGc, connectedGame, deleteSelected, disconnectGc, forSelected, gameLabel, groupName, loginAccount, logoutAccount,
 	moveToGroup, onlineCount, resetFilters, selectedRows, setFilters, setSearch, setSort, visibleRows
 } from '../../stores/accounts.ts';
 import type {AccountRow} from '../../stores/accounts.ts';
 import {authCodeSecondsLeft, authCodes, watchAuthCodes} from '../../stores/authcodes.ts';
-import {loadProxy, proxy} from '../../stores/proxy.ts';
+import {loadProxies, proxy} from '../../stores/proxy.ts';
 import HistoryModal from './HistoryModal.vue';
 import ProxyModal from './ProxyModal.vue';
 
@@ -26,11 +26,12 @@ const message = useMessage();
 const dialog = useDialog();
 
 const historyAccount = ref('');
-const proxyAccount = ref('');
+/** 正在设代理的账号(一个或勾选的几个) */
+const proxyAccounts = ref<string[]>([]);
 
 let stopCodes = () => {};
 onMounted(() => {
-	loadProxy();
+	void loadProxies();
 	stopCodes = watchAuthCodes();
 });
 onUnmounted(() => stopCodes());
@@ -285,9 +286,10 @@ const columns = computed<DataTableColumns<AccountRow>>(() => {
 			key: 'proxy',
 			width: 104,
 			render: row => {
-				const view = accountProxy(proxy.config, row.accountName);
-				const tag = h(NTag, {size: 'small', bordered: false, type: view.mode === 'global' ? 'default' : 'warning', class: 'clickable', onClick: () => (proxyAccount.value = row.accountName)}, () => view.label);
-				return withTip(tag, `${view.title || view.label}(点击修改)`);
+				const view = accountProxyView(proxy.data, row.accountName, row.groupId);
+				const type = view.mode === 'pool' ? 'default' : view.mode === 'bind' ? 'info' : view.mode === 'refused' ? 'error' : 'warning';
+				const tag = h(NTag, {size: 'small', bordered: false, type, class: 'clickable', onClick: () => (proxyAccounts.value = [row.accountName])}, () => view.label);
+				return withTip(tag, `${view.tip}(点击修改)`);
 			}
 		});
 	}
@@ -306,7 +308,7 @@ const columns = computed<DataTableColumns<AccountRow>>(() => {
 			h(NDropdown, {trigger: 'click', options: moveOptions(row.groupId), onSelect: (key: string) => onMove(key, [row])},
 				() => h('span', {class: 'tip-anchor'}, [iconAction('folder', '设置账户分组')])),
 			iconAction('receipt', '查看 Steam 消费记录', () => (historyAccount.value = row.accountName)),
-			iconAction('globe', '设置这个账号的 Steam 代理', () => (proxyAccount.value = row.accountName))
+			iconAction('globe', '设置这个账号的 Steam 代理', () => (proxyAccounts.value = [row.accountName]))
 		])
 	});
 	return list;
@@ -357,10 +359,6 @@ async function run(kind: 'login' | 'logout', action: (row: AccountRow) => Promis
 		await forSelected(action);
 	} finally {
 		busy.value = '';
-	}
-	if (kind === 'login') {
-		// 轮换代理:登录时服务端会给账号分编号,刷新一下「代理」列
-		loadProxy();
 	}
 }
 
@@ -425,6 +423,9 @@ function confirmDelete(): void {
 					<NDropdown trigger="click" :options="moveOptions()" @select="(key: string) => onMove(key, selectedRows)">
 						<NButton size="small"><template #icon><AppIcon name="folder" :size="16" /></template>移到分组</NButton>
 					</NDropdown>
+					<NButton size="small" @click="proxyAccounts = selectedRows.map(row => row.accountName)">
+						<template #icon><AppIcon name="globe" :size="16" /></template>代理
+					</NButton>
 					<NButton size="small" type="error" secondary :loading="busy === 'delete'" @click="confirmDelete">
 						<template #icon><AppIcon name="trash" :size="16" /></template>删除
 					</NButton>
@@ -542,7 +543,7 @@ function confirmDelete(): void {
 	</section>
 
 	<HistoryModal :account-name="historyAccount" @close="historyAccount = ''" />
-	<ProxyModal :account-name="proxyAccount" @close="proxyAccount = ''" />
+	<ProxyModal :account-names="proxyAccounts" @close="proxyAccounts = []" />
 </template>
 
 <style scoped>

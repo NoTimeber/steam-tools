@@ -53,6 +53,8 @@ import {createC5Service} from './c5/index.ts';
 import {c5Routes} from './c5/routes.ts';
 import {createProxyService} from './proxy/index.ts';
 import {proxyRoutes} from './proxy/routes.ts';
+import {createUsageMeter} from './proxy/usage.ts';
+import {accountKey} from './store/accounts.ts';
 import {createWebApp} from './web/app.ts';
 import {debugOnly} from './web/http.ts';
 import {systemRoutes} from './web/system-routes.ts';
@@ -155,10 +157,19 @@ const profiles = createProfiles({
 	readJson
 });
 
-// Steam 代理:全局 + 按账号覆盖,只给 Steam 的请求用(C5 / 悠悠照旧直连)。走 fetch 的 Steam 请求按 Cookie 里的 SteamID 认账号;
-// steamcommunity(手机确认、交易报价)按要设的 cookie 选
+// 代理用量:经代理的 Steam 网页请求按天、代理、账号、类型累计,30 秒写一次库
+const proxyUsage = createUsageMeter({db: store.db});
+
+// Steam 代理池:代理、代理组、账号 / 账户分组的绑定,只给 Steam 的请求用(C5 / 悠悠照旧直连)。
+// 走 fetch 的 Steam 请求按 Cookie 里的 SteamID 认账号;steamcommunity(手机确认、交易报价)按要设的 cookie 选
 const proxy = createProxyService({
 	store: store.proxies,
+	accountGroups: {
+		groupOf: accountName => store.groups.members().get(accountKey(accountName)) ?? '',
+		exists: id => store.groups.list().some(group => group.id === id)
+	},
+	usage: proxyUsage,
+	onChange: () => io.emit('proxies:update', proxy.state()),
 	accountForSteamId: steamId => {
 		for (const attempt of sessions.attempts.values()) {
 			if (attempt.steamID === steamId) {
@@ -170,7 +181,8 @@ const proxy = createProxyService({
 		return stored?.accountName ?? '';
 	},
 	testUrl: config.proxyTestUrl || undefined,
-	steamTestUrl: config.proxySteamTestUrl || undefined
+	steamTestUrl: config.proxySteamTestUrl || undefined,
+	steamHomeUrl: config.proxySteamHomeUrl || undefined
 });
 useCommunityProxy(cookies => proxy.proxyForCookies(cookies));
 
@@ -242,8 +254,9 @@ const sessions = createSessionManager({
 	intents: store.loginIntents,
 	onChange: attempt => io.emit('attempt:update', sessions.publicAttempt(attempt)),
 	onClientCreated: (attempt, client) => gcModules.attach(attempt, client),
-	// 代理设了登录速率限制:这分钟的次数用完了就排队
+	// 代理设了登录速率限制:这分钟的次数用完了就排队;账号绑定的代理都停用了不登
 	queueLogon: (accountName, cancelled) => proxy.queueLogin(accountName, cancelled),
+	refuseLogon: accountName => proxy.loginRefusal(accountName),
 	onWebSession: attempt => accounts.refreshCountry(attempt),   // 后台查真实账户国家(USD 等无法从货币推断)
 	currencyIdToIso,
 	resolveWalletCountry: attempt => resolveAccountCountry({
@@ -404,6 +417,7 @@ function shutdown(signal: string): void {
 	sessions.shutdown();   // 不改登录意图:下次启动照常自动恢复
 	uu.stop();
 	c5.stop();
+	proxyUsage.stop();
 	io.close();
 	httpServer.close(() => process.exit(0));
 	httpServer.closeAllConnections();

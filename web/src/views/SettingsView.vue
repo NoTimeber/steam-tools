@@ -1,13 +1,10 @@
 <script setup lang="ts">
-// 运行设置:当前版本和检查新版本、修改访问口令、Steam 代理(点开是代理设置页)、退出登录。
-import {computed, onMounted, reactive, ref} from 'vue';
+// 运行设置:当前版本和检查新版本、修改访问口令、退出登录。Steam 代理在左边「代理管理」。
+import {computed, reactive, ref} from 'vue';
 import {NAlert, NButton, NCard, NForm, NFormItem, NInput, NModal, NSpace, useMessage} from 'naive-ui';
 import {api, errorText} from '../api/http.ts';
-import {proxySummary} from '../lib/proxy.ts';
 import {addLog} from '../stores/logs.ts';
-import {loadProxy, proxy} from '../stores/proxy.ts';
 import {checkForUpdate, update} from '../stores/update.ts';
-import ProxySettingsModal from './settings/ProxySettingsModal.vue';
 
 const message = useMessage();
 const checking = ref(false);
@@ -62,11 +59,6 @@ async function savePassword(): Promise<void> {
 	}
 }
 
-// ===== Steam 代理(全局;账号的单独设置在账户管理页) =====
-const proxyOpen = ref(false);
-onMounted(loadProxy);
-const proxyText = computed(() => proxySummary(proxy.config));
-
 async function logout(): Promise<void> {
 	try {
 		await fetch('/api/auth/logout', {method: 'POST'});
@@ -85,18 +77,14 @@ async function logout(): Promise<void> {
 				<div class="module-counts">
 					<span>当前版本:{{ update.current ? 'v' + update.current : '读取中' }}</span>
 					<span v-if="latestText">{{ latestText }}</span>
-					<span>Steam 代理:{{ proxyText }}</span>
 				</div>
 			</div>
 		</header>
 		<NSpace>
 			<NButton :loading="checking" :disabled="update.disabled" @click="check">检查更新</NButton>
 			<NButton @click="openPassword">修改口令</NButton>
-			<NButton @click="proxyOpen = true">Steam 代理</NButton>
 			<NButton @click="logout">退出登录</NButton>
 		</NSpace>
-
-		<ProxySettingsModal :show="proxyOpen" @close="proxyOpen = false" />
 
 		<NModal v-model:show="password.open" :mask-closable="!password.saving">
 			<NCard title="修改访问口令" style="width: 420px" :bordered="false" role="dialog" aria-modal="true">

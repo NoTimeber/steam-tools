@@ -1,15 +1,18 @@
 <script setup lang="ts">
-// 账户分组:列表(名称、账户数、排序、编辑 / 删除),点名称或编辑进分组的编辑页(改名;组内账户可添加、移出)。
+// 账户分组:列表(名称、账户数、代理组、排序、编辑 / 删除),点名称或编辑进分组的编辑页(改名、关联代理组;组内账户可添加、移出)。
+// 关联的代理组:组里每个账号都用这些代理组登录(和账号自己的绑定合在一起),代理组在「代理管理」里建。
 // 新建和删除由外层(AccountsView)管,这里点删除只是通知它。
 import {computed, h, ref, watch} from 'vue';
-import {NButton, NDataTable, NInput, NTag, useMessage} from 'naive-ui';
+import {NButton, NDataTable, NInput, NSelect, NTag, useMessage} from 'naive-ui';
 import type {DataTableColumns, DataTableRowKey} from 'naive-ui';
 import type {AccountGroup} from '../../api/types.ts';
 import AppIcon from '../../components/AppIcon.vue';
+import GroupChip from '../../components/GroupChip.vue';
 import {withTip} from '../../components/tip.ts';
 import {SESSION_LABEL, STATUS_TAG, matchesSearch, moveGroupId} from '../../lib/accounts.ts';
 import {errorText} from '../../api/http.ts';
 import {accounts, moveToGroup, renameGroup, reorderGroups} from '../../stores/accounts.ts';
+import {linkAccountGroup, proxy} from '../../stores/proxy.ts';
 import type {AccountRow} from '../../stores/accounts.ts';
 import AddAccountsModal from './AddAccountsModal.vue';
 
@@ -66,6 +69,15 @@ const listColumns = computed<DataTableColumns<AccountGroup>>(() => [
 	},
 	{title: '账户', key: 'count', width: 100, render: group => String(counts.value.get(group.id) ?? 0)},
 	{
+		title: '代理组',
+		key: 'proxyGroups',
+		width: 200,
+		render: group => {
+			const linked = (proxy.data.accountGroups[group.id] ?? []).map(id => proxy.data.groups.find(item => item.id === id)).filter(item => !!item);
+			return linked.length ? h('div', {class: 'chips-cell'}, linked.map(item => h(GroupChip, {name: item.name, color: item.color}))) : h('span', {class: 'muted'}, '无');
+		}
+	},
+	{
 		title: '顺序',
 		key: 'order',
 		width: 90,
@@ -91,29 +103,51 @@ const listColumns = computed<DataTableColumns<AccountGroup>>(() => [
 // ===== 编辑页 =====
 const group = computed(() => accounts.groups.find(item => item.id === props.editingId));
 const name = ref('');
+/** 关联的代理组 */
+const proxyGroupIds = ref<string[]>([]);
 const saving = ref(false);
+const linkedIds = () => proxy.data.accountGroups[props.editingId] ?? [];
+const proxyGroupOptions = computed(() => proxy.data.groups.map(item => ({
+	value: item.id,
+	label: `${item.name}(${proxy.data.proxies.filter(entry => entry.groupIds.includes(item.id)).length} 个代理)`
+})));
+const linksChanged = computed(() => [...proxyGroupIds.value].sort().join() !== [...linkedIds()].sort().join());
 const memberSearch = ref('');
 const memberChecked = ref(new Set<string>());
 const addTo = ref('');
 
 watch(() => props.editingId, () => {
 	name.value = group.value?.name ?? '';
+	proxyGroupIds.value = [...linkedIds()];
 	memberSearch.value = '';
 	memberChecked.value = new Set();
 }, {immediate: true});
 
+// 代理设置后到(第一次打开页面时):把关联的代理组填上
+watch(() => proxy.loaded, loaded => {
+	if (loaded) {
+		proxyGroupIds.value = [...linkedIds()];
+	}
+});
+
+/** 保存名称和关联的代理组(改了哪个存哪个) */
 async function saveName(): Promise<void> {
 	const value = name.value.trim();
 	if (!group.value || !value) {
 		message.warning('请输入分组名');
 		return;
 	}
-	if (value === group.value.name) {
+	if (value === group.value.name && !linksChanged.value) {
 		return;
 	}
 	saving.value = true;
 	try {
-		await renameGroup(group.value.id, value);
+		if (value !== group.value.name) {
+			await renameGroup(group.value.id, value);
+		}
+		if (linksChanged.value) {
+			await linkAccountGroup(group.value.id, proxyGroupIds.value);
+		}
 		message.success('已保存');
 	} catch (err) {
 		message.error(errorText(err));
@@ -155,10 +189,16 @@ const memberColumns = computed<DataTableColumns<AccountRow>>(() => [
 			<div class="panel-body">
 				<label class="field-label" for="group-name">名称<span class="required">*</span></label>
 				<NInput id="group-name" v-model:value="name" placeholder="" :maxlength="NAME_MAX" show-count @keyup.enter="saveName" />
+				<label class="field-label proxy-label" for="group-proxy-groups">代理组</label>
+				<NSelect id="group-proxy-groups" v-model:value="proxyGroupIds" multiple clearable :options="proxyGroupOptions" placeholder="" />
+				<p class="muted field-help">
+					此分组中的账户会通过这些代理组登录,效果与在账户上绑定代理组相同。账户上单独绑定的代理或代理组仍然生效,两套合在一起。
+					留空则成员只用自己的绑定,没有就用代理池。{{ proxyGroupOptions.length ? '' : '还没有代理组,到「代理管理 → 代理组」里建。' }}
+				</p>
 			</div>
 		</section>
 		<div class="form-actions">
-			<NButton type="primary" :loading="saving" :disabled="!name.trim() || name.trim() === group.name" @click="saveName">保存</NButton>
+			<NButton type="primary" :loading="saving" :disabled="!name.trim() || (name.trim() === group.name && !linksChanged)" @click="saveName">保存</NButton>
 			<NButton @click="emit('back')">返回</NButton>
 		</div>
 
@@ -257,6 +297,22 @@ const memberColumns = computed<DataTableColumns<AccountRow>>(() => [
 .required {
 	margin-left: 2px;
 	color: var(--danger);
+}
+
+.proxy-label {
+	margin-top: 14px;
+}
+
+.field-help {
+	margin: 6px 0 0;
+	font-size: 12px;
+	line-height: 1.6;
+}
+
+:deep(.chips-cell) {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px;
 }
 
 .form-actions {

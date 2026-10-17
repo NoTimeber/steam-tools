@@ -1,36 +1,32 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {isProxyTemplate, parseProxyUrl} from '../core/proxy.ts';
-import {emptyGlobalProxy} from '../store/proxies.ts';
-import type {GlobalProxySettings, ProxyConfig} from '../store/proxies.ts';
+import type {ProxyFetchOptions} from '../core/proxy.ts';
+import {emptyProxyConfig, newStoredProxy} from '../store/proxies.ts';
+import type {ProxyConfig, StoredProxy} from '../store/proxies.ts';
 import {createProxyService, isSteamHost, steamIdFromCookies} from './index.ts';
-import type {ProxyServiceOptions} from './index.ts';
+import type {ProxyService, ProxyServiceOptions} from './index.ts';
+import type {UsageEntry} from './usage.ts';
 
-const GLOBAL = 'http://user-rotate:secret@p.example.io:80';
 const ALPHA_ID = '76561190100005555';
 const BRAVO_ID = '76561190100006666';
 
-/** 测试里用整串地址写全局代理:拆成各项、开着、静态(带 {n} 的是轮换,IP 数量 3) */
-function globalOf(url: string, extra: Partial<GlobalProxySettings> = {}): GlobalProxySettings {
-	const rotating = isProxyTemplate(url);
-	return {...emptyGlobalProxy(), ...parseProxyUrl(url), enabled: true, type: rotating ? 'rotating' : 'static', poolSize: rotating ? 3 : 0, ...extra};
-}
+/** 测试用的代理:主机是「id.example.io」,端口 8080,静态、启用 */
+const P = (id: string, fields: Partial<StoredProxy> = {}) => newStoredProxy({id, host: `${id}.example.io`, port: 8080, createdAt: 1, ...fields});
+const url = (id: string) => `http://${id}.example.io:8080`;
 
-type Initial = Partial<Omit<ProxyConfig, 'global'>> & {global?: string | GlobalProxySettings};
-
-function memoryStore(initial: Initial = {}) {
-	const global = typeof initial.global === 'string' ? (initial.global ? globalOf(initial.global) : emptyGlobalProxy()) : initial.global ?? emptyGlobalProxy();
-	let saved: ProxyConfig = structuredClone({accounts: {}, ...initial, global});
+function memoryStore(initial: Partial<ProxyConfig> = {}) {
+	let saved: ProxyConfig = structuredClone({...emptyProxyConfig(), ...initial});
 	return {load: () => structuredClone(saved), save: (config: ProxyConfig) => void (saved = structuredClone(config)), saved: () => saved};
 }
 
 /** 记下每个请求走了哪个代理('' 为直连) */
-function harness(initial?: Initial, overrides: Partial<ProxyServiceOptions> = {}) {
+function harness(initial?: Partial<ProxyConfig>, overrides: Partial<ProxyServiceOptions> = {}) {
 	const store = memoryStore(initial);
 	const used: string[] = [];
 	const lookups: string[] = [];
 	/** 建过的走代理 fetch(每个账号一个) */
 	const created: string[] = [];
+	const usage: UsageEntry[] = [];
 	const service = createProxyService({
 		store,
 		accountForSteamId: steamId => {
@@ -41,19 +37,30 @@ function harness(initial?: Initial, overrides: Partial<ProxyServiceOptions> = {}
 			used.push('');
 			return new Response('direct');
 		}) as typeof fetch,
-		createProxyFetch: proxyUrl => {
+		createProxyFetch: (proxyUrl: string, options?: ProxyFetchOptions) => {
 			created.push(proxyUrl);
-			return (async () => {
+			return (async (input: string) => {
 				used.push(proxyUrl);
+				options?.onTraffic?.({url: String(input), sent: 10, received: 20});
 				return new Response(JSON.stringify({ip: '203.0.113.7'}));
-			}) as typeof fetch;
+			}) as unknown as typeof fetch;
 		},
+		usage: {record: entry => void usage.push(entry), report: () => null as never},
+		random: () => 0,
 		...overrides
 	});
-	return {service, store, used, lookups, created};
+	return {service, store, used, lookups, created, usage};
 }
 
 const cookie = (steamId: string) => ({Cookie: `steamLoginSecure=${steamId}%7C%7CeyJ0eXAi; sessionid=abc`});
+const status = (code: number, pattern: RegExp) => (err: Error & {statusCode?: number}) => err.statusCode === code && pattern.test(err.message);
+
+/** 等后台的检测都跑完 */
+async function settle(service: ProxyService): Promise<void> {
+	for (let round = 0; round < 500 && service.state().proxies.some(proxy => proxy.status === 'checking'); round++) {
+		await new Promise(resolve => setImmediate(resolve));
+	}
+}
 
 test('SteamID 从 steamLoginSecure 取;Steam 的域名才算 Steam', () => {
 	assert.equal(steamIdFromCookies(`sessionid=1; steamLoginSecure=${ALPHA_ID}%7C%7Ctoken`), ALPHA_ID);
@@ -67,232 +74,329 @@ test('SteamID 从 steamLoginSecure 取;Steam 的域名才算 Steam', () => {
 	assert.ok(!isSteamHost('notsteamcommunity.com.evil.io'));
 });
 
-test('按账号取代理:单独设的优先,direct 直连,其它用全局', () => {
-	const {service} = harness({global: GLOBAL, accounts: {alpha: 'http://a:b@10.0.0.1:8080', bravo: 'direct'}});
-	assert.equal(service.proxyFor('ALPHA'), 'http://a:b@10.0.0.1:8080', '账号名不分大小写');
-	assert.equal(service.proxyFor('bravo'), '');
-	assert.equal(service.proxyFor('charlie'), GLOBAL);
-	assert.equal(service.proxyFor(), GLOBAL);
-	assert.equal(service.proxyForCookies([`steamLoginSecure=${BRAVO_ID}%7C%7Cx`]), '');
-	assert.equal(service.proxyForCookies([]), GLOBAL, '没 cookie 用全局');
+test('账号用哪些代理:没绑定的用代理池(启用的、没被账号单独绑定的),池空了直连;不走代理的直连;绑定的只用绑定的', () => {
+	const {service} = harness({
+		proxies: [P('a'), P('b', {enabled: false}), P('c')],
+		accounts: {echo: {mode: 'direct'}, fox: {mode: 'bind', proxyIds: ['c'], groupIds: []}}
+	});
+	assert.equal(service.proxyFor('alpha'), url('a'), 'b 停用了,c 是 fox 专用的');
+	assert.equal(service.proxyFor('CHARLIE'), url('a'));
+	assert.equal(service.proxyFor(), url('a'), '认不出账号的请求也从池里分');
+	assert.equal(service.proxyFor('Fox'), url('c'), '账号名不分大小写');
+	assert.equal(service.proxyFor('echo'), '');
+
+	service.bulk({ids: ['a'], action: 'disable'});
+	assert.equal(service.proxyFor('alpha'), '', '池里没有启用的代理就直连');
+	service.bulk({ids: ['b'], action: 'enable'});
+	assert.equal(service.proxyFor('alpha'), url('b'), '用着的停用了重新挑');
+
+	// 绑定的全停用了:拒绝(不退回用池里的,也不直连)
+	service.bulk({ids: ['c'], action: 'disable'});
+	assert.throws(() => service.proxyFor('fox'), status(409, /绑定的 1 个代理都已停用/));
+	assert.match(service.loginRefusal('fox'), /都已停用/);
+	assert.equal(service.loginRefusal('alpha'), '');
+	assert.equal(service.queueLogin('fox'), null, '被拒绝的不排队(登录那边会拒)');
+
+	// 绑定的代理删光了:算没绑定,用代理池
+	const after = service.deleteProxies({ids: ['c']});
+	assert.deepEqual(after.accounts, {echo: {mode: 'direct'}});
+	assert.equal(service.proxyFor('fox'), url('b'));
 });
 
-test('Steam 的 fetch:按 Cookie 认账号选代理,没 cookie 用全局,别的域名直连;SteamID 查过就记住', async () => {
-	const {service, used, lookups} = harness({global: GLOBAL, accounts: {alpha: 'http://a:b@10.0.0.1:8080', bravo: 'direct'}});
+test('分配:尽量分散到不同代理,健康或没测过的优先;每个账号一直用分到的,停用了才重新挑;重启后重新分', () => {
+	const unhealthy = {status: 'unreachable' as const, latencyMs: 0, ip: '', country: '', ips: [], samples: 0, market: 0, error: 'x', checkedAt: 1};
+	const {service, store} = harness({proxies: [P('a'), P('b'), P('dead', {check: unhealthy})]});
+	assert.equal(service.proxyFor('alpha'), url('a'));
+	assert.equal(service.proxyFor('bravo'), url('b'), '挑账号最少的');
+	assert.equal(service.proxyFor('charlie'), url('a'));
+	assert.equal(service.proxyFor('alpha'), url('a'), '记住了,一直是它');
+	assert.deepEqual(service.state().assigned, {alpha: {proxyId: 'a', index: 0}, bravo: {proxyId: 'b', index: 0}, charlie: {proxyId: 'a', index: 0}});
+
+	service.bulk({ids: ['a', 'b'], action: 'disable'});
+	assert.equal(service.proxyFor('alpha'), url('dead'), '只剩不健康的也照用');
+	const restarted = createProxyService({store, accountForSteamId: () => '', random: () => 0.99, createProxyFetch: () => fetch});
+	assert.deepEqual(restarted.state().assigned, {}, '分配不存盘');
+});
+
+test('轮换代理填了 IP 数量:每个账号固定一个编号(先挑没人用的),webshare 的 -rotate 换成 -编号,别家用 {n};没填的照普通地址用', () => {
+	const webshare = P('w', {host: 'p.webshare.io', port: 80, type: 'rotating', username: 'user-rotate', password: 'secret', poolSize: 3});
+	const {service} = harness({proxies: [webshare]});
+	const at = (index: number) => `http://user-${index}:secret@p.webshare.io:80`;
+	assert.equal(service.proxyFor('alpha'), at(1));
+	assert.equal(service.proxyFor('bravo'), at(2), '换个账号挑没人用的');
+	assert.equal(service.proxyFor('charlie'), at(3));
+	assert.equal(service.proxyFor('delta'), at(1), '都占满了只好重复');
+	assert.equal(service.proxyFor('ALPHA'), at(1));
+	assert.equal(service.state().proxies[0]!.sticky, true);
+
+	service.updateProxy({id: 'w', poolSize: 2});
+	assert.equal(service.proxyFor('alpha'), at(1), '还在范围里的照旧');
+	assert.match(service.proxyFor('charlie'), /user-[12]:/, '超出的重新分');
+
+	service.updateProxy({id: 'w', username: 'sess-{n}-x'});
+	assert.equal(service.proxyFor('alpha'), 'http://sess-1-x:secret@p.webshare.io:80');
+	service.updateProxy({id: 'w', username: 'user-rotate', poolSize: ''});
+	assert.equal(service.proxyFor('alpha'), 'http://user-rotate:secret@p.webshare.io:80', '没填 IP 数量:每个新连接由提供商换 IP');
+	assert.equal(service.state().proxies[0]!.sticky, false);
+});
+
+test('Steam 的 fetch:按 Cookie 认账号选代理,每个账号各用各的连接;别的域名直连;SteamID 查过就记住;记用量', async () => {
+	const {service, used, lookups, created, usage} = harness({proxies: [P('a'), P('c')], accounts: {alpha: {mode: 'bind', proxyIds: ['c'], groupIds: []}}});
 	await service.fetch('https://store.steampowered.com/account/history/', {headers: cookie(ALPHA_ID)});
 	await service.fetch('https://steamcommunity.com/market/', {headers: new Headers(cookie(ALPHA_ID))});
 	await service.fetch('https://store.steampowered.com/account/', {headers: cookie(BRAVO_ID)});
 	await service.fetch('https://store.steampowered.com/api/packagedetails?packageids=1');
-	await service.fetch('https://store.steampowered.com/', {headers: cookie('76561190100009999')});
 	await service.fetch('https://openapi.c5game.com/merchant/account/v1/balance', {headers: cookie(ALPHA_ID)});
 	await service.fetch('https://steamcommunity.com/', {headers: cookie('76561190100009999')});
-	assert.deepEqual(used, ['http://a:b@10.0.0.1:8080', 'http://a:b@10.0.0.1:8080', '', GLOBAL, GLOBAL, '', GLOBAL]);
-	assert.deepEqual(lookups, [ALPHA_ID, BRAVO_ID, '76561190100009999', '76561190100009999'], '认出来的记住,认不出的下次再查');
+	assert.deepEqual(used, [url('c'), url('c'), url('a'), url('a'), '', url('a')]);
+	assert.deepEqual(created, [url('c'), url('a'), url('a')], 'alpha、bravo、认不出账号的各一套连接');
+	assert.deepEqual(lookups, [ALPHA_ID, BRAVO_ID, '76561190100009999'], '认出来的记住,认不出的下次再查');
+	assert.deepEqual(usage.map(entry => [entry.proxyId, entry.account, entry.url]), [
+		['c', 'alpha', 'https://store.steampowered.com/account/history/'],
+		['c', 'alpha', 'https://steamcommunity.com/market/'],
+		['a', 'bravo', 'https://store.steampowered.com/account/'],
+		['a', '', 'https://store.steampowered.com/api/packagedetails?packageids=1'],
+		['a', '', 'https://steamcommunity.com/']
+	]);
 
+	service.bulk({ids: ['c'], action: 'disable'});
+	await assert.rejects(service.fetch('https://steamcommunity.com/market/', {headers: cookie(ALPHA_ID)}), /都已停用/, '绑定的代理都停用了不发');
 	const none = harness();
 	await none.service.fetch('https://store.steampowered.com/account/', {headers: cookie(ALPHA_ID)});
-	assert.deepEqual(none.used, [''], '没设代理就直连');
+	assert.deepEqual(none.used, [''], '没有代理就直连');
 });
 
-test('同一个代理,每个账号各用各的连接(轮换代理下账号之间不共用出口 IP);同一账号复用', async () => {
-	const {service, created} = harness({global: GLOBAL, accounts: {}});
-	await service.fetch('https://store.steampowered.com/', {headers: cookie(ALPHA_ID)});
-	await service.fetch('https://steamcommunity.com/', {headers: cookie(ALPHA_ID)});
-	await service.fetch('https://store.steampowered.com/', {headers: cookie(BRAVO_ID)});
-	await service.fetch('https://store.steampowered.com/api/packagedetails?packageids=1');
-	await service.fetch('https://store.steampowered.com/api/packagedetails?packageids=2');
-	assert.deepEqual(created, [GLOBAL, GLOBAL, GLOBAL], 'alpha、bravo、认不出账号的各一套');
-	await service.test({});
-	await service.test({});
-	assert.equal(created.length, 7, '测试每次新开连接(查出口 IP、查 Steam 社区各一个)');
-});
-
-test('改全局代理:按各项校验并保存,下发不带密码;密码留空保留原来的,清掉用户名时一起清;关了就直连,填的留着', () => {
+test('新建 / 修改代理:按各项校验,下发不带密码;密码留空保留原来的,清掉用户名一起清;改了连接方式检测结果作废;重复的不让加', () => {
 	const {service, store} = harness();
-	const status400 = (pattern: RegExp) => (err: Error & {statusCode?: number}) => err.statusCode === 400 && pattern.test(err.message);
-	const form = {enabled: true, protocol: 'http', host: ' P.Example.io ', port: 80, type: 'static', username: 'user-rotate', password: 'secret', poolSize: '', loginsPerMinute: ''};
-	assert.throws(() => service.setGlobal({...form, protocol: 'socks5'}), status400(/SOCKS/));
-	assert.throws(() => service.setGlobal({...form, host: 'http://user:pw@p.example.io:80'}), status400(/主机只填域名或 IP/));
-	assert.throws(() => service.setGlobal({...form, host: 'p.example.io:80'}), status400(/分开填/));
-	assert.throws(() => service.setGlobal({...form, host: ''}), status400(/请填写主机/), '开着就要有主机');
-	assert.throws(() => service.setGlobal({...form, port: ''}), status400(/请填写端口/));
-	assert.throws(() => service.setGlobal({...form, port: 70000}), status400(/1 到 65535/));
-	assert.throws(() => service.setGlobal({...form, type: 'weird'}), status400(/类型只能是/));
-	assert.throws(() => service.setGlobal({...form, loginsPerMinute: 1.5}), status400(/登录速率限制/));
-	assert.throws(() => service.setGlobal({...form, type: 'sticky'}), status400(/类型只能是 静态 或 轮换/), '没有「按账号固定 IP」了');
-	assert.throws(() => service.setGlobal({...form, username: 'user-{n}'}), status400(/静态代理只有一个 IP/));
-	assert.throws(() => service.setGlobal({...form, type: 'rotating'}), status400(/请填写 IP 数量/));
-	assert.throws(() => service.setGlobal({...form, type: 'rotating', poolSize: 2.5}), status400(/IP 数量要是/));
-	assert.throws(() => service.setGlobal({...form, type: 'rotating', poolSize: 5, username: 'plain'}), status400(/轮换代理要能给每个账号固定一个 IP/), '不知道怎么固定');
-	assert.deepEqual(store.saved().global, emptyGlobalProxy(), '校验不过不存');
+	const form = {protocol: 'http', host: ' P.Example.io ', port: 80, type: 'static', username: 'user', password: 'secret', loginsPerMinute: ''};
+	assert.throws(() => service.createProxy({...form, protocol: 'socks5'}), status(400, /SOCKS5/));
+	assert.throws(() => service.createProxy({...form, host: 'http://user:pw@p.example.io:80'}), status(400, /主机只填域名或 IP/));
+	assert.throws(() => service.createProxy({...form, host: 'p.example.io:80'}), status(400, /分开填/));
+	assert.throws(() => service.createProxy({...form, host: ''}), status(400, /请填写主机/));
+	assert.throws(() => service.createProxy({...form, port: ''}), status(400, /请填写端口/));
+	assert.throws(() => service.createProxy({...form, port: 70000}), status(400, /1 到 65535/));
+	assert.throws(() => service.createProxy({...form, type: 'weird'}), status(400, /类型只能是/));
+	assert.throws(() => service.createProxy({...form, loginsPerMinute: 1.5}), status(400, /登录速率限制/));
+	assert.throws(() => service.createProxy({...form, username: 'user-{n}'}), status(400, /静态代理只有一个 IP/));
+	assert.throws(() => service.createProxy({...form, type: 'rotating', poolSize: 2.5}), status(400, /IP 数量要是/));
+	assert.throws(() => service.createProxy({...form, type: 'rotating', poolSize: 5}), status(400, /填了 IP 数量要能把编号写进地址/));
+	assert.throws(() => service.createProxy({...form, type: 'rotating', username: 'u-{n}'}), status(400, /要填 IP 数量/));
+	assert.throws(() => service.createProxy({...form, groupIds: ['nope']}), status(404, /代理组不存在/));
+	assert.deepEqual(store.saved().proxies, [], '校验不过不存');
 
-	const settings = {enabled: true, protocol: 'http', host: 'p.example.io', port: 80, type: 'static', username: 'user-rotate', hasPassword: true, poolSize: 0, loginsPerMinute: 0};
-	assert.deepEqual(service.setGlobal(form), {global: 'http://user-rotate:****@p.example.io:80', settings, sticky: false, accounts: {}, assigned: {}});
-	assert.equal(store.saved().global.password, 'secret', '存的有密码');
-	assert.equal(service.proxyFor('alpha'), GLOBAL);
+	const {proxy, state} = service.createProxy({...form, notes: '  备注  ', loginsPerMinute: '3'});
+	assert.deepEqual(
+		[proxy.host, proxy.port, proxy.endpoint, proxy.username, proxy.hasPassword, proxy.notes, proxy.loginsPerMinute, proxy.status, proxy.enabled],
+		['p.example.io', 80, 'p.example.io:80', 'user', true, '备注', 3, 'untested', true]
+	);
+	assert.ok(!('password' in proxy) && !JSON.stringify(state).includes('secret'), '密码不下发');
+	assert.equal(store.saved().proxies[0]!.password, 'secret', '存的有密码');
+	assert.throws(() => service.createProxy({...form, host: 'p.EXAMPLE.io'}), status(409, /已经有 p\.example\.io:80/));
+	const other = service.createProxy({...form, username: 'other'});
+	assert.equal(other.proxy.username, 'other', '用户名不同算另一个');
 
-	service.setGlobal({...form, password: '', loginsPerMinute: '3'});
-	assert.deepEqual([store.saved().global.password, store.saved().global.type, store.saved().global.loginsPerMinute], ['secret', 'static', 3], '密码留空保留');
-	assert.equal(service.publicConfig().settings.loginsPerMinute, 3);
-	service.setGlobal({password: 'p@ss word'});
-	assert.equal(service.proxyFor(), 'http://user-rotate:p%40ss%20word@p.example.io:80', '密码里的特殊字符拼地址时编码');
-
-	const off = service.setGlobal({enabled: false});
-	assert.deepEqual([off.global, off.settings.enabled, off.settings.host, off.settings.hasPassword], ['', false, 'p.example.io', true], '关了直连,填的留着');
-	assert.equal(service.proxyFor('alpha'), '');
-	assert.equal(service.setGlobal({enabled: true}).global, 'http://user-rotate:****@p.example.io:80', '再打开不用重填');
-
-	service.setGlobal({username: '', password: ''});
-	assert.deepEqual([store.saved().global.username, store.saved().global.password, service.proxyFor()], ['', '', 'http://p.example.io:80'], '没用户名就不带认证');
-	service.setGlobal({enabled: false, host: '', port: ''});
-	assert.equal(service.publicConfig().settings.host, '', '关着可以清空主机');
-	service.setGlobal({...form, protocol: 'HTTPS', port: '8443'});
-	assert.equal(service.proxyFor(), 'https://user-rotate:secret@p.example.io:8443');
+	const id = proxy.id;
+	service.bindAccounts({accountNames: ['x'], mode: 'bind', proxyIds: [id]});
+	store.save({...store.saved(), proxies: store.saved().proxies.map(item => ({...item, check: {status: 'healthy', latencyMs: 1, ip: 'x', country: '', ips: ['x'], samples: 1, market: 200, error: '', checkedAt: 1}}))});
+	const reloaded = createProxyService({store, accountForSteamId: () => '', createProxyFetch: () => fetch});
+	reloaded.updateProxy({id, password: '', notes: '改了备注'});
+	assert.deepEqual([store.saved().proxies[0]!.password, store.saved().proxies[0]!.check?.status], ['secret', 'healthy'], '密码留空保留;只改备注检测结果还在');
+	assert.equal(reloaded.proxyFor('x'), 'http://user:secret@p.example.io:80');
+	reloaded.updateProxy({id, password: 'p@ss word'});
+	assert.equal(store.saved().proxies[0]!.check, null, '改了密码要重新测');
+	assert.equal(reloaded.proxyFor('x'), 'http://user:p%40ss%20word@p.example.io:80', '密码里的特殊字符拼地址时编码');
+	assert.throws(() => reloaded.updateProxy({id, username: 'other'}), status(409, /已经有/));
+	reloaded.updateProxy({id, username: ''});
+	assert.deepEqual([store.saved().proxies[0]!.username, store.saved().proxies[0]!.password], ['', ''], '没用户名就不带认证');
+	assert.throws(() => reloaded.updateProxy({id: 'nope', host: 'h'}), status(404, /代理不存在/));
 });
 
-test('账号的代理:可切回全局、直连、单独代理(单独代理仍是整串地址)', () => {
-	const {service} = harness({global: GLOBAL});
-
-	assert.deepEqual(service.setAccount({accountName: 'Alpha', mode: 'custom', proxy: 'u:pw@10.0.0.1:8080'}).accounts, {alpha: {mode: 'custom', url: 'http://u:****@10.0.0.1:8080'}});
-	assert.equal(service.proxyFor('alpha'), 'http://u:pw@10.0.0.1:8080');
-	service.setAccount({accountName: 'alpha', mode: 'direct'});
-	assert.equal(service.proxyFor('alpha'), '');
-	assert.throws(() => service.setAccount({accountName: 'alpha', mode: 'custom'}), /请填写这个账号的代理地址/, '原来不是单独代理时必须填');
-	service.setAccount({accountName: 'alpha', mode: 'custom', proxy: 'u:pw@10.0.0.1:8080'});
-	service.setAccount({accountName: 'alpha', mode: 'custom', proxy: ''});
-	assert.equal(service.proxyFor('alpha'), 'http://u:pw@10.0.0.1:8080', '没填地址就沿用原来的');
-	assert.deepEqual(service.setAccount({accountName: 'alpha', mode: 'global'}).accounts, {});
-	assert.equal(service.proxyFor('alpha'), GLOBAL);
-	assert.throws(() => service.setAccount({accountName: '', mode: 'global'}), /缺少账号名/);
-	assert.throws(() => service.setAccount({accountName: 'alpha', mode: 'weird'}), /global \/ direct \/ custom/);
+test('导入:各种写法拆开;已有的、这次重复的跳过;拆不开、不合法的按行号报;新代理按选的类型、启用、代理组', () => {
+	const {service} = harness();
+	service.createProxy({protocol: 'http', host: '1.2.3.4', port: 8080, type: 'static'});
+	const {group} = service.createGroup({name: '开箱'});
+	const text = [
+		'# 注释',
+		'1.2.3.4:8080',
+		'5.6.7.8:3128:user:pa:ss',
+		'user2:pw2@9.9.9.9:80',
+		'9.9.9.10:81@user3:pw3',
+		'https://h.example.io:443',
+		'socks5://s.example.io:1080',
+		'bad line',
+		'1.2.3.4:99999',
+		'5.6.7.8:3128:user:other',
+		'',
+		'5.6.7.8:3128:user:pa:ss'
+	].join('\n');
+	const result = service.importProxies({text, protocol: 'http', type: 'rotating', enabled: false, groupIds: [group.id]});
+	assert.deepEqual([result.added, result.duplicates], [4, 3], '已有的 1.2.3.4:8080、同一用户名的 5.6.7.8:3128 两行跳过');
+	assert.deepEqual(result.errors, [
+		{line: 7, error: '暂不支持 SOCKS5 代理'},
+		{line: 8, error: '格式不对,应该像 host:port 或 host:port:user:pass'},
+		{line: 9, error: '端口要是 1 到 65535 的整数'}
+	]);
+	const added = result.state.proxies.slice(1).map(proxy => [proxy.protocol, proxy.endpoint, proxy.username, proxy.hasPassword, proxy.type, proxy.enabled, proxy.groupIds]);
+	assert.deepEqual(added, [
+		['http', '5.6.7.8:3128', 'user', true, 'rotating', false, [group.id]],
+		['http', '9.9.9.9:80', 'user2', true, 'rotating', false, [group.id]],
+		['http', '9.9.9.10:81', 'user3', true, 'rotating', false, [group.id]],
+		['https', 'h.example.io:443', '', false, 'rotating', false, [group.id]]
+	]);
+	assert.throws(() => service.importProxies({text: '\n# 只有注释\n', type: 'static'}), status(400, /请粘贴代理列表/));
+	assert.throws(() => service.importProxies({text: '1.1.1.1:80', type: 'static', protocol: 'socks5'}), status(400, /SOCKS5/));
 });
 
-test('测代理:测填的或现在用的,回出口 IP;不通、407、没代理都报错', async () => {
+test('批量:启用、停用、登录速率限制、加入 / 移出代理组;没选、不认识的报错', () => {
+	const {service} = harness({proxies: [P('a'), P('b')]});
+	const {group} = service.createGroup({name: '组', color: 'green'});
+	service.bulk({ids: ['a', 'b'], action: 'loginLimit', value: 5});
+	service.bulk({ids: ['a'], action: 'addGroups', value: [group.id]});
+	service.bulk({ids: ['a', 'b'], action: 'addGroups', value: [group.id]});
+	const state = service.bulk({ids: ['b'], action: 'disable'});
+	assert.deepEqual(state.proxies.map(proxy => [proxy.id, proxy.loginsPerMinute, proxy.groupIds, proxy.enabled]), [['a', 5, [group.id], true], ['b', 5, [group.id], false]]);
+	const removed = service.bulk({ids: ['a'], action: 'removeGroups', value: [group.id]});
+	assert.deepEqual(removed.proxies.map(proxy => proxy.groupIds), [[], [group.id]]);
+	assert.equal(service.bulk({ids: ['a'], action: 'loginLimit', value: ''}).proxies[0]!.loginsPerMinute, 0, '留空不限');
+	assert.throws(() => service.bulk({ids: [], action: 'enable'}), status(400, /没选代理/));
+	assert.throws(() => service.bulk({ids: ['a'], action: 'explode'}), status(400, /不认识的批量操作/));
+	assert.throws(() => service.bulk({ids: ['a'], action: 'addGroups', value: ['nope']}), status(404, /代理组不存在/));
+});
+
+test('代理组和绑定:账号绑定代理组、账户分组关联代理组(和账号自己的合在一起);删组退回代理池;分配代理每个账号一个', () => {
+	const groupOf: Record<string, string> = {charlie: 'ag1'};
+	const {service} = harness({proxies: [P('a'), P('b'), P('c')]}, {accountGroups: {groupOf: name => groupOf[name] ?? '', exists: id => id === 'ag1'}});
+	assert.throws(() => service.createGroup({name: '  '}), status(400, /不能为空/));
+	assert.throws(() => service.createGroup({name: 'x'.repeat(21)}), status(400, /最多 20 个字/));
+	assert.throws(() => service.createGroup({name: 'box', color: 'rainbow'}), status(400, /颜色不对/));
+	const {group, state} = service.createGroup({name: 'Box', color: 'blue', proxyIds: ['b']});
+	assert.deepEqual([group.name, group.color, state.proxies.find(proxy => proxy.id === 'b')!.groupIds], ['Box', 'blue', [group.id]]);
+	assert.throws(() => service.createGroup({name: 'BOX'}), status(409, /已经有叫「BOX」/));
+	assert.equal(service.updateGroup({id: group.id, name: '开箱', color: 'red'}).groups[0]!.name, '开箱');
+
+	service.bindAccounts({accountNames: ['Alpha'], mode: 'bind', groupIds: [group.id]});
+	assert.equal(service.proxyFor('alpha'), url('b'), '只用组里的');
+	assert.equal(service.proxyFor('bravo'), url('a'), '代理组里的代理不是专用的,池里照样有');
+	service.linkAccountGroup({accountGroupId: 'ag1', groupIds: [group.id]});
+	assert.equal(service.proxyFor('charlie'), url('b'), '账户分组关联的代理组');
+	service.bindAccounts({accountNames: ['charlie'], mode: 'bind', proxyIds: ['c']});
+	service.bulk({ids: ['b'], action: 'disable'});
+	assert.equal(service.proxyFor('charlie'), url('c'), '自己绑的和分组关联的合在一起');
+	assert.throws(() => service.linkAccountGroup({accountGroupId: 'nope', groupIds: []}), status(404, /账户分组不存在/));
+
+	const deleted = service.deleteGroup({id: group.id});
+	assert.deepEqual(deleted.accounts, {charlie: {mode: 'bind', proxyIds: ['c'], groupIds: []}}, '只绑了这个组的 alpha 退回代理池');
+	assert.deepEqual([deleted.accountGroups, deleted.groups, deleted.proxies.map(proxy => proxy.groupIds)], [{}, [], [[], [], []]]);
+
+	assert.throws(() => service.bindAccounts({accountNames: ['alpha'], mode: 'bind'}), status(400, /至少一个代理或代理组/));
+	assert.throws(() => service.bindAccounts({accountNames: ['alpha'], mode: 'bind', proxyIds: ['nope']}), status(404, /代理不存在/));
+	assert.throws(() => service.bindAccounts({accountNames: [], mode: 'pool'}), status(400, /没选账号/));
+	assert.throws(() => service.bindAccounts({accountNames: ['alpha'], mode: 'weird'}), status(400, /pool \/ direct \/ bind/));
+	assert.deepEqual(service.bindAccounts({accountNames: ['charlie', 'echo'], mode: 'direct'}).accounts, {charlie: {mode: 'direct'}, echo: {mode: 'direct'}});
+	assert.deepEqual(service.bindAccounts({accountNames: ['charlie'], mode: 'pool'}).accounts, {echo: {mode: 'direct'}});
+
+	service.bindAccounts({accountNames: ['golf'], mode: 'bind', proxyIds: ['a']});
+	const {pairs, accounts} = service.distributeProxies({accountNames: ['alpha', 'bravo', 'charlie'], proxyIds: ['a', 'b', 'c']});
+	assert.deepEqual(pairs, {alpha: 'b', bravo: 'c', charlie: 'a'}, '先给没被别的账号(golf)绑定的');
+	assert.deepEqual(accounts.alpha, {mode: 'bind', proxyIds: ['b'], groupIds: []});
+	assert.throws(() => service.distributeProxies({accountNames: ['alpha'], proxyIds: []}), status(400, /至少一个代理/));
+});
+
+test('检测:后台跑(先是「检查中」),回出口 IP、国家、延迟;轮换代理采样几次看换没换 IP;连不上、407、Steam 拒绝分别标出;测的时候改了连接方式结果不算', async () => {
 	let clock = 1000;
-	const {service, used} = harness({global: GLOBAL, accounts: {bravo: 'direct'}}, {now: () => (clock += 120)});
-	assert.deepEqual(await service.test({}), {
-		ip: '203.0.113.7', ms: 120, proxy: 'http://user-rotate:****@p.example.io:80', steam: {status: 200, ms: 120, error: ''}
-	});
-	assert.deepEqual((await service.test({proxy: '10.0.0.2:3128'})).proxy, 'http://10.0.0.2:3128');
-	assert.deepEqual(used, [GLOBAL, GLOBAL, 'http://10.0.0.2:3128', 'http://10.0.0.2:3128'], '查 IP、查 Steam 社区都走测的那个代理');
-	await assert.rejects(service.test({accountName: 'bravo'}), /这个账号现在不走代理/);
-	await assert.rejects(harness().service.test({}), /还没有设置代理/);
-	await assert.rejects(harness({global: globalOf(GLOBAL, {enabled: false})}).service.test({}), /全局代理没启用/);
-	await assert.rejects(service.test({proxy: 'socks5://h:1'}), /SOCKS/);
-
-	// 设置页上还没保存的各项:密码留空用存着的,关着也能测,不改设置
-	const tested = await service.test({enabled: false, protocol: 'http', host: 'q.example.io', port: 8080, type: 'static', username: 'user-rotate', password: ''});
-	assert.equal(tested.proxy, 'http://user-rotate:****@q.example.io:8080');
-	assert.equal(used.at(-1), 'http://user-rotate:secret@q.example.io:8080');
-	assert.equal(service.proxyFor(), GLOBAL, '测试不保存');
-	await assert.rejects(service.test({host: ''}), /请填写主机/);
-
-	const denied = harness({global: GLOBAL, accounts: {}}, {createProxyFetch: () => (async () => new Response('', {status: 407})) as typeof fetch}).service;
-	await assert.rejects(denied.test({}), (err: Error & {statusCode?: number}) => err.statusCode === 502 && /407\(代理账号或密码不对\)/.test(err.message));
-	const broken = harness({global: GLOBAL, accounts: {}}, {createProxyFetch: () => (async () => {
-		throw new TypeError('通过代理请求失败: connect ECONNREFUSED');
-	}) as typeof fetch}).service;
-	await assert.rejects(broken.test({}), /代理不通: 通过代理请求失败: connect ECONNREFUSED/);
-});
-
-test('轮换:每个账号这次运行固定一个编号(先挑没人用的),重新登录也不换;webshare 的 -rotate 换成 -编号;重启后重新分;单独设置的账号不受影响', async () => {
-	const picks = [0, 0.99, 0.5, 0.5];
-	let call = 0;
-	const random = () => picks[call++ % picks.length]!;
-	const {service, store, used} = harness({accounts: {echo: 'direct', fox: 'http://f:p@10.0.0.9:3128'}}, {random});
-	const rotating = {enabled: true, protocol: 'http', host: 'p.example.io', port: 80, type: 'rotating', username: 'user-rotate', password: 'secret', poolSize: 3};
-	const saved = service.setGlobal(rotating);
-	assert.deepEqual([saved.global, saved.sticky, saved.settings.username, saved.settings.poolSize], ['http://user-{n}:****@p.example.io:80', true, 'user-rotate', 3]);
-
-	assert.equal(service.proxyFor('alpha'), 'http://user-1:secret@p.example.io:80');
-	assert.equal(service.proxyFor('ALPHA'), 'http://user-1:secret@p.example.io:80', '记住了,一直是它');
-	assert.equal(service.proxyFor('bravo'), 'http://user-3:secret@p.example.io:80', '换个账号挑没人用的');
-	assert.equal(service.proxyFor('charlie'), 'http://user-2:secret@p.example.io:80');
-	assert.equal(service.proxyFor('delta'), 'http://user-2:secret@p.example.io:80', '都占满了只好重复');
-	assert.equal(service.proxyFor('echo'), '');
-	assert.equal(service.proxyFor('fox'), 'http://f:p@10.0.0.9:3128');
-	assert.deepEqual(service.publicConfig().assigned, {alpha: 1, bravo: 3, charlie: 2, delta: 2});
-	assert.ok(!('assigned' in store.saved()), '编号不存盘');
-
-	await service.fetch('https://store.steampowered.com/', {headers: cookie(BRAVO_ID)});
-	await service.fetch('https://steamcommunity.com/market/', {headers: cookie(BRAVO_ID)});
-	assert.deepEqual(used.slice(-2), ['http://user-3:secret@p.example.io:80', 'http://user-3:secret@p.example.io:80'], '同一个账号的请求都走它的编号');
-
-	// 改小 IP 数量:超出的下次用时重分,其它照旧
-	service.setGlobal({poolSize: 2});
-	assert.deepEqual(service.publicConfig().assigned, {alpha: 1, charlie: 2, delta: 2});
-	assert.match(service.proxyFor('bravo'), /user-[12]:/);
-
-	// 用户名里写 {n} 的(别家的会话编号)照用
-	service.setGlobal({username: 'sess-{n}-x'});
-	assert.equal(service.proxyFor('alpha'), 'http://sess-1-x:secret@p.example.io:80');
-
-	// 重启:编号重新分
-	call = 1;
-	const restarted = createProxyService({store, accountForSteamId: () => '', createProxyFetch: () => (async () => new Response('{}')) as typeof fetch, random});
-	assert.deepEqual(restarted.publicConfig().assigned, {});
-	assert.equal(restarted.proxyFor('alpha'), 'http://sess-2-x:secret@p.example.io:80', '重启后重新拿');
-
-	assert.throws(() => service.setAccount({accountName: 'gold', mode: 'custom', proxy: 'http://g-{n}:p@h:80'}), /不要带 \{n\}/);
-	await service.test({...rotating, host: 'h.example.io', username: 'u-rotate', password: 'p', poolSize: 1});
-	assert.equal(used.at(-1), 'http://u-1:p@h.example.io:80', '测试没保存的轮换代理随机挑池里一个编号');
-	await service.test({accountName: 'charlie'});
-	assert.equal(used.at(-1), 'http://sess-2-x:secret@p.example.io:80', '测账号就测它分到的那个');
-});
-
-test('轮换代理没填 IP 数量(旧版迁移来的):固定不了,照普通地址用', () => {
-	const {service} = harness({global: globalOf(GLOBAL, {type: 'rotating', poolSize: 0})});
-	assert.equal(service.proxyFor('alpha'), GLOBAL);
-	assert.equal(service.publicConfig().sticky, false);
-});
-
-test('测代理顺带打开 Steam 社区:429 照实回(这个 IP 被限流);社区打不开不算测试失败,写原因', async () => {
-	const requests: string[] = [];
-	const limited = harness({global: GLOBAL}, {
-		steamTestUrl: 'https://steamcommunity.com/market/',
-		createProxyFetch: () => (async (input: string, init: RequestInit) => {
-			requests.push(`${input} ${init.redirect ?? 'follow'} ${new Headers(init.headers).get('user-agent')?.includes('Chrome/') ?? false}`);
-			return String(input).includes('steamcommunity') ? new Response('Too Many Requests', {status: 429}) : new Response('{"ip":"203.0.113.8"}');
-		}) as unknown as typeof fetch
-	}).service;
-	const result = await limited.test({});
-	assert.deepEqual([result.ip, result.steam.status, result.steam.error], ['203.0.113.8', 429, '']);
-	assert.deepEqual(requests.slice(-1), ['https://steamcommunity.com/market/ manual true'], '不跟随跳转,带浏览器 UA');
-
-	const unreachable = harness({global: GLOBAL}, {
-		createProxyFetch: () => (async (input: string) => {
-			if (String(input).includes('steamcommunity')) {
-				throw new TypeError('通过代理请求失败: socket hang up');
+	let rotation = 0;
+	const seen: string[] = [];
+	const {service, store, usage} = harness({
+		proxies: [
+			P('s'),
+			P('r', {type: 'rotating'}),
+			P('w', {host: 'p.webshare.io', type: 'rotating', username: 'u-rotate', password: 'pw', poolSize: 5}),
+			P('dead'),
+			P('auth'),
+			P('blocked')
+		]
+	}, {
+		now: () => (clock += 50),
+		checkConcurrency: 1,
+		checkSaveDelayMs: 0,
+		testUrl: 'http://ip.test/',
+		steamHomeUrl: 'http://home.test/',
+		steamTestUrl: 'http://market.test/',
+		random: (() => {
+			const picks = [0, 0, 0.5, 0.99];
+			let call = 0;
+			return () => picks[call++ % picks.length]!;
+		})(),
+		createProxyFetch: (proxyUrl: string, options?: ProxyFetchOptions) => (async (input: string, init: RequestInit) => {
+			const target = String(input);
+			seen.push(`${proxyUrl} ${target} ${options?.keepAlive} ${init.redirect ?? 'follow'}`);
+			options?.onTraffic?.({url: target, sent: 1, received: 2});
+			if (proxyUrl.includes('dead')) {
+				throw new TypeError('通过代理请求失败: connect ECONNREFUSED');
 			}
-			return new Response('{"ip":"203.0.113.9"}');
+			if (target === 'http://ip.test/') {
+				if (proxyUrl.includes('auth')) {
+					return new Response('', {status: 407});
+				}
+				const ip = proxyUrl.includes('r.example') ? `198.51.100.${++rotation}` : proxyUrl.includes('webshare') ? `192.0.2.${/u-(\d+)/.exec(proxyUrl)![1]}` : '203.0.113.5';
+				return new Response(JSON.stringify({ip, country: 'us'}));
+			}
+			if (target === 'http://home.test/') {
+				return new Response('', {status: proxyUrl.includes('blocked') ? 403 : 200});
+			}
+			return new Response('Too Many Requests', {status: 429});
 		}) as unknown as typeof fetch
-	}).service;
-	const partial = await unreachable.test({});
-	assert.deepEqual([partial.ip, partial.steam.status, partial.steam.error], ['203.0.113.9', 0, '通过代理请求失败: socket hang up']);
+	});
+	const started = service.test({});
+	assert.ok(started.proxies.every(proxy => proxy.status === 'checking'));
+	await settle(service);
+	const byId = Object.fromEntries(service.state().proxies.map(proxy => [proxy.id, proxy]));
+	assert.deepEqual([byId.s!.status, byId.s!.check?.ip, byId.s!.check?.country, byId.s!.check?.samples, byId.s!.check?.ips, byId.s!.check?.market, byId.s!.check?.latencyMs],
+		['healthy', '203.0.113.5', 'US', 1, ['203.0.113.5'], 429, 50]);
+	assert.deepEqual([byId.r!.check?.samples, byId.r!.check?.ips.length], [3, 3], '轮换:每次新开连接,3 次 3 个 IP');
+	assert.deepEqual([byId.w!.check?.samples, byId.w!.check?.ips.length], [3, 3], '按账号固定 IP 的挑 3 个不同编号');
+	assert.deepEqual([byId.dead!.status, byId.dead!.check?.error], ['unreachable', '代理不通: 通过代理请求失败: connect ECONNREFUSED']);
+	assert.deepEqual([byId.auth!.status, byId.auth!.check?.error], ['unreachable', '代理账号或密码不对(HTTP 407)']);
+	assert.deepEqual([byId.blocked!.status, byId.blocked!.check?.error], ['blocked', 'Steam 社区回 HTTP 403']);
+	assert.equal(store.saved().proxies.find(proxy => proxy.id === 's')!.check?.status, 'healthy', '结果存盘');
+	assert.ok(seen.every(line => line.includes(' false ')), '检测每次新开连接');
+	assert.ok(seen.filter(line => line.includes('home.test') || line.includes('market.test')).every(line => line.endsWith(' manual')), 'Steam 页面不跟随跳转');
+	assert.ok(usage.some(entry => entry.kind === 'check' && entry.account === ''), '检测的流量也记上');
+
+	service.test({ids: ['s']});
+	service.updateProxy({id: 's', port: 9090});
+	await settle(service);
+	assert.equal(store.saved().proxies.find(proxy => proxy.id === 's')!.check, null, '测的时候改了端口,这次结果不算');
+	assert.throws(() => service.test({ids: ['nope']}), status(404, /代理不存在/));
+	assert.throws(() => harness().service.test({}), status(400, /还没有代理/));
+
+	// 编辑页上还没保存的:密码留空用存着的,不保存
+	const draft = await service.testDraft({id: 'w', host: 'q.example.io', password: ''});
+	assert.equal(draft.proxy.replace(/u-\d/, 'u-N'), 'http://u-N:****@q.example.io:8080');
+	assert.ok(seen.at(-1)!.startsWith('http://u-') && seen.at(-1)!.includes(':pw@q.example.io:8080'));
+	assert.equal(store.saved().proxies.find(proxy => proxy.id === 'w')!.host, 'p.webshare.io', '测试不保存');
 });
 
-test('登录速率限制:只管走全局代理的账号,超了排队;单独代理、不走代理、全局关着的不排;改限制马上生效', async () => {
+test('登录速率限制按代理算:经同一个代理的登录超了排队;不同代理、不走代理的不排;改限制马上生效', async () => {
 	let time = 0;
 	const timers: Array<{at: number; callback: () => void}> = [];
-	const {service} = harness({global: globalOf(GLOBAL, {loginsPerMinute: 1}), accounts: {echo: 'direct', fox: 'http://f:p@10.0.0.9:3128'}}, {
-		loginClock: {now: () => time, setTimer: (callback, ms) => timers.push({at: time + ms, callback}), clearTimer: () => {}}
-	});
+	const {service} = harness({
+		proxies: [P('a', {loginsPerMinute: 1}), P('c')],
+		accounts: {echo: {mode: 'direct'}, fox: {mode: 'bind', proxyIds: ['c'], groupIds: []}}
+	}, {loginClock: {now: () => time, setTimer: (callback, ms) => timers.push({at: time + ms, callback}), clearTimer: () => {}}});
 	assert.equal(service.queueLogin('alpha'), null, '这分钟第一次');
 	const bravo = service.queueLogin('bravo');
 	assert.equal(bravo?.waitMs, 60000, '第二次排队,等第一次出 60 秒窗口');
 	assert.equal(service.queueLogin('echo'), null, '不走代理的不排');
-	assert.equal(service.queueLogin('fox'), null, '单独代理的不排');
+	assert.equal(service.queueLogin('fox'), null, '别的代理(没限制)不排');
 
 	let started = false;
 	void bravo!.ready.then(() => (started = true));
-	service.setGlobal({loginsPerMinute: 2});
+	service.bulk({ids: ['a'], action: 'loginLimit', value: 2});
 	await Promise.resolve();
 	assert.ok(started, '放宽了马上放行');
-
-	service.setGlobal({loginsPerMinute: ''});
+	service.bulk({ids: ['a'], action: 'loginLimit', value: ''});
 	for (let index = 0; index < 5; index++) {
 		assert.equal(service.queueLogin('charlie'), null, '留空不限');
 	}
-	service.setGlobal({loginsPerMinute: 1, enabled: false});
-	assert.equal(service.queueLogin('alpha'), null, '全局代理关着时登录直连,不限');
 });

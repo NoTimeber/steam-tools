@@ -14,6 +14,7 @@ export interface ModuleEntry {
 
 export const MODULES: readonly ModuleEntry[] = [
 	{key: 'accounts', label: '账户管理', group: '账户', icon: 'users', view: () => import('./views/AccountsView.vue')},
+	{key: 'proxies', label: '代理管理', group: '账户', icon: 'globe', view: () => import('./views/ProxiesView.vue')},
 	{key: 'inventory', label: '库存管理', group: '账户', icon: 'package', view: () => import('./views/InventoryView.vue')},
 	{key: 'purchase', label: '内购任务', group: '交易', icon: 'cart', view: () => import('./views/PurchaseView.vue')},
 	{key: 'buygame', label: '买游戏', group: '交易', icon: 'gamepad', view: () => import('./views/BuyGameView.vue')},

@@ -20,6 +20,18 @@
 	--danger: #dc2626;
 	--info: #2563eb;
 	--shadow: 0 1px 2px rgba(9, 9, 11, 0.05);
+	/* 代理用量图的两个系列(已用 dataviz 的校验脚本查过色弱区分和对比度) */
+	--chart-sent: #2563eb;
+	--chart-received: #d97706;
+	/* 代理组的颜色(和名字一起显示,不单靠颜色区分) */
+	--g-amber: #eda100;
+	--g-blue: #2a78d6;
+	--g-green: #008300;
+	--g-red: #e34948;
+	--g-violet: #6250d6;
+	--g-cyan: #1baf7a;
+	--g-pink: #e87ba4;
+	--g-gray: #71717a;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -43,6 +55,16 @@
 		--danger: #f87171;
 		--info: #60a5fa;
 		--shadow: none;
+		--chart-sent: #3b82f6;
+		--chart-received: #d97706;
+		--g-amber: #c98500;
+		--g-blue: #3987e5;
+		--g-green: #008300;
+		--g-red: #e66767;
+		--g-violet: #9085e9;
+		--g-cyan: #199e70;
+		--g-pink: #d55181;
+		--g-gray: #a1a1aa;
 	}
 }
 
@@ -158,4 +180,31 @@ body {
 	border: 1px solid var(--line);
 	border-radius: 12px;
 	box-shadow: var(--shadow);
+}
+
+/* 代理组标签:色点 + 名字 */
+.group-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	max-width: 100%;
+	padding: 1px 8px;
+	border-radius: 999px;
+	background: var(--surface-2);
+	color: var(--text);
+	font-size: 12px;
+	line-height: 20px;
+	white-space: nowrap;
+}
+
+.group-chip > i {
+	flex: none;
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+}
+
+.group-chip > span {
+	overflow: hidden;
+	text-overflow: ellipsis;
 }

@@ -1,69 +1,117 @@
 /// <reference types="node" />
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import type {GlobalProxySettings, PublicProxyConfig} from '../api/types.ts';
-import {accountProxy, proxyHost, proxySummary, splitProxyUrl, steamCheckView} from './proxy.ts';
+import type {ProxyCheck, ProxyUsageReport, PublicProxy, PublicProxyState} from '../api/types.ts';
+import {
+	accountProxyView, accountsUsingGroup, activeProxyFilterCount, busiestDay, emptyProxyFilters, formatBytes, isSingleIpRotating, marketNote, matchesProxy,
+	poolProxies, proxyStats, sortProxies, splitProxyUrl, timeAgo, uniqueIpText, usageByGroup
+} from './proxy.ts';
 
-const settings = (extra: Partial<GlobalProxySettings> = {}): GlobalProxySettings => ({
-	enabled: true, protocol: 'http', host: 'p.example.io', port: 80, type: 'static', username: 'user-rotate', hasPassword: true, poolSize: 0, loginsPerMinute: 0, ...extra
+const check = (fields: Partial<ProxyCheck> = {}): ProxyCheck => ({
+	status: 'healthy', latencyMs: 300, ip: '203.0.113.1', country: 'US', ips: ['203.0.113.1'], samples: 1, market: 200, error: '', checkedAt: 1, ...fields
 });
 
-test('账号的代理:单独设置优先,没有跟全局,全局也没设(或关了)是直连', () => {
-	const config: PublicProxyConfig = {
-		global: 'http://user-rotate:****@p.example.io:80',
-		settings: settings(),
-		sticky: false,
-		assigned: {},
-		accounts: {alpha: {mode: 'custom', url: 'http://u:****@10.0.0.1:8080'}, bravo: {mode: 'direct', url: ''}}
+const proxy = (id: string, fields: Partial<PublicProxy> = {}): PublicProxy => ({
+	id, protocol: 'http', host: `${id}.example.io`, port: 8080, type: 'static', username: '', hasPassword: false, poolSize: 0, loginsPerMinute: 0,
+	enabled: true, notes: '', groupIds: [], createdAt: 1, check: null, endpoint: `${id}.example.io:8080`, sticky: false, status: 'untested', ...fields
+});
+
+const state = (fields: Partial<PublicProxyState> = {}): PublicProxyState => ({proxies: [], groups: [], accounts: {}, accountGroups: {}, assigned: {}, ...fields});
+
+test('字节数按 1000 进,时间显示多久以前', () => {
+	assert.deepEqual([0, 999, 1000, 10900000, 36200000, 275e6, 1.5e9].map(formatBytes), ['0 B', '999 B', '1 kB', '10.9 MB', '36.2 MB', '275 MB', '1.5 GB']);
+	const now = 10 * 86400000;
+	assert.deepEqual([now - 5000, now - 120000, now - 21 * 3600000, now - 86400000, now - 8 * 86400000, 0].map(time => timeAgo(time, now)),
+		['刚刚', '2 分钟前', '21 小时前', '1 天前', '1 周前', '—']);
+});
+
+test('检测结果:不同 IP、轮换但只有一个 IP、市场页有问题才标', () => {
+	assert.equal(uniqueIpText(check({samples: 3, ips: ['a', 'b', 'c']})), '3 次中有 3 个');
+	assert.equal(uniqueIpText(null), '—');
+	assert.ok(isSingleIpRotating(proxy('r', {type: 'rotating', check: check({samples: 3, ips: ['a']})})));
+	assert.ok(!isSingleIpRotating(proxy('r', {type: 'rotating', check: check({samples: 3, ips: ['a', 'b']})})));
+	assert.ok(!isSingleIpRotating(proxy('s', {check: check({samples: 3, ips: ['a']})})), '静态的本来就一个 IP');
+	assert.equal(marketNote(check({market: 429}))?.text, '市场 429');
+	assert.equal(marketNote(check({market: 0}))?.text, '市场打不开');
+	assert.equal(marketNote(check({market: 200})), null);
+	assert.equal(marketNote(check({status: 'unreachable', market: 0})), null, '连不上的不用再说市场');
+});
+
+test('统计、筛选、搜索、排序', () => {
+	const list = [
+		proxy('a', {status: 'healthy', check: check({latencyMs: 700}), groupIds: ['g1']}),
+		proxy('b', {status: 'blocked', type: 'rotating', check: check({status: 'blocked', samples: 3, ips: ['x'], latencyMs: 200}), enabled: false}),
+		proxy('c', {status: 'unreachable', protocol: 'https', check: check({status: 'unreachable'}), notes: '备用'}),
+		proxy('d')
+	];
+	assert.deepEqual(proxyStats(list), {total: 4, healthy: 1, failing: 2, untested: 1, enabled: 3});
+	const groups = new Map([['g1', '开箱']]);
+	const pick = (filters: Partial<ReturnType<typeof emptyProxyFilters>>, search = '') => list.filter(item => matchesProxy(item, {...emptyProxyFilters(), ...filters}, search, groups)).map(item => item.id);
+	assert.deepEqual(pick({status: 'blocked'}), ['b']);
+	assert.deepEqual(pick({protocol: 'https'}), ['c']);
+	assert.deepEqual(pick({group: 'g1'}), ['a']);
+	assert.deepEqual(pick({group: '-'}), ['b', 'c', 'd']);
+	assert.deepEqual(pick({enabled: 'no'}), ['b']);
+	assert.deepEqual(pick({singleIp: true}), ['b']);
+	assert.deepEqual(pick({}, '开箱'), ['a'], '搜代理组名');
+	assert.deepEqual(pick({}, '备用'), ['c'], '搜备注');
+	assert.equal(activeProxyFilterCount({...emptyProxyFilters(), status: 'healthy', singleIp: true}), 2);
+	assert.deepEqual(sortProxies(list, 'latency', 'ascend').map(item => item.id), ['b', 'a', 'c', 'd'], '没测过、连不上的排最后');
+	assert.deepEqual(sortProxies(list, 'endpoint', 'descend').map(item => item.id), ['d', 'c', 'b', 'a']);
+});
+
+test('账号的代理:不走代理、绑定的(自己的 + 账户分组关联的)、全停用、代理池、池空了直连', () => {
+	const base = state({
+		proxies: [proxy('a'), proxy('b', {groupIds: ['g1']}), proxy('c'), proxy('off', {enabled: false})],
+		groups: [{id: 'g1', name: '开箱', color: 'blue', createdAt: 1}],
+		accounts: {
+			echo: {mode: 'direct'},
+			fox: {mode: 'bind', proxyIds: ['c'], groupIds: []},
+			golf: {mode: 'bind', proxyIds: [], groupIds: ['g1']},
+			hotel: {mode: 'bind', proxyIds: ['off'], groupIds: []}
+		},
+		accountGroups: {ag1: ['g1']},
+		assigned: {alpha: {proxyId: 'a', index: 0}, golf: {proxyId: 'b', index: 7}}
+	});
+	assert.deepEqual(accountProxyView(base, 'Echo'), {mode: 'direct', label: '不走代理', tip: '这个账号单独设置了不走代理,Steam 请求直连'});
+	assert.deepEqual([accountProxyView(base, 'fox').mode, accountProxyView(base, 'fox').label], ['bind', '1 个代理']);
+	const golf = accountProxyView(base, 'golf');
+	assert.deepEqual([golf.label, golf.tip], ['开箱', '只用绑定的 1 个代理,1 个启用着;现在用 b.example.io:8080 的第 7 个 IP(重启后重新分)']);
+	assert.equal(accountProxyView(base, 'india', 'ag1').label, '开箱', '账户分组关联的代理组');
+	assert.match(accountProxyView(base, 'india', 'ag1').tip, /含账户分组关联的代理组 开箱/);
+	assert.deepEqual([accountProxyView(base, 'hotel').mode, accountProxyView(base, 'hotel').label], ['refused', '代理全停用']);
+	const alpha = accountProxyView(base, 'alpha');
+	assert.deepEqual([alpha.mode, alpha.label, alpha.tip], ['pool', '代理池', '从代理池的 2 个代理里分一个;现在用 a.example.io:8080(重启后重新分)']);
+	assert.deepEqual(poolProxies(base).map(item => item.id), ['a', 'b'], 'c 被 fox 单独绑定,off 停用了');
+	assert.deepEqual(accountProxyView(state(), 'alpha'), {mode: 'direct', label: '直连', tip: '还没有代理,Steam 请求直连'});
+	assert.equal(accountProxyView(state({proxies: [proxy('off', {enabled: false})]}), 'alpha').tip, '代理池里没有可用的代理(都停用了或被账号单独绑定了),Steam 请求直连');
+
+	const rows = [{key: 'golf', groupId: ''}, {key: 'india', groupId: 'ag1'}, {key: 'echo', groupId: 'ag1'}, {key: 'alpha', groupId: ''}];
+	assert.equal(accountsUsingGroup(base, 'g1', rows), 2, 'golf 自己绑的、india 分组关联的;echo 不走代理不算');
+});
+
+test('用量:按代理组汇总(没分组的单独一项),最忙的一天', () => {
+	const report: ProxyUsageReport = {
+		days: 2, since: '2026-10-16', until: '2026-10-17',
+		total: {requests: 3, sent: 30, received: 300},
+		byDay: [{day: '2026-10-16', requests: 1, sent: 10, received: 100}, {day: '2026-10-17', requests: 2, sent: 20, received: 200}],
+		byProxy: [{proxyId: 'a', requests: 2, sent: 20, received: 200}, {proxyId: 'gone', requests: 1, sent: 10, received: 100}],
+		byAccount: [], byKind: [], lastAt: 0, latestDay: '2026-10-17'
 	};
-	assert.deepEqual(accountProxy(config, 'Alpha'), {mode: 'custom', label: '10.0.0.1:8080', title: '单独代理:http://u:****@10.0.0.1:8080'});
-	assert.deepEqual(accountProxy(config, 'bravo'), {mode: 'direct', label: '不走代理', title: '这个账号单独设置了不走代理'});
-	assert.deepEqual(accountProxy(config, 'charlie'), {mode: 'global', label: '全局', title: '用全局代理:http://user-rotate:****@p.example.io:80'});
-	const off = accountProxy({...config, global: '', settings: settings({enabled: false}), accounts: {}}, 'charlie');
-	assert.deepEqual([off.label, off.title], ['直连', '全局代理已关闭,Steam 请求直连']);
-	assert.equal(accountProxy({...config, global: '', settings: settings({enabled: false, host: ''}), accounts: {}}, 'charlie').title, '没有设置全局代理,Steam 请求直连');
-});
-
-test('只留主机和端口', () => {
-	assert.equal(proxyHost('http://u:****@10.0.0.1:8080'), '10.0.0.1:8080');
-	assert.equal(proxyHost('https://proxy.example.io:443'), 'proxy.example.io:443');
-});
-
-test('轮换代理:显示这次运行分到的编号,没分到的写待分配', () => {
-	const config: PublicProxyConfig = {
-		global: 'http://user-{n}:****@p.example.io:80', settings: settings({type: 'rotating', poolSize: 100}), sticky: true, accounts: {}, assigned: {alpha: 23}
-	};
-	assert.deepEqual(accountProxy(config, 'Alpha'), {mode: 'global', label: '全局 #23', title: '轮换代理:固定用第 23 个 IP(http://user-23:****@p.example.io:80),重启后重新分'});
-	assert.equal(accountProxy(config, 'bravo').label, '全局 · 待分配');
-});
-
-test('运行设置页的代理状态:没设、关了、开着(轮换带 IP 数量和分配了几个账号,设了登录限制带上)', () => {
-	const base: PublicProxyConfig = {global: '', settings: settings({enabled: false, host: ''}), sticky: false, accounts: {}, assigned: {}};
-	assert.equal(proxySummary(base), '未设置');
-	assert.equal(proxySummary({...base, settings: settings({enabled: false})}), '已关闭(p.example.io:80 · 静态)');
-	assert.equal(proxySummary({...base, settings: settings({loginsPerMinute: 3})}), 'p.example.io:80 · 静态 · 登录每分钟 3 次');
-	assert.equal(
-		proxySummary({...base, settings: settings({type: 'rotating', poolSize: 100}), sticky: true, assigned: {alpha: 3, bravo: 9, '': 1}}),
-		'p.example.io:80 · 轮换 · 100 个 IP,已分配 2 个账号'
-	);
-	assert.equal(proxySummary({...base, settings: settings({type: 'rotating'})}), 'p.example.io:80 · 轮换 · 没填 IP 数量,没按账号固定', '旧版迁移来还没填');
+	const groups = [{id: 'g1', name: '开箱', color: 'blue', createdAt: 1}, {id: 'g2', name: '备用', color: 'red', createdAt: 1}];
+	assert.deepEqual(usageByGroup(report, [proxy('a', {groupIds: ['g1', 'g2']})], groups), [
+		{groupId: 'g1', name: '开箱', color: 'blue', proxies: 1, bytes: 220},
+		{groupId: 'g2', name: '备用', color: 'red', proxies: 1, bytes: 220},
+		{groupId: '', name: '未分组', color: '', proxies: 1, bytes: 110}
+	]);
+	assert.equal(busiestDay(report)?.day, '2026-10-17');
+	assert.equal(busiestDay({...report, byDay: [{day: 'x', requests: 0, sent: 0, received: 0}]}), null);
 });
 
 test('粘贴的整串代理地址拆成各项:账号密码解码,{n} 原样,没写端口按协议默认;不像地址的不拆', () => {
-	assert.deepEqual(splitProxyUrl(' http://kxk-rotate:p%40ss@p.webshare.io:80 '), {protocol: 'http', host: 'p.webshare.io', port: 80, username: 'kxk-rotate', password: 'p@ss'});
-	assert.deepEqual(splitProxyUrl('https://kxk-{n}:pw@P.Example.io'), {protocol: 'https', host: 'p.example.io', port: 443, username: 'kxk-{n}', password: 'pw'});
-	assert.deepEqual(splitProxyUrl('u:pw@10.0.0.1:3128'), {protocol: 'http', host: '10.0.0.1', port: 3128, username: 'u', password: 'pw'});
-	assert.equal(splitProxyUrl('p.webshare.io'), null, '只是主机就不拆');
-	assert.equal(splitProxyUrl('socks5://h:1080'), null, 'SOCKS 不拆,保存时服务端报不支持');
-	assert.equal(splitProxyUrl('http://'), null);
-});
-
-test('测试结果里的 Steam 社区市场:429 说明市场、库存请求会被拒,2xx/3xx 正常,打不开写原因', () => {
-	const limited = steamCheckView({status: 429, ms: 300, error: ''});
-	assert.deepEqual([limited.type, limited.text], ['warning', '市场 429,市场和库存用不了']);
-	assert.match(limited.detail, /登录、商店、手机确认不受影响/);
-	assert.deepEqual(steamCheckView({status: 200, ms: 512, error: ''}), {type: 'success', text: '市场正常', detail: 'Steam 社区市场 HTTP 200,512 ms'});
-	assert.equal(steamCheckView({status: 302, ms: 1, error: ''}).type, 'success');
-	assert.deepEqual(steamCheckView({status: 503, ms: 1, error: ''}), {type: 'warning', text: '市场 HTTP 503', detail: 'Steam 社区市场回 HTTP 503'});
-	assert.deepEqual(steamCheckView({status: 0, ms: 15000, error: '超时(15 秒)'}), {type: 'error', text: '市场打不开', detail: 'Steam 社区市场打不开:超时(15 秒)'});
+	assert.deepEqual(splitProxyUrl('http://kxk-rotate:p%40ss@p.webshare.io:80'), {protocol: 'http', host: 'p.webshare.io', port: 80, username: 'kxk-rotate', password: 'p@ss'});
+	assert.deepEqual(splitProxyUrl('user-{n}:pw@h.example.io:8000'), {protocol: 'http', host: 'h.example.io', port: 8000, username: 'user-{n}', password: 'pw'});
+	assert.deepEqual(splitProxyUrl('https://h.example.io'), {protocol: 'https', host: 'h.example.io', port: 443, username: '', password: ''});
+	assert.equal(splitProxyUrl('p.webshare.io'), null);
+	assert.equal(splitProxyUrl('socks5://h:1080'), null);
 });

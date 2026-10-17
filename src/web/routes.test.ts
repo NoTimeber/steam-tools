@@ -107,7 +107,7 @@ function registerAll(overrides: {
 	return table;
 }
 
-test('路由表:拆分前 app/server.js 注册的全部保留,另加新版前端用的 /api/accounts/upsert、/api/accounts/history、账户分组、/api/proxy/*', () => {
+test('路由表:拆分前 app/server.js 注册的全部保留,另加新版前端用的 /api/accounts/upsert、/api/accounts/history、账户分组、代理管理 /api/proxies/*', () => {
 	const purchaseAliases = ['purchase', 'cs2', 'tf2'].flatMap(prefix => [
 		`GET /api/${prefix}/online-accounts`,
 		`GET /api/${prefix}/items`,
@@ -132,7 +132,10 @@ test('路由表:拆分前 app/server.js 注册的全部保留,另加新版前端
 		'POST /api/uu/list/auto', 'POST /api/uu/list/scan', 'POST /api/uu/poll-interval', 'POST /api/uu/login/start',
 		'POST /api/uu/login/verify', 'POST /api/uu/login/cancel', 'POST /api/uu/token/acquire', 'GET /api/uu/tokens', 'DELETE /api/uu/token',
 		'POST /api/wallet/redeem',
-		'GET /api/proxy', 'POST /api/proxy/global', 'POST /api/proxy/account', 'POST /api/proxy/test'
+		'GET /api/proxies', 'POST /api/proxies/create', 'POST /api/proxies/update', 'POST /api/proxies/delete', 'POST /api/proxies/bulk',
+		'POST /api/proxies/import', 'POST /api/proxies/test', 'POST /api/proxies/test-draft',
+		'POST /api/proxies/groups/create', 'POST /api/proxies/groups/update', 'POST /api/proxies/groups/delete',
+		'POST /api/proxies/accounts/bind', 'POST /api/proxies/accounts/distribute', 'POST /api/proxies/account-groups/link', 'GET /api/proxies/usage'
 	];
 	assert.deepEqual([...registerAll().keys()].sort(), [...expected].sort());
 });

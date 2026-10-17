@@ -97,54 +97,95 @@ test('maFile 与 session:加密存取、按账号名不区分大小写', () => {
 	store.close();
 });
 
-test('代理设置:没存过是空的;加密存取,代理密码不明文落盘', () => {
+/** 直接写一份旧版(1.6.8–1.6.15)格式的代理设置,模拟升级前存下的 */
+function writeLegacyProxy(store: Store, value: unknown): void {
+	store.settings.set('proxy.config', store.vault.encryptJson(value, 'proxy.config'));
+}
+
+/** 去掉随机的 id 和创建时间,比较其它各项 */
+function withoutIds(config: ReturnType<Store['proxies']['load']>) {
+	const ids = new Map(config.proxies.map((proxy, index) => [proxy.id, `#${index}`]));
+	return {
+		proxies: config.proxies.map(({id: _id, createdAt: _at, ...rest}) => rest),
+		accounts: Object.fromEntries(Object.entries(config.accounts).map(([key, binding]) => [key, binding.mode === 'bind'
+			? {...binding, proxyIds: binding.proxyIds.map(id => ids.get(id))}
+			: binding]))
+	};
+}
+
+const migratedProxy = (fields: Record<string, unknown>) => ({
+	protocol: 'http', host: '', port: 0, type: 'static', username: '', password: '', poolSize: 0, loginsPerMinute: 0,
+	enabled: true, notes: '', groupIds: [], check: null, ...fields
+});
+
+test('代理池:没存过是空的;加密存取(代理密码不明文落盘);指向不存在的代理、代理组的引用读的时候去掉', () => {
 	const {store, dir} = freshStore();
-	const empty = {enabled: false, protocol: 'http', host: '', port: 0, type: 'rotating', username: '', password: '', poolSize: 0, loginsPerMinute: 0} as const;
-	assert.deepEqual(store.proxies.load(), {global: empty, accounts: {}});
-	const config = {
-		global: {enabled: true, protocol: 'http', host: 'p.example.io', port: 80, type: 'rotating', username: 'user-rotate', password: 'PROXY-PLAINTEXT', poolSize: 100, loginsPerMinute: 5},
-		accounts: {alpha: 'direct', bravo: 'http://u:p@1.2.3.4:8080'}
+	assert.deepEqual(store.proxies.load(), {proxies: [], groups: [], accounts: {}, accountGroups: {}});
+	const proxy = {
+		id: 'p1', protocol: 'http', host: 'p.example.io', port: 80, type: 'rotating', username: 'user-rotate', password: 'PROXY-PLAINTEXT',
+		poolSize: 100, loginsPerMinute: 5, enabled: true, notes: '备注', groupIds: ['g1', 'gone'], createdAt: 1700000000000,
+		check: {status: 'healthy', latencyMs: 300, ip: '203.0.113.1', country: 'US', ips: ['203.0.113.1'], samples: 3, market: 429, error: '', checkedAt: 1700000001000}
 	} as const;
-	store.proxies.save(structuredClone(config) as never);
-	assert.deepEqual(store.proxies.load(), config);
+	store.proxies.save({
+		proxies: [structuredClone(proxy) as never],
+		groups: [{id: 'g1', name: '开箱', color: 'blue', createdAt: 1}],
+		accounts: {alpha: {mode: 'direct'}, bravo: {mode: 'bind', proxyIds: ['p1', 'gone'], groupIds: []}, charlie: {mode: 'bind', proxyIds: ['gone'], groupIds: []}},
+		accountGroups: {ag1: ['g1', 'gone'], ag2: ['gone']}
+	});
+	assert.deepEqual(store.proxies.load(), {
+		proxies: [{...proxy, groupIds: ['g1'], check: {...proxy.check, ips: ['203.0.113.1']}}],
+		groups: [{id: 'g1', name: '开箱', color: 'blue', createdAt: 1}],
+		accounts: {alpha: {mode: 'direct'}, bravo: {mode: 'bind', proxyIds: ['p1'], groupIds: []}},
+		accountGroups: {ag1: ['g1']}
+	});
 	assert.ok(!dbBytes(dir).includes('PROXY-PLAINTEXT'), '代理密码不能明文落盘');
 	store.close();
 });
 
-test('代理设置:1.6.8–1.6.10 存的整串全局地址拆成各项(开着、轮换;带 {n} 的 IP 数量取编号范围结束值),旧的编号不再读,账号设置照旧', () => {
+test('代理池迁移:1.6.8–1.6.10 的整串全局地址变成池里一个轮换代理(带 {n} 的 IP 数量取编号范围结束值);账号的单独代理变成绑定给它的静态代理', () => {
 	const {store} = freshStore();
-	const old = (global: string) => ({global, range: {from: 2, to: 9}, accounts: {alpha: 'direct'}, assigned: {bravo: 3}});
-	store.proxies.save(old('http://kxk-rotate:p%40ss%3Aword@p.webshare.io:80') as never);
-	assert.deepEqual(store.proxies.load(), {
-		global: {enabled: true, protocol: 'http', host: 'p.webshare.io', port: 80, type: 'rotating', username: 'kxk-rotate', password: 'p@ss:word', poolSize: 0, loginsPerMinute: 0},
-		accounts: {alpha: 'direct'}
+	writeLegacyProxy(store, {
+		global: 'https://kxk-{n}:p%40ss%3Aword@P.Example.io:8443',
+		range: {from: 2, to: 9},
+		accounts: {Alpha: 'direct', bravo: 'http://u:p@1.2.3.4:8080', charlie: 'http://u:p@1.2.3.4:8080', delta: 'global', echo: 'not a url::'},
+		assigned: {bravo: 3}
 	});
-	store.proxies.save(old('https://kxk-{n}:pw@P.Example.io:8443') as never);
-	assert.deepEqual(store.proxies.load().global, {enabled: true, protocol: 'https', host: 'p.example.io', port: 8443, type: 'rotating', username: 'kxk-{n}', password: 'pw', poolSize: 9, loginsPerMinute: 0});
-	store.proxies.save(old('10.0.0.1:3128') as never);
-	assert.deepEqual(store.proxies.load().global, {enabled: true, protocol: 'http', host: '10.0.0.1', port: 3128, type: 'rotating', username: '', password: '', poolSize: 0, loginsPerMinute: 0});
-	store.proxies.save(old('') as never);
-	assert.equal(store.proxies.load().global.enabled, false, '没设过的还是没设');
-	assert.equal(store.proxies.load().global.host, '');
+	const first = store.proxies.load();
+	assert.deepEqual(withoutIds(first), {
+		proxies: [
+			migratedProxy({protocol: 'https', host: 'p.example.io', port: 8443, type: 'rotating', username: 'kxk-{n}', password: 'p@ss:word', poolSize: 9, notes: '原来的全局代理'}),
+			migratedProxy({host: '1.2.3.4', port: 8080, username: 'u', password: 'p', notes: '原来 bravo 的单独代理'})
+		],
+		accounts: {alpha: {mode: 'direct'}, bravo: {mode: 'bind', proxyIds: ['#1'], groupIds: []}, charlie: {mode: 'bind', proxyIds: ['#1'], groupIds: []}}
+	});
+	assert.deepEqual(store.proxies.load(), first, '迁移后马上按新格式存了,id 不再变');
+
+	writeLegacyProxy(store, {global: '10.0.0.1:3128', accounts: {}});
+	assert.deepEqual(withoutIds(store.proxies.load()).proxies, [migratedProxy({host: '10.0.0.1', port: 3128, type: 'rotating', notes: '原来的全局代理'})]);
+	writeLegacyProxy(store, {global: 'http://u-{n}:p@h.example.io:80', accounts: {}});
+	assert.equal(store.proxies.load().proxies[0]!.poolSize, 1, '带 {n} 没有编号范围的(旧版用编号 1):IP 数量记 1');
+	writeLegacyProxy(store, {global: '', accounts: {}});
+	assert.deepEqual(store.proxies.load().proxies, [], '没设过的还是没有');
 	store.close();
 });
 
-test('代理设置:1.6.11 的「按账号固定 IP」并进轮换(IP 数量取编号范围结束值),静态照旧', () => {
+test('代理池迁移:1.6.11 起按各项存的全局代理(关着的照样关着;「按账号固定 IP」并进轮换,IP 数量取编号范围结束值)', () => {
 	const {store} = freshStore();
-	const v1611 = (type: string) => ({
-		global: {enabled: true, protocol: 'http', host: 'p.webshare.io', port: 80, type, username: 'kxk-{n}', password: 'pw', loginsPerMinute: 3},
+	const legacy = (fields: Record<string, unknown>) => ({
+		global: {enabled: true, protocol: 'http', host: 'p.webshare.io', port: 80, type: 'rotating', username: 'kxk-rotate', password: 'pw', loginsPerMinute: 3, ...fields},
 		range: {from: 1, to: 50},
 		accounts: {},
 		assigned: {alpha: 7}
 	});
-	store.proxies.save(v1611('sticky') as never);
-	assert.deepEqual(store.proxies.load(), {
-		global: {enabled: true, protocol: 'http', host: 'p.webshare.io', port: 80, type: 'rotating', username: 'kxk-{n}', password: 'pw', poolSize: 50, loginsPerMinute: 3},
-		accounts: {}
-	});
-	assert.deepEqual([store.proxies.load().global.type, store.proxies.load().global.poolSize], ['rotating', 50]);
-	store.proxies.save(v1611('static') as never);
-	assert.deepEqual([store.proxies.load().global.type, store.proxies.load().global.poolSize], ['static', 0]);
+	const webshare = {host: 'p.webshare.io', port: 80, type: 'rotating', username: 'kxk-rotate', password: 'pw', loginsPerMinute: 3, notes: '原来的全局代理'};
+	writeLegacyProxy(store, legacy({type: 'sticky', username: 'kxk-{n}'}));
+	assert.deepEqual(withoutIds(store.proxies.load()).proxies, [migratedProxy({...webshare, username: 'kxk-{n}', poolSize: 50})]);
+	writeLegacyProxy(store, legacy({poolSize: 100, enabled: false}));
+	assert.deepEqual(withoutIds(store.proxies.load()).proxies, [migratedProxy({...webshare, poolSize: 100, enabled: false})]);
+	writeLegacyProxy(store, legacy({type: 'static'}));
+	assert.deepEqual(withoutIds(store.proxies.load()).proxies, [migratedProxy({...webshare, type: 'static'})]);
+	writeLegacyProxy(store, legacy({host: ''}));
+	assert.deepEqual(store.proxies.load().proxies, [], '没填主机的当没设');
 	store.close();
 });
 

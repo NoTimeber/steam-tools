@@ -142,5 +142,23 @@ export const MIGRATIONS: readonly Migration[] = [
 			);
 			CREATE INDEX idx_account_group_members_group ON account_group_members (group_id);
 		`
+	},
+	{
+		version: 5,
+		name: 'proxy-usage',
+		sql: `
+			-- 代理用量:经代理的 Steam 网页请求按天(UTC)、代理、账号、请求类型累计次数和收发字节(估算)。
+			-- account 是账号名小写,'' 为认不出账号的请求;kind 见 src/proxy/usage.ts。只留最近 90 天。
+			CREATE TABLE proxy_usage (
+				day      TEXT NOT NULL,
+				proxy_id TEXT NOT NULL,
+				account  TEXT NOT NULL,
+				kind     TEXT NOT NULL,
+				requests INTEGER NOT NULL DEFAULT 0,
+				sent     INTEGER NOT NULL DEFAULT 0,
+				received INTEGER NOT NULL DEFAULT 0,
+				PRIMARY KEY (day, proxy_id, account, kind)
+			);
+		`
 	}
 ];

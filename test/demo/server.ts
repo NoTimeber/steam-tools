@@ -10,9 +10,12 @@
 // UU 发货:「获取 Token」用短信登录,手机号随便填 11 位、验证码随便填,拿到的演示 token 在 UU 侧绑定的是 alpha 的 SteamID。
 // C5 扫货:app-key 随便填(bad 开头的会被拒);假平台有 500 元余额和四个箱子的在售,每次查行情可能在原价附近补货;
 // 绑了两个 Steam 账号:alpha(登录后自动取交易链接)和一个交易助手(选它时要贴交易链接)。
+// 代理管理:演示里有个假代理 127.0.0.1:<PORT+1>(DEMO_PROXY_PORT 可改;用户名、密码随便填,用户名以 -rotate 结尾的每次连接换出口 IP),
+// 检测能过(出口 IP 是假的,Steam 市场页回 429);经它的 Steam 网页请求会失败(假代理不转发 HTTPS)。
 // 删掉那个目录就回到初始状态。端口 PORT、口令 APP_PASSWORD 可改。前端要先在 web/ 下构建(npm run build),开发时用 web/ 下的 npm run dev。
 
 import {spawn} from 'node:child_process';
+import http from 'node:http';
 import {existsSync, mkdirSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
@@ -66,6 +69,30 @@ writeFileSync(c5ScenarioFile, JSON.stringify({
 
 const port = process.env.PORT || '53110';
 const password = process.env.APP_PASSWORD || 'demo-password';
+
+// 假代理:检测时查出口 IP、打开 Steam 社区首页 / 市场页都是普通 HTTP 请求(下面的 PROXY_* 地址),由它直接回;HTTPS(CONNECT)一律拒绝
+const proxyPort = Number(process.env.DEMO_PROXY_PORT) || Number(port) + 1;
+let rotation = 0;
+const fakeProxy = http.createServer((req, res) => {
+	const url = String(req.url);
+	const auth = Buffer.from(String(req.headers['proxy-authorization'] ?? '').replace(/^Basic /, ''), 'base64').toString();
+	const user = auth.split(':')[0] ?? '';
+	if (url.startsWith('http://steam.demo.test/market/')) {
+		res.writeHead(429).end('Too Many Requests');
+	} else if (url.startsWith('http://steam.demo.test/')) {
+		res.writeHead(200, {'content-type': 'text/html'}).end('<html></html>');
+	} else {
+		// 每个「用户名-编号」一个固定 IP;-rotate 每次换一个
+		const index = /-rotate$/.test(user) ? ++rotation : Number(/-(\d+)$/.exec(user)?.[1] ?? 0);
+		res.writeHead(200, {'content-type': 'application/json'}).end(JSON.stringify({ip: `198.51.100.${(index % 250) + 1}`, country: 'US'}));
+	}
+});
+fakeProxy.on('connect', (_req, socket) => {
+	socket.on('error', () => {});
+	socket.end('HTTP/1.1 403 Forbidden\r\n\r\n');
+});
+fakeProxy.listen(proxyPort, '127.0.0.1');
+
 const child = spawn(process.execPath, ['--require', join(REPO_ROOT, 'test', 'e2e', 'support', 'offline-preload.cjs'), join(REPO_ROOT, 'src', 'main.ts')], {
 	cwd: REPO_ROOT,
 	stdio: 'inherit',
@@ -80,12 +107,18 @@ const child = spawn(process.execPath, ['--require', join(REPO_ROOT, 'test', 'e2e
 		FAKE_STEAM_LOG: join(root, 'fake-steam.log'),
 		FAKE_UU_FILE: uuScenarioFile,
 		FAKE_C5_FILE: c5ScenarioFile,
+		PROXY_TEST_URL: 'http://ip.demo.test/',
+		PROXY_STEAM_HOME_URL: 'http://steam.demo.test/',
+		PROXY_STEAM_TEST_URL: 'http://steam.demo.test/market/',
 		UPDATE_CHECK: '0'
 	}
 });
-console.log(`[demo] 离线演示服务 http://127.0.0.1:${port} 口令 ${password} 数据 ${root}`);
+console.log(`[demo] 离线演示服务 http://127.0.0.1:${port} 口令 ${password} 数据 ${root};假代理 127.0.0.1:${proxyPort}`);
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
-	process.on(signal, () => child.kill(signal));
+	process.on(signal, () => {
+		fakeProxy.close();
+		child.kill(signal);
+	});
 }
 child.on('exit', code => process.exit(code ?? 0));
