@@ -121,5 +121,26 @@ export const MIGRATIONS: readonly Migration[] = [
 			);
 			CREATE INDEX idx_c5_purchases_mode_status ON c5_purchases (mode, status);
 		`
+	},
+	{
+		version: 4,
+		name: 'account-groups',
+		sql: `
+			-- 账户分组(账户管理里用户自己建的)。position 保持显示顺序,名字不分大小写不重复。
+			CREATE TABLE account_groups (
+				id         TEXT PRIMARY KEY,
+				name       TEXT NOT NULL COLLATE NOCASE UNIQUE,
+				position   INTEGER NOT NULL,
+				updated_at TEXT NOT NULL
+			);
+
+			-- 账号在哪个分组(一个账号最多一个)。单独一张表:名单整表替换时不丢;删分组时连带删掉。
+			CREATE TABLE account_group_members (
+				account_key TEXT PRIMARY KEY,
+				group_id    TEXT NOT NULL REFERENCES account_groups (id) ON DELETE CASCADE,
+				updated_at  TEXT NOT NULL
+			);
+			CREATE INDEX idx_account_group_members_group ON account_group_members (group_id);
+		`
 	}
 ];

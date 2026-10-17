@@ -25,7 +25,7 @@ export interface PublicAttempt {
 	logs?: Array<{level: string; time: string; message: string}>;
 }
 
-/** 名单里的账号(src/accounts/profiles.ts 的 publicStoredAccount;不含密码) */
+/** 名单里的账号(src/accounts/groups.ts 的 publicAccounts;不含密码) */
 export interface StoredAccount {
 	id: string;
 	accountName: string;
@@ -40,6 +40,20 @@ export interface StoredAccount {
 	hasWallet: boolean;
 	activeGame: string;
 	source: string;
+	/** 所在分组的 id,未分组为 '' */
+	groupId: string;
+}
+
+/** 用户建的账户分组(src/store/account-groups.ts) */
+export interface AccountGroup {
+	id: string;
+	name: string;
+}
+
+/** 分组改动后返回的最新分组和名单 */
+export interface AccountGroupState {
+	groups: AccountGroup[];
+	accounts: StoredAccount[];
 }
 
 /** 账号资料(maFile、会话缓存;src/accounts/profiles.ts 的 publicAccountProfile) */

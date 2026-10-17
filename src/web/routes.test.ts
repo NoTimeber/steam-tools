@@ -107,7 +107,7 @@ function registerAll(overrides: {
 	return table;
 }
 
-test('路由表:拆分前 app/server.js 注册的全部保留,另加新版前端用的 /api/accounts/upsert、/api/accounts/history、/api/proxy/*', () => {
+test('路由表:拆分前 app/server.js 注册的全部保留,另加新版前端用的 /api/accounts/upsert、/api/accounts/history、账户分组、/api/proxy/*', () => {
 	const purchaseAliases = ['purchase', 'cs2', 'tf2'].flatMap(prefix => [
 		`GET /api/${prefix}/online-accounts`,
 		`GET /api/${prefix}/items`,
@@ -117,6 +117,7 @@ test('路由表:拆分前 app/server.js 注册的全部保留,另加新版前端
 	const expected = [
 		'GET /api/health', 'GET /api/update/status', 'POST /api/update/check',
 		'GET /api/attempts', 'GET /api/accounts/list', 'POST /api/accounts/list', 'POST /api/accounts/upsert', 'POST /api/accounts/meta', 'POST /api/mafile/import',
+		'POST /api/accounts/groups', 'POST /api/accounts/groups/:id', 'DELETE /api/accounts/groups/:id', 'POST /api/accounts/group-order', 'POST /api/accounts/group-members',
 		'POST /api/auth-code', 'POST /api/login', 'POST /api/login-refresh', 'POST /api/guard/:id', 'POST /api/web-session/:id',
 		'POST /api/logout/:id', 'POST /api/accounts/cleanup', 'POST /api/accounts/history', 'GET /api/accounts/history', 'POST /api/gc/connect/:id', 'POST /api/gc/disconnect/:id', 'GET /api/cookies/:id',
 		'GET /api/inventory/:id',

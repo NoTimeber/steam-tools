@@ -1,12 +1,12 @@
-// 账户列表:服务端名单(GET /api/accounts/list,不含密码)+ 账号资料(maFile、会话缓存)+ 实时会话(/api/attempts 和 attempt:update 推送)。
+// 账户列表:服务端名单(GET /api/accounts/list,不含密码,带分组)+ 账号资料(maFile、会话缓存)+ 实时会话(/api/attempts 和 attempt:update 推送)。
 // 名单以服务端为准,浏览器里不存账号和密码。其它模块(库存、内购……)也从这里拿账号状态。
 
 import {computed, reactive} from 'vue';
 import {api, errorText} from '../api/http.ts';
 import {socket} from '../api/socket.ts';
-import type {AccountProfile, GameId, PublicAttempt, PublicHistory, StoredAccount} from '../api/types.ts';
-import {ACCOUNT_GROUPS, accountGroup, collapseAttemptStatus, lastErrorMessage, parseAccountText} from '../lib/accounts.ts';
-import type {AccountGroup, LoginStatus} from '../lib/accounts.ts';
+import type {AccountGroup, AccountGroupState, AccountProfile, GameId, PublicAttempt, PublicHistory, StoredAccount} from '../api/types.ts';
+import {ALL_ACCOUNTS, NO_GROUP, STATUS_GROUPS, collapseAttemptStatus, lastErrorMessage, matchesGroupFilter, parseAccountText, statusGroup} from '../lib/accounts.ts';
+import type {LoginStatus, StatusGroup} from '../lib/accounts.ts';
 import {addLog} from './logs.ts';
 
 export interface AccountRow {
@@ -21,6 +21,8 @@ export interface AccountRow {
 	balance: number | null;
 	currency: number | null;
 	hasWallet: boolean;
+	/** 所在分组的 id,未分组为 '' */
+	groupId: string;
 	status: LoginStatus;
 	attemptId: string;
 	cs2GcConnected: boolean;
@@ -38,6 +40,10 @@ const state = reactive({
 	loading: false,
 	error: '',
 	selected: new Set<string>(),
+	/** 用户建的分组(按显示顺序) */
+	groups: [] as AccountGroup[],
+	/** 表格只显示哪个分组的账号(ALL_ACCOUNTS / NO_GROUP / 分组 id) */
+	groupFilter: ALL_ACCOUNTS,
 	/** 正在等 Steam Guard 验证码的会话 */
 	guard: null as null | {attemptId: string; accountName: string; type: string; domain: string; lastCodeWrong: boolean}
 });
@@ -56,6 +62,7 @@ function rowFromStored(stored: StoredAccount, previous?: AccountRow): AccountRow
 		balance: previous ? previous.balance : stored.balance,
 		currency: previous ? previous.currency : stored.currency,
 		hasWallet: previous ? previous.hasWallet : stored.hasWallet,
+		groupId: stored.groupId || '',
 		status: previous?.status ?? '未登录',
 		attemptId: previous?.attemptId ?? '',
 		cs2GcConnected: previous?.cs2GcConnected ?? false,
@@ -71,15 +78,28 @@ function findRow(name: string): AccountRow | undefined {
 	return state.rows.find(row => row.key === key);
 }
 
-/** 用服务端名单替换列表;已有行的运行态(登录状态、GC)保留 */
-function applyList(list: StoredAccount[]): void {
-	const previous = new Map(state.rows.map(row => [row.key, row]));
-	state.rows = list.map(stored => rowFromStored(stored, previous.get(stored.accountName.toLowerCase())));
-	const keys = new Set(state.rows.map(row => row.key));
+/** 勾选只留表格里看得到的(删掉的、筛掉的、移到别的分组的都去掉),免得批量操作动到看不见的账号 */
+function pruneSelection(): void {
+	const keys = new Set(visibleRows.value.map(row => row.key));
 	for (const key of [...state.selected]) {
 		if (!keys.has(key)) {
 			state.selected.delete(key);
 		}
+	}
+}
+
+/** 用服务端名单替换列表;已有行的运行态(登录状态、GC)保留 */
+function applyList(list: StoredAccount[]): void {
+	const previous = new Map(state.rows.map(row => [row.key, row]));
+	state.rows = list.map(stored => rowFromStored(stored, previous.get(stored.accountName.toLowerCase())));
+	pruneSelection();
+}
+
+/** 分组改了:正在筛的分组被删掉时回到全部 */
+function applyGroups(groups: AccountGroup[]): void {
+	state.groups = groups;
+	if (state.groupFilter !== ALL_ACCOUNTS && state.groupFilter !== NO_GROUP && !groups.some(group => group.id === state.groupFilter)) {
+		state.groupFilter = ALL_ACCOUNTS;
 	}
 }
 
@@ -88,7 +108,8 @@ function applyList(list: StoredAccount[]): void {
 export async function loadAccounts(): Promise<void> {
 	state.loading = true;
 	try {
-		const data = await api.get<{accounts: StoredAccount[]}>('/api/accounts/list');
+		const data = await api.get<{accounts: StoredAccount[]; groups?: AccountGroup[]}>('/api/accounts/list');
+		applyGroups(data.groups || []);
 		applyList(data.accounts || []);
 		state.error = '';
 		state.loaded = true;
@@ -228,27 +249,84 @@ export function startAccounts(): void {
 
 // ===== 派生 =====
 
-export interface AccountGroupView {
-	key: AccountGroup;
+export interface StatusGroupView {
+	key: StatusGroup;
 	title: string;
 	rows: AccountRow[];
 }
 
-/** 按分组排好的行(GC 已连接 → 在线 → 未在线),序号按这个顺序从 1 开始 */
-export const groupedAccounts = computed<AccountGroupView[]>(() => {
-	const byGroup: Record<AccountGroup, AccountRow[]> = {gc: [], online: [], offline: []};
-	for (const row of state.rows) {
-		byGroup[accountGroup(row)].push(row);
+/** 当前分组筛选下表格里显示的账号 */
+export const visibleRows = computed(() => state.rows.filter(row => matchesGroupFilter(row, state.groupFilter)));
+
+/** 显示的账号按状态排好(GC 已连接 → 在线 → 未在线),序号按这个顺序从 1 开始 */
+export const statusGroups = computed<StatusGroupView[]>(() => {
+	const byStatus: Record<StatusGroup, AccountRow[]> = {gc: [], online: [], offline: []};
+	for (const row of visibleRows.value) {
+		byStatus[statusGroup(row)].push(row);
 	}
-	return ACCOUNT_GROUPS.map(group => ({key: group.key, title: group.title, rows: byGroup[group.key]}));
+	return STATUS_GROUPS.map(group => ({key: group.key, title: group.title, rows: byStatus[group.key]}));
 });
 
 /** 显示顺序的扁平列表(按序号勾选用) */
-export const orderedAccounts = computed(() => groupedAccounts.value.flatMap(group => group.rows));
+export const orderedAccounts = computed(() => statusGroups.value.flatMap(group => group.rows));
 
 export const onlineCount = computed(() => state.rows.filter(row => row.status === '登录成功').length);
 
 export const selectedRows = computed(() => state.rows.filter(row => state.selected.has(row.key)));
+
+// ===== 分组 =====
+
+export function setGroupFilter(filter: string): void {
+	state.groupFilter = filter;
+	pruneSelection();
+}
+
+export function groupName(groupId: string): string {
+	return state.groups.find(group => group.id === groupId)?.name ?? '';
+}
+
+function applyGroupState(result: AccountGroupState): void {
+	applyGroups(result.groups);
+	applyList(result.accounts);
+}
+
+/** 新建分组(排在最后);给了账号就顺便移进去。出错抛给界面 */
+export async function createGroup(name: string, rows: readonly AccountRow[] = []): Promise<AccountGroup> {
+	const result = await api.post<AccountGroupState & {group: AccountGroup}>('/api/accounts/groups', {name, accountNames: rows.map(row => row.accountName)});
+	applyGroupState(result);
+	addLog('success', rows.length ? `已新建分组「${result.group.name}」,移入 ${rows.length} 个账户` : `已新建分组「${result.group.name}」`);
+	return result.group;
+}
+
+export async function renameGroup(id: string, name: string): Promise<void> {
+	applyGroupState(await api.post<AccountGroupState>(`/api/accounts/groups/${encodeURIComponent(id)}`, {name}));
+}
+
+/** 删分组:组里的账号变成未分组 */
+export async function deleteGroup(id: string): Promise<void> {
+	const name = groupName(id);
+	applyGroupState(await api.delete<AccountGroupState>(`/api/accounts/groups/${encodeURIComponent(id)}`));
+	addLog('success', `已删除分组「${name}」`);
+}
+
+export async function reorderGroups(ids: string[]): Promise<void> {
+	applyGroupState(await api.post<AccountGroupState>('/api/accounts/group-order', {ids}));
+}
+
+/** 把账号移到分组,groupId 为 '' 移出分组;返回成没成功(失败记日志) */
+export async function moveToGroup(rows: readonly AccountRow[], groupId: string): Promise<boolean> {
+	if (!rows.length) {
+		return true;
+	}
+	try {
+		applyGroupState(await api.post<AccountGroupState>('/api/accounts/group-members', {accountNames: rows.map(row => row.accountName), groupId}));
+		addLog('success', groupId ? `已把 ${rows.length} 个账户移到分组「${groupName(groupId)}」` : `已把 ${rows.length} 个账户移出分组`);
+		return true;
+	} catch (err) {
+		addLog('error', `移动分组失败: ${errorText(err)}`);
+		return false;
+	}
+}
 
 // ===== 导入 =====
 

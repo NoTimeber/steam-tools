@@ -1,8 +1,11 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
+import {migrate, openDatabase} from '../core/db.ts';
 import type {Attempt} from '../steam/session-manager.ts';
+import {createAccountGroupStore} from '../store/account-groups.ts';
 import {normalizeStoredAccount} from '../store/accounts.ts';
 import type {AccountStore, StoredAccount} from '../store/accounts.ts';
+import {MIGRATIONS} from '../store/schema.ts';
 import {createCountryLookup} from './country.ts';
 import {createAccountService, createProfiles, resolveAccountCountry} from './index.ts';
 import {findStoredAccount, mergeClientAccountSecrets, publicStoredAccount} from './profiles.ts';
@@ -202,8 +205,11 @@ function service(accounts: unknown[] = [], files: Record<string, unknown> = {}, 
 	const w = world(files, mafiles, {alpha: {refreshToken: 'RT-saved'}});
 	const sessions = fakeSessions();
 	const accountStore = memoryAccounts(accounts);
+	const db = openDatabase(':memory:');
+	migrate(db, MIGRATIONS);
+	const groupStore = createAccountGroupStore(db);
 	const svc = createAccountService({
-		store: {accounts: accountStore, mafiles: w.store.mafiles, sessions: w.store.sessions},
+		store: {accounts: accountStore, groups: groupStore, mafiles: w.store.mafiles, sessions: w.store.sessions},
 		sessions: sessions as never,
 		profiles: w.profiles,
 		totp: {generateAuthCode: secret => {
@@ -217,7 +223,7 @@ function service(accounts: unknown[] = [], files: Record<string, unknown> = {}, 
 		sleep: async () => {},
 		logger: {warn() {}}
 	});
-	return {svc, sessions, accountStore, ...w};
+	return {svc, sessions, accountStore, groupStore, ...w};
 }
 
 test('密码登录:没传密码用名单里的;maFile 的 shared_secret 自动生成令牌;在线时复用,force 才重登', () => {
@@ -348,6 +354,60 @@ test('导入(upsert):按账号名合并,不动其它账号;已有账号只覆盖
 	assert.deepEqual(svc.restoreCredentials('alpha')?.password, 'pw-a');
 	assert.deepEqual(svc.restoreCredentials('alpha')?.profile.sharedSecret, 'SS-new');
 	assert.throws(() => svc.upsertAccounts({accounts: [{accountName: ''}]}), (err: Error & {statusCode?: number}) => err.statusCode === 400);
+});
+
+test('分组:名字去空白、不能空、不超过 20 字、不分大小写不重名;新建可顺便移入账号(名单里没有的忽略)', () => {
+	const {svc} = service([{accountName: 'Alpha'}, {accountName: 'bravo'}, {accountName: 'charlie'}]);
+	const status = (run: () => unknown) => {
+		try {
+			run();
+		} catch (err) {
+			return (err as {statusCode?: number}).statusCode;
+		}
+		return 200;
+	};
+	assert.equal(status(() => svc.createGroup({name: '  '})), 400);
+	assert.equal(status(() => svc.createGroup({name: '一'.repeat(21)})), 400);
+	const created = svc.createGroup({name: '  主号   一组 ', accountNames: ['ALPHA', 'zulu', 'alpha']});
+	assert.equal(created.group.name, '主号 一组');
+	assert.deepEqual(created.groups, [created.group]);
+	assert.deepEqual(created.accounts.map(a => [a.accountName, a.groupId]), [['Alpha', created.group.id], ['bravo', ''], ['charlie', '']]);
+	assert.ok(!('password' in created.accounts[0]!), '下发不含密码');
+	assert.equal(status(() => svc.createGroup({name: '主号 一组'})), 409);
+	const vault = svc.createGroup({name: 'Vault'}).group;
+	assert.equal(status(() => svc.renameGroup(vault.id, {name: '主号 一组'})), 409);
+	assert.equal(svc.renameGroup(vault.id, {name: 'VAULT'}).groups[1]!.name, 'VAULT', '只改大小写不算重名');
+	assert.equal(status(() => svc.renameGroup('nope', {name: 'x'})), 404);
+	assert.equal(svc.createGroup({name: '一'.repeat(20)}).groups.length, 3);
+});
+
+test('分组:移入移出、排序、删分组(账号变未分组);名单接口带分组;删账号清掉分组', () => {
+	const {svc} = service([{accountName: 'alpha'}, {accountName: 'bravo'}, {accountName: 'charlie'}]);
+	const main = svc.createGroup({name: '主号'}).group;
+	const spare = svc.createGroup({name: '备用'}).group;
+	const groupOf = (accounts: Array<{accountName: string; groupId: string}>) => Object.fromEntries(accounts.map(a => [a.accountName, a.groupId]));
+
+	assert.deepEqual(groupOf(svc.moveToGroup({accountNames: ['alpha', 'BRAVO'], groupId: main.id}).accounts), {alpha: main.id, bravo: main.id, charlie: ''});
+	assert.deepEqual(groupOf(svc.moveToGroup({accountNames: ['bravo'], groupId: spare.id}).accounts), {alpha: main.id, bravo: spare.id, charlie: ''});
+	assert.deepEqual(groupOf(svc.moveToGroup({accountNames: ['alpha'], groupId: ''}).accounts), {alpha: '', bravo: spare.id, charlie: ''});
+	assert.throws(() => svc.moveToGroup({accountNames: ['alpha'], groupId: 'nope'}), (err: Error & {statusCode?: number}) => err.statusCode === 404);
+	assert.throws(() => svc.moveToGroup({accountNames: ['zulu'], groupId: main.id}), (err: Error & {statusCode?: number}) => err.statusCode === 400);
+
+	assert.deepEqual(svc.reorderGroups({ids: [spare.id]}).groups.map(g => g.name), ['备用', '主号']);
+	const listed = svc.listAccounts();
+	assert.deepEqual(listed.groups.map(g => g.name), ['备用', '主号']);
+	assert.equal(groupOf(listed.accounts).bravo, spare.id);
+	assert.equal(groupOf(svc.saveAccounts({accounts: [{accountName: 'bravo'}, {accountName: 'charlie'}]}).accounts).bravo, spare.id, '整表替换后分组还在');
+
+	const afterDelete = svc.deleteGroup(spare.id);
+	assert.deepEqual(afterDelete.groups.map(g => g.name), ['主号']);
+	assert.equal(groupOf(afterDelete.accounts).bravo, '');
+	assert.throws(() => svc.deleteGroup(spare.id), (err: Error & {statusCode?: number}) => err.statusCode === 404);
+
+	svc.moveToGroup({accountNames: ['charlie'], groupId: main.id});
+	svc.cleanup({accounts: [{accountName: 'charlie'}]});
+	const readded = svc.upsertAccounts({accounts: [{accountName: 'charlie', password: 'pw'}]});
+	assert.equal(groupOf(readded.accounts).charlie, '', '删掉再导入的账号是未分组');
 });
 
 test('消费记录:只读名单里的账号;没网页会话 409;在线账号用会话的 cookie 在后台读', async () => {

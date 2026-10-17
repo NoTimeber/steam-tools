@@ -1,11 +1,21 @@
-// 账户列表的纯逻辑(不依赖 Vue,单元测试直接用 node 跑):登录状态归并、导入文本解析、余额显示、按序号勾选。
+// 账户列表的纯逻辑(不依赖 Vue,单元测试直接用 node 跑):登录状态归并、导入文本解析、余额显示、按序号勾选、按分组筛选、
+// 搜索和粘贴账号列表匹配。
 // 规则照搬旧版前端。
 
 export type LoginStatus = '未登录' | '登录中' | '登录成功' | '登录失败';
-export type AccountGroup = 'gc' | 'online' | 'offline';
+/** 表格里按状态分的几段(和用户自己建的「分组」不是一回事) */
+export type StatusGroup = 'gc' | 'online' | 'offline';
 
-/** 分组从上到下的显示顺序 */
-export const ACCOUNT_GROUPS: ReadonlyArray<{key: AccountGroup; title: string}> = [
+/** 登录状态标签的颜色(Naive 的 NTag type) */
+export const STATUS_TAG: Readonly<Record<LoginStatus, 'success' | 'warning' | 'error' | 'default'>> = {
+	登录成功: 'success',
+	登录中: 'warning',
+	登录失败: 'error',
+	未登录: 'default'
+};
+
+/** 状态段从上到下的显示顺序 */
+export const STATUS_GROUPS: ReadonlyArray<{key: StatusGroup; title: string}> = [
 	{key: 'gc', title: 'GC 已连接'},
 	{key: 'online', title: '在线'},
 	{key: 'offline', title: '未在线'}
@@ -35,11 +45,92 @@ export function collapseAttemptStatus(status: string, previous: LoginStatus): Lo
 	}
 }
 
-export function accountGroup(row: {status: LoginStatus; cs2GcConnected: boolean; tf2GcConnected: boolean}): AccountGroup {
+export function statusGroup(row: {status: LoginStatus; cs2GcConnected: boolean; tf2GcConnected: boolean}): StatusGroup {
 	if (row.cs2GcConnected || row.tf2GcConnected) {
 		return 'gc';
 	}
 	return row.status === '登录成功' ? 'online' : 'offline';
+}
+
+// ===== 用户建的分组 =====
+
+/** 分组筛选:ALL_ACCOUNTS 全部,NO_GROUP 未分组,其它是分组 id */
+export const ALL_ACCOUNTS = '';
+export const NO_GROUP = '-';
+
+export function matchesGroupFilter(row: {groupId: string}, filter: string): boolean {
+	if (filter === ALL_ACCOUNTS) {
+		return true;
+	}
+	return filter === NO_GROUP ? !row.groupId : row.groupId === filter;
+}
+
+export interface GroupFilterOption {
+	value: string;
+	label: string;
+	count: number;
+}
+
+/** 筛选项:全部、各分组(按分组顺序)、未分组(有分组时才列) */
+export function groupFilterOptions(groups: ReadonlyArray<{id: string; name: string}>, rows: ReadonlyArray<{groupId: string}>): GroupFilterOption[] {
+	const counts = new Map<string, number>();
+	for (const row of rows) {
+		counts.set(row.groupId, (counts.get(row.groupId) ?? 0) + 1);
+	}
+	const options: GroupFilterOption[] = [{value: ALL_ACCOUNTS, label: '全部', count: rows.length}];
+	if (groups.length) {
+		options.push(...groups.map(group => ({value: group.id, label: group.name, count: counts.get(group.id) ?? 0})));
+		options.push({value: NO_GROUP, label: '未分组', count: counts.get('') ?? 0});
+	}
+	return options;
+}
+
+/** 分组 id 列表里把 id 往前(-1)或往后(+1)挪一位;到头了原样返回 */
+export function moveGroupId(ids: readonly string[], id: string, delta: -1 | 1): string[] {
+	const order = [...ids];
+	const from = order.indexOf(id);
+	const to = from + delta;
+	if (from < 0 || to < 0 || to >= order.length) {
+		return order;
+	}
+	[order[from], order[to]] = [order[to]!, order[from]!];
+	return order;
+}
+
+/** 搜索:账号名或 SteamID 包含关键词(不分大小写);空关键词都算 */
+export function matchesSearch(row: {accountName: string; steamID: string}, query: string): boolean {
+	const q = query.trim().toLowerCase();
+	return !q || row.accountName.toLowerCase().includes(q) || row.steamID.includes(q);
+}
+
+/** 粘贴的账号列表:空格、逗号、分号、换行分隔(中英文标点都认),不分大小写去重 */
+export function parseNameList(text: string): string[] {
+	const seen = new Set<string>();
+	const names: string[] = [];
+	for (const token of text.split(/[\s,，;；、]+/u)) {
+		if (token && !seen.has(token.toLowerCase())) {
+			seen.add(token.toLowerCase());
+			names.push(token);
+		}
+	}
+	return names;
+}
+
+/** 粘贴的列表按账号名(不分大小写)或 SteamID 对上名单里的账号;对不上的原样列出 */
+export function matchNameList<T extends {accountName: string; steamID: string}>(text: string, rows: readonly T[]): {matched: T[]; missing: string[]} {
+	const byName = new Map(rows.map(row => [row.accountName.toLowerCase(), row]));
+	const bySteamId = new Map(rows.filter(row => row.steamID).map(row => [row.steamID, row]));
+	const matched = new Set<T>();
+	const missing: string[] = [];
+	for (const name of parseNameList(text)) {
+		const row = byName.get(name.toLowerCase()) ?? bySteamId.get(name);
+		if (row) {
+			matched.add(row);
+		} else {
+			missing.push(name);
+		}
+	}
+	return {matched: [...matched], missing};
 }
 
 export interface ImportedAccount {

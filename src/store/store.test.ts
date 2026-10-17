@@ -215,3 +215,38 @@ test('登录意图:设在线/离线、按账号名不区分大小写、删除', 
 	assert.deepEqual(store.loginIntents.listOnline(), []);
 	store.close();
 });
+
+test('账户分组:新建排最后、改名、排序;成员移入移出;名单整表替换不丢分组;删分组连带清掉成员;重开库还在', () => {
+	const {store, dir, key} = freshStore();
+	const groups = store.groups;
+	assert.deepEqual(groups.list(), []);
+	const main = groups.create('主号');
+	const vault = groups.create('仓库');
+	const spare = groups.create('备用');
+	assert.deepEqual(groups.list().map(g => g.name), ['主号', '仓库', '备用']);
+	assert.throws(() => groups.create('主号'), '库里也挡重名');
+
+	assert.equal(groups.rename(vault.id, '仓库号'), true);
+	assert.equal(groups.rename('nope', 'x'), false);
+	groups.reorder([spare.id, 'nope', main.id, spare.id]);
+	assert.deepEqual(groups.list().map(g => g.name), ['备用', '主号', '仓库号'], '列到的在前,没列到的按原来顺序排后面');
+
+	store.accounts.replaceAll([{accountName: 'Alice'}, {accountName: 'bob'}, {accountName: 'carol'}]);
+	groups.assign(['ALICE', ' bob ', ''], main.id);
+	groups.assign(['carol'], vault.id);
+	groups.assign(['bob'], '');
+	assert.deepEqual([...groups.members()].sort(), [['alice', main.id], ['carol', vault.id]]);
+
+	store.accounts.replaceAll([{accountName: 'carol'}, {accountName: 'alice'}]);
+	assert.equal(groups.members().get('alice'), main.id, '名单整表替换后分组还在');
+
+	assert.equal(groups.remove(main.id), true);
+	assert.equal(groups.remove(main.id), false);
+	assert.deepEqual([...groups.members()], [['carol', vault.id]]);
+	store.close();
+
+	const again = openStore({dataDir: dir, defaultKeyFile: join(dir, 'unused.key'), env: {MASTER_KEY: key.toString('base64')}, logger: silent});
+	assert.deepEqual(again.groups.list().map(g => g.name), ['备用', '仓库号']);
+	assert.equal(again.groups.members().get('carol'), vault.id);
+	again.close();
+});

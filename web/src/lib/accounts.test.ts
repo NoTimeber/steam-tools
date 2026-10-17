@@ -1,7 +1,10 @@
 /// <reference types="node" />
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {accountGroup, collapseAttemptStatus, formatBalance, lastErrorMessage, padSeq, parseAccountText, resolveSeqRange} from './accounts.ts';
+import {
+	ALL_ACCOUNTS, NO_GROUP, collapseAttemptStatus, formatBalance, groupFilterOptions, lastErrorMessage, matchNameList, matchesGroupFilter, matchesSearch,
+	moveGroupId, padSeq, parseAccountText, parseNameList, resolveSeqRange, statusGroup
+} from './accounts.ts';
 
 test('登录状态归并:登录成功后的重连过程仍显示登录成功', () => {
 	assert.equal(collapseAttemptStatus('web_session', '未登录'), '登录成功');
@@ -14,10 +17,53 @@ test('登录状态归并:登录成功后的重连过程仍显示登录成功', (
 	assert.equal(collapseAttemptStatus('weird', '登录成功'), '未登录');
 });
 
-test('分组:任一 GC 连着算 GC 组,其次看登录成功', () => {
-	assert.equal(accountGroup({status: '登录成功', cs2GcConnected: false, tf2GcConnected: true}), 'gc');
-	assert.equal(accountGroup({status: '登录成功', cs2GcConnected: false, tf2GcConnected: false}), 'online');
-	assert.equal(accountGroup({status: '登录中', cs2GcConnected: false, tf2GcConnected: false}), 'offline');
+test('状态段:任一 GC 连着算 GC 段,其次看登录成功', () => {
+	assert.equal(statusGroup({status: '登录成功', cs2GcConnected: false, tf2GcConnected: true}), 'gc');
+	assert.equal(statusGroup({status: '登录成功', cs2GcConnected: false, tf2GcConnected: false}), 'online');
+	assert.equal(statusGroup({status: '登录中', cs2GcConnected: false, tf2GcConnected: false}), 'offline');
+});
+
+test('分组筛选:全部、按分组、未分组;筛选项带人数,没有分组时只有「全部」', () => {
+	const rows = [{groupId: 'g1'}, {groupId: ''}, {groupId: 'g1'}, {groupId: 'gone'}];
+	assert.equal(rows.filter(row => matchesGroupFilter(row, ALL_ACCOUNTS)).length, 4);
+	assert.equal(rows.filter(row => matchesGroupFilter(row, 'g1')).length, 2);
+	assert.equal(rows.filter(row => matchesGroupFilter(row, NO_GROUP)).length, 1);
+	assert.deepEqual(groupFilterOptions([], rows), [{value: ALL_ACCOUNTS, label: '全部', count: 4}]);
+	assert.deepEqual(groupFilterOptions([{id: 'g2', name: '仓库'}, {id: 'g1', name: '主号'}], rows), [
+		{value: ALL_ACCOUNTS, label: '全部', count: 4},
+		{value: 'g2', label: '仓库', count: 0},
+		{value: 'g1', label: '主号', count: 2},
+		{value: NO_GROUP, label: '未分组', count: 1}
+	]);
+});
+
+test('搜索:账号名不分大小写包含,或 SteamID 包含;空关键词都算', () => {
+	const row = {accountName: 'Alpha_01', steamID: '76561190000000011'};
+	assert.equal(matchesSearch(row, ' alpha '), true);
+	assert.equal(matchesSearch(row, '0000011'), true);
+	assert.equal(matchesSearch(row, 'bravo'), false);
+	assert.equal(matchesSearch(row, '  '), true);
+});
+
+test('粘贴账号列表:空格、逗号、分号、换行(含中文标点)分隔,不分大小写去重;按账号名或 SteamID 对上,对不上的列出来', () => {
+	assert.deepEqual(parseNameList(' a, b，c;d；e、f\n\tg  A\r\n'), ['a', 'b', 'c', 'd', 'e', 'f', 'g']);
+	assert.deepEqual(parseNameList(' \n , '), []);
+	const rows = [
+		{accountName: 'Alpha', steamID: '7656001'},
+		{accountName: 'bravo', steamID: ''},
+		{accountName: 'charlie', steamID: '7656003'}
+	];
+	const result = matchNameList('ALPHA 7656001 bravo zulu, 7656003\n7656999', rows);
+	assert.deepEqual(result.matched.map(row => row.accountName), ['Alpha', 'bravo', 'charlie'], '同一个账号按名字和 SteamID 都对上只算一次');
+	assert.deepEqual(result.missing, ['zulu', '7656999']);
+});
+
+test('分组排序:上移下移一位,到头不动', () => {
+	assert.deepEqual(moveGroupId(['a', 'b', 'c'], 'b', -1), ['b', 'a', 'c']);
+	assert.deepEqual(moveGroupId(['a', 'b', 'c'], 'b', 1), ['a', 'c', 'b']);
+	assert.deepEqual(moveGroupId(['a', 'b', 'c'], 'a', -1), ['a', 'b', 'c']);
+	assert.deepEqual(moveGroupId(['a', 'b', 'c'], 'c', 1), ['a', 'b', 'c']);
+	assert.deepEqual(moveGroupId(['a'], 'x', 1), ['a']);
 });
 
 test('导入文本:账号----密码,跳过空行和 # 注释;格式错的行号一起报', () => {

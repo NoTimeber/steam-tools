@@ -5,6 +5,8 @@ import {migrate, openDatabase} from '../core/db.ts';
 import type {Db} from '../core/db.ts';
 import {createVault, loadMasterKey, VaultError} from '../core/vault.ts';
 import type {Vault} from '../core/vault.ts';
+import {createAccountGroupStore} from './account-groups.ts';
+import type {AccountGroupStore} from './account-groups.ts';
 import {createAccountStore} from './accounts.ts';
 import type {AccountStore} from './accounts.ts';
 import {createC5Store} from './c5.ts';
@@ -52,6 +54,7 @@ export interface Store {
 	vault: Vault;
 	settings: SettingsStore;
 	accounts: AccountStore;
+	groups: AccountGroupStore;
 	mafiles: MaFileStore;
 	sessions: SteamSessionStore;
 	uu: UuStore;
@@ -88,6 +91,7 @@ export function openStore(options: OpenStoreOptions): Store {
 		}
 
 		const accounts = createAccountStore(db, vault, settings);
+		const groups = createAccountGroupStore(db);
 		const mafiles = createMaFileStore(db, vault);
 		const sessions = createSteamSessionStore(db, vault);
 		const uu = createUuStore(db, vault, settings);
@@ -104,6 +108,7 @@ export function openStore(options: OpenStoreOptions): Store {
 			vault,
 			settings,
 			accounts,
+			groups,
 			mafiles,
 			sessions,
 			uu,

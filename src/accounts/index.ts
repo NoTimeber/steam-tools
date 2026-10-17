@@ -1,4 +1,4 @@
-// 账号与登录(从 app/server.js 移来):账户名单同步、账号资料、maFile 导入、令牌验证码、
+// 账号与登录(从 app/server.js 移来):账户名单同步、分组、账号资料、maFile 导入、令牌验证码、
 // 登录(密码 / refreshToken)、Steam Guard、WebSession、登出、删除账号、连接/断开 GC,以及重启后自动恢复登录要的凭据。
 // 路由在 ./routes.ts;会话管理、加密库、推送由 src/main.ts 注入,单元测试用假的。
 
@@ -9,15 +9,18 @@ import {gameConfig, normalizeGame} from '../steam/games.ts';
 import {disconnectGameSession, ensureGameSession} from '../steam/gc-client.ts';
 import {safeName} from '../steam/session-manager.ts';
 import type {Attempt, AttemptProfile, RestoreCredentials, SessionManager} from '../steam/session-manager.ts';
+import type {AccountGroupStore} from '../store/account-groups.ts';
 import {normalizeStoredAccount} from '../store/accounts.ts';
 import type {AccountStore, StoredAccount} from '../store/accounts.ts';
 import type {MaFileStore} from '../store/mafiles.ts';
 import type {SteamSessionStore} from '../store/steam-sessions.ts';
 import {createCountryLookup} from './country.ts';
+import {createAccountGroups} from './groups.ts';
+import type {AccountGroup, PublicAccount} from './groups.ts';
 import {createPurchaseHistory} from './history.ts';
 import type {PublicHistory} from './history.ts';
-import {findStoredAccount, mergeClientAccountSecrets, publicAccountProfile, publicStoredAccount} from './profiles.ts';
-import type {Profiles, PublicProfile, PublicStoredAccount} from './profiles.ts';
+import {findStoredAccount, mergeClientAccountSecrets, publicAccountProfile} from './profiles.ts';
+import type {Profiles, PublicProfile} from './profiles.ts';
 
 export {createProfiles, publicAccountProfile, resolveAccountCountry} from './profiles.ts';
 export type {LocalProfile, Profiles} from './profiles.ts';
@@ -41,7 +44,7 @@ type Sessions = Pick<SessionManager, 'attempts' | 'list' | 'activeAttemptFor' | 
 	| 'logout' | 'removeAccounts' | 'saveSession' | 'addLog' | 'emit' | 'publicAttempt'>;
 
 export interface AccountServiceOptions {
-	store: {accounts: AccountStore; mafiles: Pick<MaFileStore, 'put'>; sessions: Pick<SteamSessionStore, 'get' | 'remove'>};
+	store: {accounts: AccountStore; groups: AccountGroupStore; mafiles: Pick<MaFileStore, 'put'>; sessions: Pick<SteamSessionStore, 'get' | 'remove'>};
 	sessions: Sessions;
 	profiles: Profiles;
 	totp?: Totp;
@@ -74,6 +77,7 @@ export function createAccountService(options: AccountServiceOptions) {
 		sleep: options.sleep,
 		now
 	});
+	const groups = createAccountGroups(store);
 
 	function attemptById(id: unknown): Attempt {
 		const attempt = sessions.attempts.get(String(id));
@@ -103,19 +107,19 @@ export function createAccountService(options: AccountServiceOptions) {
 	// ===== 账户名单(多浏览器同步)=====
 
 	/** initialized:服务端写没写过名单。前端据此决定是否把本地旧名单迁上来,免得已删的账号被旧浏览器推回来 */
-	function listAccounts(): {initialized: boolean; accounts: PublicStoredAccount[]} {
+	function listAccounts(): {initialized: boolean; accounts: PublicAccount[]; groups: AccountGroup[]} {
 		try {
-			return {initialized: store.accounts.isInitialized(), accounts: store.accounts.list().map(publicStoredAccount)};
+			return {initialized: store.accounts.isInitialized(), accounts: groups.publicAccounts(), groups: store.groups.list()};
 		} catch (err) {
 			throw accountError(500, errorText(err) || '读取账户名单失败');
 		}
 	}
 
 	/** 整表替换(前端推的是完整名单);空的密钥字段沿用服务端已存的 */
-	function saveAccounts(body: {accounts?: unknown}): {accounts: PublicStoredAccount[]} {
+	function saveAccounts(body: {accounts?: unknown}): {accounts: PublicAccount[]} {
 		try {
 			const list = Array.isArray(body.accounts) ? body.accounts : [];
-			return {accounts: store.accounts.replaceAll(mergeClientAccountSecrets(store.accounts, list)).map(publicStoredAccount)};
+			return {accounts: groups.publicAccounts(store.accounts.replaceAll(mergeClientAccountSecrets(store.accounts, list)))};
 		} catch (err) {
 			throw accountError(500, errorText(err) || '保存账户名单失败');
 		}
@@ -125,7 +129,7 @@ export function createAccountService(options: AccountServiceOptions) {
 	 * 导入(新版前端用):按账号名合并进名单,不动名单里的其它账号。已有的账号只覆盖非空的密码/shared_secret,
 	 * hasMaFile 只会被置上;新账号追加到末尾。旧前端整表替换(saveAccounts),两个界面同时开着时会互相覆盖。
 	 */
-	function upsertAccounts(body: {accounts?: unknown}): {added: number; updated: number; accounts: PublicStoredAccount[]} {
+	function upsertAccounts(body: {accounts?: unknown}): {added: number; updated: number; accounts: PublicAccount[]} {
 		const incoming = (Array.isArray(body.accounts) ? body.accounts : [])
 			.map(item => normalizeStoredAccount(item))
 			.filter((account): account is StoredAccount => !!account);
@@ -153,7 +157,7 @@ export function createAccountService(options: AccountServiceOptions) {
 					added++;
 				}
 			}
-			return {added, updated, accounts: store.accounts.replaceAll(list).map(publicStoredAccount)};
+			return {added, updated, accounts: groups.publicAccounts(store.accounts.replaceAll(list))};
 		} catch (err) {
 			throw accountError(500, errorText(err) || '导入账户失败');
 		}
@@ -328,7 +332,7 @@ export function createAccountService(options: AccountServiceOptions) {
 
 	/**
 	 * 前端删除账户时调用:登出并移出会话表、清掉登录意图,删除加密库里保存的 session,
-	 * 再从名单里移除(前端防抖推送没来得及发出时名单也一致)。
+	 * 再从名单和分组里移除(前端防抖推送没来得及发出时名单也一致)。
 	 */
 	function cleanup(body: {accounts?: unknown}) {
 		const names: string[] = [];
@@ -356,6 +360,11 @@ export function createAccountService(options: AccountServiceOptions) {
 			removedFromList = store.accounts.removeByNames(names);
 		} catch (err) {
 			logger.warn('[cleanup] 更新账户名单失败', errorText(err));
+		}
+		try {
+			store.groups.assign(names, '');
+		} catch (err) {
+			logger.warn('[cleanup] 清理账号分组失败', errorText(err));
 		}
 		return {removedAttempts, removedFiles, removedFromList};
 	}
@@ -470,6 +479,8 @@ export function createAccountService(options: AccountServiceOptions) {
 
 	return {
 		listAccounts, saveAccounts, upsertAccounts, meta, importMaFiles, authCode,
+		createGroup: groups.createGroup, renameGroup: groups.renameGroup, deleteGroup: groups.deleteGroup,
+		reorderGroups: groups.reorderGroups, moveToGroup: groups.moveToGroup,
 		login, loginWithRefreshToken, submitGuard, requestWebSession, logout, cleanup, connectGc, disconnectGc, cookies, listAttempts,
 		loadHistory, getHistory, restoreCredentials,
 		/** 拿到 WebSession 后后台刷新真实账户国家 */
