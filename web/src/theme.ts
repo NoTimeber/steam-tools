@@ -71,6 +71,12 @@ const LIGHT: GlobalThemeOverrides = {
 		tabTextColorActiveLine: '#b45309',
 		tabTextColorHoverLine: '#d97706',
 		barColor: '#d97706'
+	},
+	Tooltip: {
+		color: '#ffffff',
+		textColor: '#18181b',
+		boxShadow: '0 4px 16px rgba(9, 9, 11, 0.12), 0 0 0 1px rgba(9, 9, 11, 0.06)',
+		borderRadius: '8px'
 	}
 };
 
@@ -126,6 +132,12 @@ const DARK: GlobalThemeOverrides = {
 		tabTextColorActiveLine: '#fbbf24',
 		tabTextColorHoverLine: '#fbbf24',
 		barColor: '#f59e0b'
+	},
+	Tooltip: {
+		color: '#27272a',
+		textColor: '#fafafa',
+		boxShadow: '0 4px 16px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.08)',
+		borderRadius: '8px'
 	}
 };
 

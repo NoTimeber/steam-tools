@@ -2,11 +2,12 @@
 // 账户列表:顶上一排统计卡片,下面是表格卡片(搜索、筛选、列设置、按序号勾选、勾选后批量操作;
 // 行内显示令牌验证码,行尾是图标操作)。排序、筛选后序号按显示顺序重排。
 import {computed, h, onMounted, onUnmounted, reactive, ref} from 'vue';
-import {NBadge, NButton, NCheckbox, NDataTable, NDropdown, NInput, NInputNumber, NPopover, NSelect, NTag, useDialog, useMessage} from 'naive-ui';
+import {NBadge, NButton, NCheckbox, NDataTable, NDropdown, NInput, NInputNumber, NPopover, NSelect, NTag, NTooltip, useDialog, useMessage} from 'naive-ui';
 import type {DataTableColumns, DataTableRowKey, DataTableSortState, DropdownOption} from 'naive-ui';
 import type {GameId} from '../../api/types.ts';
 import AppIcon from '../../components/AppIcon.vue';
 import type {IconName} from '../../components/AppIcon.vue';
+import {dropdownWithTip, withTip} from '../../components/tip.ts';
 import {ALL_ACCOUNTS, NO_GROUP, SESSION_LABEL, STATUS_TAG, activeFilterCount, currencySymbol, formatBalance, padSeq, resolveSeqRange, walletTotals} from '../../lib/accounts.ts';
 import type {AccountFilters, LoginStatus, SortKey} from '../../lib/accounts.ts';
 import {accountProxy} from '../../lib/proxy.ts';
@@ -177,43 +178,47 @@ async function copyCode(code: string): Promise<void> {
 // ===== 表格 =====
 const seqOf = computed(() => new Map(visibleRows.value.map((row, index) => [row.key, index + 1])));
 
-function iconButton(icon: IconName, title: string, onClick?: () => void, extra: Record<string, unknown> = {}) {
-	return h(NButton, {size: 'small', text: true, type: 'primary', title, onClick, class: 'row-action', ...extra}, {icon: () => h(AppIcon, {name: icon, size: 17})});
+/** 行尾的图标按钮,鼠标放上去显示 label */
+function iconAction(icon: IconName, label: string, onClick?: () => void) {
+	return withTip(h(NButton, {size: 'small', text: true, type: 'primary', 'aria-label': label, onClick, class: 'row-action'}, {icon: () => h(AppIcon, {name: icon, size: 17})}), label);
 }
 
 function guardCell(row: AccountRow) {
-	const [color, title] = row.hasMaFile
-		? ['var(--ok)', '有 maFile(手机令牌)']
-		: row.hasSharedSecret ? ['var(--warn)', '名单里有 shared_secret,没有 maFile'] : ['var(--muted)', '没有令牌'];
-	return h('span', {class: 'guard-cell', style: {color}, title}, [h(AppIcon, {name: 'phone', size: 18})]);
+	const [color, tip] = row.hasMaFile
+		? ['var(--ok)', '有 maFile(手机令牌),能自动生成验证码、确认交易']
+		: row.hasSharedSecret ? ['var(--warn)', '名单里有 shared_secret,能生成验证码;没有 maFile,确认交易用不了'] : ['var(--muted)', '没有令牌,登录要手动输验证码'];
+	return withTip(h('span', {class: 'guard-cell', style: {color}}, [h(AppIcon, {name: 'phone', size: 18})]), tip);
 }
 
 function gcCell(row: AccountRow) {
 	const game = canUseGc(row) ? connectedGame(row) : '';
 	if (game) {
-		return h(NDropdown, {trigger: 'click', options: [{label: `断开 ${gameLabel(game)} GC`, key: game}], onSelect: () => disconnectGc(row, game)},
-			() => h(NTag, {size: 'small', type: 'success', bordered: false, class: 'clickable', title: '点击断开'}, () => gameLabel(game)));
+		return dropdownWithTip(
+			{options: [{label: `断开 ${gameLabel(game)} GC`, key: game}], onSelect: () => disconnectGc(row, game)},
+			h(NTag, {size: 'small', type: 'success', bordered: false, class: 'clickable'}, () => gameLabel(game)),
+			`已连接 ${gameLabel(game)} 游戏服务器(GC),点击可断开`
+		);
 	}
 	if (!canUseGc(row)) {
-		return h('span', {class: 'muted'}, '—');
+		return withTip(h('span', {class: 'muted'}, '—'), '登录成功后才能连接 GC');
 	}
-	return h(NDropdown, {
-		trigger: 'click',
-		options: [{label: '连接 CS2', key: 'cs2'}, {label: '连接 TF2', key: 'tf2'}],
-		onSelect: (key: GameId) => connectGc(row, key)
-	}, () => h(NButton, {size: 'tiny', secondary: true}, () => '连接'));
+	return dropdownWithTip(
+		{options: [{label: '连接 CS2', key: 'cs2'}, {label: '连接 TF2', key: 'tf2'}], onSelect: (key: GameId) => connectGc(row, key)},
+		h(NButton, {size: 'tiny', secondary: true}, () => '连接'),
+		'连接 CS2 / TF2 游戏服务器(GC),内购、库存、终端机要用'
+	);
 }
 
 function codeCell(row: AccountRow) {
 	const code = authCodes.codes[row.accountName];
 	if (!code) {
-		return h('span', {class: 'muted'}, '—');
+		return withTip(h('span', {class: 'muted'}, '—'), '没有 maFile 或 shared_secret,生成不了验证码');
 	}
 	const left = authCodeSecondsLeft();
-	return h('button', {type: 'button', class: 'code-cell', title: '复制验证码', onClick: () => copyCode(code)}, [
+	return withTip(h('button', {type: 'button', class: 'code-cell', onClick: () => copyCode(code)}, [
 		h('span', {class: 'mono code-text'}, code),
 		h('span', {class: 'code-bar'}, [h('span', {class: ['code-bar-fill', left <= 5 ? 'is-ending' : ''], style: {width: `${(left / 30) * 100}%`}})])
-	]);
+	]), () => `Steam 令牌验证码,点击复制(${authCodeSecondsLeft()} 秒后换新的)`);
 }
 
 function sortable(key: SortKey) {
@@ -232,7 +237,7 @@ const columns = computed<DataTableColumns<AccountRow>>(() => {
 		width: 150,
 		ellipsis: {tooltip: true},
 		...sortable('accountName'),
-		render: row => h('span', {class: 'account-name', title: row.lastError || undefined}, row.accountName)
+		render: row => h('span', {class: 'account-name'}, row.accountName)
 	});
 	if (show('group')) {
 		list.push({
@@ -242,7 +247,7 @@ const columns = computed<DataTableColumns<AccountRow>>(() => {
 			render: row => {
 				const name = groupName(row.groupId);
 				return name
-					? h(NTag, {size: 'small', bordered: false, class: 'clickable group-badge', title: `按「${name}」筛选账户`, onClick: () => setFilters({group: row.groupId})}, () => name)
+					? withTip(h(NTag, {size: 'small', bordered: false, class: 'clickable group-badge', onClick: () => setFilters({group: row.groupId})}, () => name), `按「${name}」筛选账户`)
 					: h('span', {class: 'muted'}, '—');
 			}
 		});
@@ -256,7 +261,10 @@ const columns = computed<DataTableColumns<AccountRow>>(() => {
 			key: 'status',
 			width: 84,
 			...sortable('status'),
-			render: row => h(NTag, {size: 'small', bordered: false, type: STATUS_TAG[row.status], title: row.lastError || undefined}, () => SESSION_LABEL[row.status])
+			render: row => {
+				const tag = h(NTag, {size: 'small', bordered: false, type: STATUS_TAG[row.status]}, () => SESSION_LABEL[row.status]);
+				return row.lastError ? withTip(tag, row.lastError) : tag;
+			}
 		});
 	}
 	if (show('gc')) {
@@ -278,7 +286,8 @@ const columns = computed<DataTableColumns<AccountRow>>(() => {
 			width: 104,
 			render: row => {
 				const view = accountProxy(proxy.config, row.accountName);
-				return h(NTag, {size: 'small', bordered: false, type: view.mode === 'global' ? 'default' : 'warning', class: 'clickable', title: view.title, onClick: () => (proxyAccount.value = row.accountName)}, () => view.label);
+				const tag = h(NTag, {size: 'small', bordered: false, type: view.mode === 'global' ? 'default' : 'warning', class: 'clickable', onClick: () => (proxyAccount.value = row.accountName)}, () => view.label);
+				return withTip(tag, `${view.title || view.label}(点击修改)`);
 			}
 		});
 	}
@@ -292,12 +301,12 @@ const columns = computed<DataTableColumns<AccountRow>>(() => {
 		fixed: 'right',
 		render: row => h('div', {class: 'row-actions'}, [
 			row.status === '登录成功' || row.status === '登录中'
-				? iconButton('logout', '登出', () => logoutAccount(row))
-				: iconButton('login', '登录', () => loginAccount(row)),
+				? iconAction('logout', '登出这个账号', () => logoutAccount(row))
+				: iconAction('login', '登录这个账号', () => loginAccount(row)),
 			h(NDropdown, {trigger: 'click', options: moveOptions(row.groupId), onSelect: (key: string) => onMove(key, [row])},
-				() => iconButton('folder', '设置账户分组')),
-			iconButton('receipt', '消费记录', () => (historyAccount.value = row.accountName)),
-			iconButton('globe', '代理', () => (proxyAccount.value = row.accountName))
+				() => h('span', {class: 'tip-anchor'}, [iconAction('folder', '设置账户分组')])),
+			iconAction('receipt', '查看 Steam 消费记录', () => (historyAccount.value = row.accountName)),
+			iconAction('globe', '设置这个账号的 Steam 代理', () => (proxyAccount.value = row.accountName))
 		])
 	});
 	return list;
@@ -421,8 +430,11 @@ function confirmDelete(): void {
 					</NButton>
 					<NButton size="small" quaternary @click="accounts.selected.clear()">取消选择</NButton>
 				</template>
-				<div v-else class="seq-pick" title="输入序号区间,勾选对应账户(留空一侧表示单个)">
-					<span class="muted">按序号勾选</span>
+				<div v-else class="seq-pick">
+					<NTooltip placement="top">
+						<template #trigger><span class="muted">按序号勾选</span></template>
+						输入序号区间,勾选对应账户(只填一边就是单个)
+					</NTooltip>
 					<NInput v-model:value="range.start" size="small" placeholder="00" class="seq-input" @keyup.enter="selectRange" />
 					<span class="muted">–</span>
 					<NInput v-model:value="range.end" size="small" placeholder="00" class="seq-input" @keyup.enter="selectRange" />
@@ -435,9 +447,16 @@ function confirmDelete(): void {
 				</NInput>
 				<NPopover trigger="click" placement="bottom-end" :show-arrow="false" style="width: 320px">
 					<template #trigger>
-						<NBadge :value="filterCount" :show="filterCount > 0" type="warning">
-							<NButton size="small" quaternary title="筛选"><template #icon><AppIcon name="filter" /></template></NButton>
-						</NBadge>
+						<span class="tip-anchor">
+							<NTooltip placement="top">
+								<template #trigger>
+									<NBadge :value="filterCount" :show="filterCount > 0" type="warning">
+										<NButton size="small" quaternary aria-label="筛选"><template #icon><AppIcon name="filter" /></template></NButton>
+									</NBadge>
+								</template>
+								筛选(按分组、会话、GC、令牌、余额)
+							</NTooltip>
+						</span>
 					</template>
 					<div class="filter-form">
 						<div class="filter-title">筛选条件</div>
@@ -460,7 +479,14 @@ function confirmDelete(): void {
 				</NPopover>
 				<NPopover trigger="click" placement="bottom-end" :show-arrow="false">
 					<template #trigger>
-						<NButton size="small" quaternary title="显示的列"><template #icon><AppIcon name="columns" /></template></NButton>
+						<span class="tip-anchor">
+							<NTooltip placement="top">
+								<template #trigger>
+									<NButton size="small" quaternary aria-label="显示的列"><template #icon><AppIcon name="columns" /></template></NButton>
+								</template>
+								设置显示哪些列
+							</NTooltip>
+						</span>
 					</template>
 					<div class="column-form">
 						<div class="filter-title">显示的列</div>

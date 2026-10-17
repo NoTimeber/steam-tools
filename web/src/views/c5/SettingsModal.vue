@@ -13,6 +13,12 @@ const emit = defineEmits<{close: []}>();
 
 const message = useMessage();
 
+/** 两种下单方式的说明,显示在选项下面 */
+const STRATEGY_HINT: Record<C5Settings['strategy'], string> = {
+	listing: '到价后查在售列表,按在售 id 批量买。在售接口是内测接口,要在官网把服务器公网 IP 加进白名单',
+	quick: '到价后调快速购买,平台挑最低价,一次一件。不需要在售接口'
+};
+
 const form = reactive({
 	appKey: '',
 	clearAppKey: false,
@@ -121,9 +127,12 @@ async function save(): Promise<void> {
 				<div class="grid">
 					<NFormItem label="策略">
 						<NRadioGroup v-model:value="form.strategy">
-							<NRadioButton value="listing" title="到价后查在售列表,按在售 id 批量买。在售接口是内测接口,要在官网把服务器公网 IP 加进白名单">按在售列表</NRadioButton>
-							<NRadioButton value="quick" title="到价后调快速购买,平台挑最低价,一次一件。不需要在售接口">快速购买</NRadioButton>
+							<NRadioButton value="listing">按在售列表</NRadioButton>
+							<NRadioButton value="quick">快速购买</NRadioButton>
 						</NRadioGroup>
+						<template #feedback>
+							<span class="muted">{{ STRATEGY_HINT[form.strategy] }}</span>
+						</template>
 					</NFormItem>
 					<NFormItem label="总预算(开始扫货前必填,第一次建议只放一两个饰品的钱)">
 						<NInputNumber v-model:value="form.maxTotalSpend" :min="0" :step="10" />

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// 页面骨架:左侧分栏导航(带图标)、中间模块页面、右侧实时运行日志;顶部有更新提示。
+// 页面骨架:左侧分栏导航(带图标)、右边模块页面;顶部有更新提示,右下角是可收起的实时运行日志。
 import {computed, h} from 'vue';
 import {useRoute, useRouter} from 'vue-router';
 import {NMenu, NTag} from 'naive-ui';
@@ -49,14 +49,14 @@ const activeKey = computed(() => String(route.name || 'accounts'));
 				<RouterView />
 			</div>
 		</main>
-		<LogPane class="shell-logs" />
 	</div>
+	<LogPane />
 </template>
 
 <style scoped>
 .shell {
 	display: grid;
-	grid-template-columns: 216px minmax(0, 1fr) 340px;
+	grid-template-columns: 216px minmax(0, 1fr);
 	height: 100%;
 }
 
@@ -132,17 +132,9 @@ const activeKey = computed(() => String(route.name || 'accounts'));
 	overflow: auto;
 }
 
-.shell-logs {
-	border-left: 1px solid var(--line);
-}
-
 @media (max-width: 1100px) {
 	.shell {
 		grid-template-columns: 180px minmax(0, 1fr);
-	}
-
-	.shell-logs {
-		display: none;
 	}
 }
 </style>

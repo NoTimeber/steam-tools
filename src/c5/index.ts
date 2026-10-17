@@ -141,7 +141,7 @@ export interface C5CheckResult {
 
 export interface C5ServiceOptions {
 	store: C5Store;
-	/** socket.io 推送:c5:log(写页面右侧的「实时运行日志」) */
+	/** socket.io 推送:c5:log(写进页面右下角的「实时运行日志」) */
 	emit(event: 'c5:log', payload: C5LogLine): void;
 	/** 饰品中英文名词库;不给就只显示英文名 */
 	names?: NameDb;
@@ -214,7 +214,7 @@ export function createC5Service(options: C5ServiceOptions) {
 
 	// ===== 日志 =====
 
-	/** 写服务端日志并推到页面右侧的「实时运行日志」;debug(每个饰品的行情变化)不记,监控列表里有实时价格 */
+	/** 写服务端日志并推到页面右下角的「实时运行日志」;debug(每个饰品的行情变化)不记,监控列表里有实时价格 */
 	function log(level: C5LogLevel, message: string): void {
 		if (level === 'debug') {
 			return;

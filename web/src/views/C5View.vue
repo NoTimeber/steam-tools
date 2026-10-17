@@ -1,12 +1,13 @@
 <script setup lang="ts">
 // C5 扫货:顶栏是运行状态(停止 / 自动扫货,真实下单)和汇总;中间是监控列表(直接改目标价、数量、花费上限,
-// 改过没保存的格子标黄,点「保存」后下一轮按新价扫);下面是购买流水。运行日志写在页面右侧的「实时运行日志」里。设置、查在售在弹窗里。
+// 改过没保存的格子标黄,点「保存」后下一轮按新价扫);下面是购买流水。运行日志写在右下角的「实时运行日志」里。设置、查在售在弹窗里。
 // 添加饰品输中文或英文搜(C5 接口只认 Steam 英文名,后端词库把中文换成英文名),表格里显示中文名。
 import {computed, h, onMounted, onUnmounted, reactive, ref} from 'vue';
 import {
-	NAlert, NButton, NCard, NDataTable, NInput, NInputNumber, NModal, NRadioButton, NRadioGroup, NSelect, NSpace, NTag, useDialog, useMessage
+	NAlert, NButton, NCard, NDataTable, NInput, NInputNumber, NModal, NRadioButton, NRadioGroup, NSelect, NSpace, NTag, NTooltip, useDialog, useMessage
 } from 'naive-ui';
 import type {DataTableColumns, SelectOption} from 'naive-ui';
+import {withTip} from '../components/tip.ts';
 import type {VNodeChild} from 'vue';
 import {ApiError, errorText} from '../api/http.ts';
 import {
@@ -268,8 +269,9 @@ const columns: DataTableColumns<DraftRow> = [
 		render: row => {
 			const view = row.origName == null ? null : viewByName.value.get(row.origName);
 			const status = itemStatus(view ? view.status : 'new');
-			const title = view?.status === 'cooldown' && view.pauseUntil ? `下单被拒或查在售失败,${formatTime(view.pauseUntil)} 前不再下单` : undefined;
-			return h(NTag, {size: 'small', bordered: false, type: status.tone, title}, () => status.label);
+			const tip = view?.status === 'cooldown' && view.pauseUntil ? `下单被拒或查在售失败,${formatTime(view.pauseUntil)} 前不再下单` : '';
+			const tag = h(NTag, {size: 'small', bordered: false, type: status.tone}, () => status.label);
+			return tip ? withTip(tag, tip) : tag;
 		}
 	},
 	{
@@ -471,7 +473,8 @@ const purchaseColumns: DataTableColumns<C5Purchase> = [
 		width: 88,
 		render: purchase => {
 			const status = purchaseStatus(purchase.status);
-			return h(NTag, {size: 'small', bordered: false, type: status.tone, title: purchase.error || undefined}, () => status.label);
+			const tag = h(NTag, {size: 'small', bordered: false, type: status.tone}, () => status.label);
+			return purchase.error ? withTip(tag, purchase.error) : tag;
 		}
 	},
 	{
@@ -615,7 +618,12 @@ const purchaseColumns: DataTableColumns<C5Purchase> = [
 
 		<NCard size="small" :bordered="false" title="购买流水(最近 50 笔)">
 			<template #header-extra>
-				<NButton size="small" :loading="syncing" :disabled="!state?.configured" title="立刻向平台查一遍全部未完结订单(平时每轮自动查几笔)" @click="sync">同步订单</NButton>
+				<NTooltip placement="top">
+					<template #trigger>
+						<NButton size="small" :loading="syncing" :disabled="!state?.configured" @click="sync">同步订单</NButton>
+					</template>
+					立刻向平台查一遍全部未完结订单(平时每轮自动查几笔)
+				</NTooltip>
 			</template>
 			<NDataTable size="small" :columns="purchaseColumns" :data="state?.purchases ?? []" :row-key="(row: C5Purchase) => row.outTradeNo" :max-height="360" :scroll-x="720">
 				<template #empty>

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // 买游戏:多选账号 + 按 subid 加游戏,用钱包余额协议购买(可先试运行只验证到最终价、不扣款);右边是最近一个任务的逐账号结果。
 import {computed, h, onMounted, onUnmounted, ref} from 'vue';
-import {NAlert, NButton, NCard, NCheckbox, NDataTable, NInput, NInputNumber, NSelect, NSpace, NTag, useDialog, useMessage} from 'naive-ui';
+import {NAlert, NButton, NCard, NCheckbox, NDataTable, NInput, NInputNumber, NSelect, NSpace, NTag, NTooltip, useDialog, useMessage} from 'naive-ui';
 import type {DataTableColumns, SelectOption} from 'naive-ui';
 import {formatBalance} from '../lib/accounts.ts';
 import {accountDetail, accountStatus, formatGamePrice, formatMoney, taskProgress} from '../lib/buygame.ts';
@@ -169,8 +169,11 @@ const resultColumns: DataTableColumns<ResultRow> = [
 					</NDataTable>
 
 					<div class="actions">
-						<NSpace align="center" :size="6" title="同时购买的并发线程数(默认 3)">
-							<span class="muted">线程</span>
+						<NSpace align="center" :size="6">
+							<NTooltip placement="top">
+								<template #trigger><span class="muted">线程</span></template>
+								同时购买的并发线程数(默认 3)
+							</NTooltip>
 							<NInputNumber v-model:value="buygame.concurrency" size="small" :min="1" :max="10" :precision="0" class="threads" />
 						</NSpace>
 						<NCheckbox v-model:checked="buygame.dryRun">试运行(只验证到最终价,不扣款)</NCheckbox>

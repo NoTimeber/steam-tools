@@ -146,6 +146,12 @@ body {
 	letter-spacing: -0.01em;
 }
 
+/* 包住带说明气泡的触发元素(下拉 + 气泡时下拉挂在它上面),不影响排版 */
+.tip-anchor {
+	display: inline-flex;
+	align-items: center;
+}
+
 /* 白底(深色时锌灰)圆角卡片 */
 .panel {
 	background: var(--surface);

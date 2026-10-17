@@ -2,7 +2,7 @@
 // 日期范围选择:只显示一个月的日历,第一下点开始日、第二下点结束日(先点晚的也行),点完就关。
 // 只点了开始日就关掉的,原来的范围不变。外观跟 Naive UI 的小号输入框一致。
 import {computed, ref, watch} from 'vue';
-import {NPopover, useThemeVars} from 'naive-ui';
+import {NPopover, NTooltip, useThemeVars} from 'naive-ui';
 import {isoDate, monthDays, monthOf, orderedRange, shiftMonth} from '../../lib/calendar.ts';
 import type {YearMonth} from '../../lib/calendar.ts';
 
@@ -10,6 +10,9 @@ import type {YearMonth} from '../../lib/calendar.ts';
 const range = defineModel<[string, string] | null>({required: true});
 
 const WEEKDAYS = ['一', '二', '三', '四', '五', '六', '日'];
+/** 月份标题左右的翻页按钮 */
+const NAV_BEFORE = [{step: -12, text: '«', tip: '上一年'}, {step: -1, text: '‹', tip: '上个月'}];
+const NAV_AFTER = [{step: 1, text: '›', tip: '下个月'}, {step: 12, text: '»', tip: '下一年'}];
 
 const theme = useThemeVars();
 const themeStyle = computed(() => ({
@@ -82,17 +85,21 @@ function turn(delta: number): void {
 			<button type="button" class="range-input" :class="{open}" :style="themeStyle">
 				<span v-if="range" class="mono">{{ range[0] }} 至 {{ range[1] }}</span>
 				<span v-else class="placeholder">选择日期范围</span>
-				<span v-if="range" class="clear" role="button" aria-label="清除日期范围" title="清除" @click.stop="clear">×</span>
+				<span v-if="range" class="clear" role="button" aria-label="清除日期范围" @click.stop="clear">×</span>
 			</button>
 		</template>
 
 		<div class="calendar" @mouseleave="hover = null">
 			<div class="head">
-				<button type="button" class="nav" title="上一年" @click="turn(-12)">«</button>
-				<button type="button" class="nav" title="上个月" @click="turn(-1)">‹</button>
+				<NTooltip v-for="nav in NAV_BEFORE" :key="nav.step">
+					<template #trigger><button type="button" class="nav" @click="turn(nav.step)">{{ nav.text }}</button></template>
+					{{ nav.tip }}
+				</NTooltip>
 				<span class="title">{{ shownMonth.year }} 年 {{ shownMonth.month + 1 }} 月</span>
-				<button type="button" class="nav" title="下个月" @click="turn(1)">›</button>
-				<button type="button" class="nav" title="下一年" @click="turn(12)">»</button>
+				<NTooltip v-for="nav in NAV_AFTER" :key="nav.step">
+					<template #trigger><button type="button" class="nav" @click="turn(nav.step)">{{ nav.text }}</button></template>
+					{{ nav.tip }}
+				</NTooltip>
 			</div>
 			<div class="grid">
 				<span v-for="weekday in WEEKDAYS" :key="weekday" class="weekday muted">{{ weekday }}</span>

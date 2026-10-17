@@ -6,6 +6,7 @@ import {NButton, NDataTable, NInput, NTag, useMessage} from 'naive-ui';
 import type {DataTableColumns, DataTableRowKey} from 'naive-ui';
 import type {AccountGroup} from '../../api/types.ts';
 import AppIcon from '../../components/AppIcon.vue';
+import {withTip} from '../../components/tip.ts';
 import {SESSION_LABEL, STATUS_TAG, matchesSearch, moveGroupId} from '../../lib/accounts.ts';
 import {errorText} from '../../api/http.ts';
 import {accounts, moveToGroup, renameGroup, reorderGroups} from '../../stores/accounts.ts';
@@ -51,8 +52,9 @@ async function move(id: string, delta: -1 | 1): Promise<void> {
 	}
 }
 
-function iconButton(icon: 'pencil' | 'trash' | 'arrowUp' | 'arrowDown' | 'x', title: string, onClick: () => void, extra: Record<string, unknown> = {}) {
-	return h(NButton, {size: 'small', text: true, type: 'primary', title, onClick, ...extra}, {icon: () => h(AppIcon, {name: icon, size: 17})});
+/** 图标按钮,鼠标放上去有说明 */
+function iconButton(icon: 'pencil' | 'trash' | 'arrowUp' | 'arrowDown' | 'x', tip: string, onClick: () => void, extra: Record<string, unknown> = {}) {
+	return withTip(h(NButton, {size: 'small', text: true, type: 'primary', 'aria-label': tip, onClick, ...extra}, {icon: () => h(AppIcon, {name: icon, size: 17})}), tip);
 }
 
 const listColumns = computed<DataTableColumns<AccountGroup>>(() => [
@@ -70,8 +72,8 @@ const listColumns = computed<DataTableColumns<AccountGroup>>(() => [
 		render: group => {
 			const index = accounts.groups.findIndex(item => item.id === group.id);
 			return h('div', {class: 'actions'}, [
-				iconButton('arrowUp', '上移', () => move(group.id, -1), {disabled: busy.value || index <= 0 || !!listSearch.value}),
-				iconButton('arrowDown', '下移', () => move(group.id, 1), {disabled: busy.value || index === accounts.groups.length - 1 || !!listSearch.value})
+				iconButton('arrowUp', '上移一位', () => move(group.id, -1), {disabled: busy.value || index <= 0 || !!listSearch.value}),
+				iconButton('arrowDown', '下移一位', () => move(group.id, 1), {disabled: busy.value || index === accounts.groups.length - 1 || !!listSearch.value})
 			]);
 		}
 	},
@@ -80,8 +82,8 @@ const listColumns = computed<DataTableColumns<AccountGroup>>(() => [
 		key: 'actions',
 		width: 80,
 		render: group => h('div', {class: 'actions actions-end'}, [
-			iconButton('pencil', '编辑', () => emit('edit', group.id)),
-			iconButton('trash', '删除', () => emit('delete', group.id), {type: 'error'})
+			iconButton('pencil', '编辑:改名、添加和移出账户', () => emit('edit', group.id)),
+			iconButton('trash', '删除分组(组里的账户不删,变成未分组)', () => emit('delete', group.id), {type: 'error'})
 		])
 	}
 ]);
@@ -142,7 +144,7 @@ const memberColumns = computed<DataTableColumns<AccountRow>>(() => [
 	{title: '用户名', key: 'accountName', ellipsis: {tooltip: true}, render: row => h('span', {class: 'account-name'}, row.accountName)},
 	{title: '会话', key: 'status', width: 96, render: row => h(NTag, {size: 'small', bordered: false, type: STATUS_TAG[row.status]}, () => SESSION_LABEL[row.status])},
 	{title: 'SteamID', key: 'steamID', width: 180, ellipsis: {tooltip: true}, render: row => h('span', {class: 'mono'}, row.steamID || '—')},
-	{title: '', key: 'remove', width: 56, render: row => h('div', {class: 'actions actions-end'}, [iconButton('x', '移出分组', () => removeMembers([row]), {disabled: busy.value})])}
+	{title: '', key: 'remove', width: 56, render: row => h('div', {class: 'actions actions-end'}, [iconButton('x', '移出这个分组', () => removeMembers([row]), {disabled: busy.value})])}
 ]);
 </script>
 

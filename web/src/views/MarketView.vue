@@ -1,7 +1,8 @@
 <script setup lang="ts">
 // 市场求购:左边挂求购单(多账号限同币种、行情参考、固定数量或按余额挂满),右边「我的求购单」(对账、撤销)。
 import {computed, h, onMounted, onUnmounted} from 'vue';
-import {NButton, NCard, NCheckbox, NDataTable, NInput, NInputNumber, NSelect, NSpace, NTag, useDialog, useMessage} from 'naive-ui';
+import {NButton, NCard, NCheckbox, NDataTable, NInput, NInputNumber, NSelect, NSpace, NTag, NTooltip, useDialog, useMessage} from 'naive-ui';
+import {withTip} from '../components/tip.ts';
 import type {DataTableColumns, SelectOption} from 'naive-ui';
 import {errorText} from '../api/http.ts';
 import {formatBalance} from '../lib/accounts.ts';
@@ -184,7 +185,7 @@ const orderColumns: DataTableColumns<BuyOrder> = [
 		render: order => h('span', {class: 'order-item'}, [
 			order.itemName || order.marketHashName,
 			order.status === 'pending_confirm'
-				? h(NTag, {size: 'small', type: 'warning', bordered: false, title: '该求购单尚未经 Steam 手机令牌确认,需在 Steam 手机 App 确认后才会生效'}, () => '待手机确认')
+				? withTip(h(NTag, {size: 'small', type: 'warning', bordered: false}, () => '待手机确认'), '该求购单尚未经 Steam 手机令牌确认,需在 Steam 手机 App 确认后才会生效')
 				: null
 		])
 	},
@@ -277,9 +278,12 @@ const ordersEmpty = computed(() => (market.visibleIds
 						</div>
 					</div>
 
-					<NCheckbox v-model:checked="market.perAccountMax" title="勾选后忽略上方数量,每个所选账号各自按 floor(该账号钱包余额 ÷ 单价) 挂满,不同余额的账号数量各不相同">
-						各账号按余额挂满(每个账号单独取最大数量)
-					</NCheckbox>
+					<NTooltip placement="top">
+						<template #trigger>
+							<NCheckbox v-model:checked="market.perAccountMax">各账号按余额挂满(每个账号单独取最大数量)</NCheckbox>
+						</template>
+						勾选后忽略上方数量,每个所选账号各自按 floor(该账号钱包余额 ÷ 单价) 挂满,不同余额的账号数量各不相同
+					</NTooltip>
 					<div v-if="market.perAccountMax && selectedAccounts.length && validPrice" class="max-preview">
 						<template v-if="maxPreview?.ok && maxPreview.total > 0">
 							<div class="muted">各账号按余额挂满,合计约 {{ maxPreview.total }} 件<span v-if="maxPreview.unknown">(部分账号余额未知,按 0 件跳过,请先刷新账户)</span></div>
@@ -298,8 +302,11 @@ const ordersEmpty = computed(() => (market.visibleIds
 					</div>
 
 					<div class="actions">
-						<NSpace align="center" :size="6" title="同时挂单的并发数(线程数),默认 2。多账号时更快,过高可能触发 Steam 风控">
-							<span class="muted">线程</span>
+						<NSpace align="center" :size="6">
+							<NTooltip placement="top">
+								<template #trigger><span class="muted">线程</span></template>
+								同时挂单的并发数(线程数),默认 2。多账号时更快,过高可能触发 Steam 风控
+							</NTooltip>
 							<NInputNumber v-model:value="market.concurrency" size="small" :min="1" :max="8" :precision="0" class="threads" />
 						</NSpace>
 						<NButton type="primary" :disabled="!canPlace" :loading="market.placing" @click="place">挂求购单</NButton>
@@ -309,7 +316,12 @@ const ordersEmpty = computed(() => (market.visibleIds
 
 			<NCard size="small" :bordered="false" title="我的求购单">
 				<template #header-extra>
-					<NButton size="small" :loading="market.syncing" title="对左侧选中的在线账户从 Steam 实拉真实求购单:成交/撤销/过期的自动移除,剩余数量更新,拉到的单可在此撤销" @click="sync">刷新</NButton>
+					<NTooltip placement="top">
+						<template #trigger>
+							<NButton size="small" :loading="market.syncing" @click="sync">刷新</NButton>
+						</template>
+						对左侧选中的在线账户从 Steam 实拉真实求购单:成交/撤销/过期的自动移除,剩余数量更新,拉到的单可在此撤销
+					</NTooltip>
 				</template>
 				<NDataTable size="small" :columns="orderColumns" :data="visibleOrders" :row-key="(order: BuyOrder) => order.id" :max-height="520">
 					<template #empty>
