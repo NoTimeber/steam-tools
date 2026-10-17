@@ -198,7 +198,7 @@ function fakeSessions() {
 	};
 }
 
-function service(accounts: unknown[] = [], files: Record<string, unknown> = {}, mafiles: Record<string, Record<string, unknown>> = {}, extra: {onNewLogin?: (accountName: string) => void} = {}) {
+function service(accounts: unknown[] = [], files: Record<string, unknown> = {}, mafiles: Record<string, Record<string, unknown>> = {}) {
 	const w = world(files, mafiles, {alpha: {refreshToken: 'RT-saved'}});
 	const sessions = fakeSessions();
 	const accountStore = memoryAccounts(accounts);
@@ -215,8 +215,7 @@ function service(accounts: unknown[] = [], files: Record<string, unknown> = {}, 
 		now: () => Date.parse('2026-10-13T00:00:00Z'),
 		fetch: (async () => new Response('', {status: 500})) as typeof fetch,
 		sleep: async () => {},
-		logger: {warn() {}},
-		...extra
+		logger: {warn() {}}
 	});
 	return {svc, sessions, accountStore, ...w};
 }
@@ -374,17 +373,4 @@ test('消费记录:只读名单里的账号;没网页会话 409;在线账号用�
 	}
 	// 测试里的 fetch 一律回 500(重试后)读取失败
 	assert.match(String(svc.getHistory('alpha')?.error), /消费记录页 HTTP 500/);
-});
-
-test('手动登录要新建会话时通知(固定 IP 代理在这时换 IP);复用在线会话时不通知', () => {
-	const renewed: string[] = [];
-	const {svc, sessions} = service([{accountName: 'alpha', password: 'pw'}], {}, {}, {onNewLogin: name => void renewed.push(name)});
-	const first = svc.login({accountName: 'alpha'});
-	assert.deepEqual(renewed, ['alpha']);
-	sessions.attempts.get(first.attempt.id)!.status = 'web_session';
-	assert.equal(svc.login({accountName: 'alpha'}).reused, true);
-	assert.deepEqual(renewed, ['alpha'], '在线时复用,不换');
-	svc.login({accountName: 'alpha', force: true});
-	svc.loginWithRefreshToken({accountName: 'alpha', refreshToken: 'RT'});
-	assert.deepEqual(renewed, ['alpha', 'alpha', 'alpha']);
 });

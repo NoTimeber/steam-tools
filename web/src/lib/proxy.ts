@@ -5,9 +5,12 @@ import type {AccountProxyMode, ProxyKind, ProxyProtocol, ProxyTestResult, Public
 
 /** 代理类型的选项和说明 */
 export const PROXY_KIND_OPTIONS: ReadonlyArray<{value: ProxyKind; label: string; help: string}> = [
-	{value: 'static', label: '静态', help: '静态代理有一个固定的出口 IP。'},
-	{value: 'rotating', label: '轮换', help: '轮换代理是单个入口,由提供商轮换出口 IP。'},
-	{value: 'sticky', label: '按账号固定 IP', help: '用户名里写 {n}(如 kxkviurm-{n}),每个账号分到一个编号、一直用同一个 IP,新账号或重新登录才换。'}
+	{value: 'static', label: '静态', help: '静态代理有一个固定的出口 IP,所有账号共用。'},
+	{
+		value: 'rotating',
+		label: '轮换',
+		help: '提供商有一池 IP。每个账号固定用其中一个,换账号或重启后才重新分。webshare 用户名以 -rotate 结尾会自动换成 -编号;别家在用户名里用 {n} 标出编号的位置。'
+	}
 ];
 
 export function proxyKindLabel(kind: ProxyKind): string {
@@ -25,8 +28,8 @@ export function proxySummary(config: PublicProxyConfig): string {
 		return `已关闭(${text})`;
 	}
 	const assigned = Object.keys(config.assigned).filter(key => key).length;
-	return text + (config.sticky ? ` · 编号 ${config.range.from}-${config.range.to},已分配 ${assigned}` : '')
-		+ (settings.loginsPerMinute ? ` · 登录每分钟 ${settings.loginsPerMinute} 次` : '');
+	const pool = settings.type !== 'rotating' ? '' : config.sticky ? ` · ${settings.poolSize} 个 IP,已分配 ${assigned} 个账号` : ' · 没填 IP 数量,没按账号固定';
+	return text + pool + (settings.loginsPerMinute ? ` · 登录每分钟 ${settings.loginsPerMinute} 次` : '');
 }
 
 export interface ProxyUrlParts {
@@ -97,8 +100,8 @@ export function accountProxy(config: PublicProxyConfig, accountName: string): Ac
 	if (config.sticky) {
 		const index = config.assigned[accountName.trim().toLowerCase()];
 		return index == null
-			? {mode: 'global', label: '全局 · 待分配', title: '固定 IP:第一次用 Steam 时分配编号'}
-			: {mode: 'global', label: `全局 #${index}`, title: `固定 IP:编号 ${index}(${config.global.split('{n}').join(String(index))}),重新登录时换一个`};
+			? {mode: 'global', label: '全局 · 待分配', title: '轮换代理:第一次用 Steam 时分一个 IP'}
+			: {mode: 'global', label: `全局 #${index}`, title: `轮换代理:固定用第 ${index} 个 IP(${config.global.split('{n}').join(String(index))}),重启后重新分`};
 	}
 	return {mode: 'global', label: '全局', title: `用全局代理:${config.global}`};
 }
@@ -113,13 +116,13 @@ export interface SteamCheckView {
 
 /**
  * 测试结果里「Steam 社区市场」那一项。429 不一定是这个 IP 被限流:实测 Steam 对机房代理 IP 上的非浏览器请求
- * (工具台的请求就是)市场、库存接口一律回 429,同一个 IP 用浏览器开却正常。relogin:固定 IP 模式,提示可以重新登录换一个
+ * (工具台的请求就是)市场、库存接口一律回 429,同一个 IP 用浏览器开却正常
  */
-export function steamCheckView(steam: ProxyTestResult['steam'], relogin: boolean): SteamCheckView {
+export function steamCheckView(steam: ProxyTestResult['steam']): SteamCheckView {
 	if (steam.status === 429) {
 		return {
 			type: 'warning',
-			text: '市场 429,市场和库存用不了' + (relogin ? ',可重新登录换 IP' : ''),
+			text: '市场 429,市场和库存用不了',
 			detail: 'Steam 社区市场回 429:经这个代理,工具台的市场、库存请求会被拒(IP 被限流,或 Steam 不放行机房代理上的非浏览器请求);登录、商店、手机确认不受影响'
 		};
 	}

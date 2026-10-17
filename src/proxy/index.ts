@@ -10,11 +10,14 @@
 // 登录速率限制:走全局代理开始的 Steam 登录每分钟最多几次,超出的排队(./login-limit.ts);手动登录、超时重试、掉线重连、
 // 重启恢复、充值码兑换的登录都算,steam-user 自己断线后的自动重登不经过这里,不受限。
 //
-// 按账号固定 IP(粘性)模式:类型选它,用户名里写 {n}(如 webshare 的 用户名-{n},一个编号对应一个固定 IP),
-// 每个账号分到一个编号并记住(尽量不和别的账号重复),之后一直用它;只有新账号第一次用、手动重新登录(renew)时才换编号。
-// 认不出账号的请求(查价格、nameid)也固定用一个。断线自动重连、重启后自动恢复登录都不换。
+// 类型:静态是一个固定出口 IP,所有账号共用;轮换是提供商换出口 IP 的入口,工具台把每个账号固定在其中一个 IP 上:
+// 编号 1 到「IP 数量」对应池里的一个个 IP(webshare 的「用户名-rotate」换成「用户名-编号」就是代理列表里第几个;
+// 别家在用户名里用 {n} 标出编号的位置),每个账号第一次用 Steam 时分一个(尽量不和别的账号重复),这次运行里一直用它,
+// 重新登录、掉线重连都不换;编号只记在内存里,服务重启后重新分。认不出账号的请求(查价格、nameid)也固定用一个。
 
-import {buildProxyUrl, createProxyFetch, fillProxyTemplate, isProxyTemplate, maskProxyUrl, normalizeProxyUrl, parseProxyUrl} from '../core/proxy.ts';
+import {
+	buildProxyUrl, createProxyFetch, fillProxyTemplate, isProxyTemplate, maskProxyUrl, normalizeProxyUrl, parseProxyUrl, PROXY_INDEX_PLACEHOLDER
+} from '../core/proxy.ts';
 import {STEAM_WEB_USER_AGENT} from '../steam/community.ts';
 import {PROXY_KINDS} from '../store/proxies.ts';
 import type {GlobalProxySettings, ProxyConfig, ProxyKind, ProxyStore} from '../store/proxies.ts';
@@ -31,13 +34,27 @@ const DEFAULT_TEST_URL = 'https://api.ipify.org?format=json';
  */
 const DEFAULT_STEAM_TEST_URL = 'https://steamcommunity.com/market/';
 const TEST_TIMEOUT_MS = 15000;
-/** 编号范围的上限(webshare 之类按代理数量编号,够用了) */
-const MAX_INDEX = 100000;
+/** IP 数量的上限(webshare 之类按代理数量编号,够用了) */
+const MAX_POOL_SIZE = 100000;
+/** webshare 轮换入口的用户名后缀:换成「-编号」就是代理列表里的第几个(一个固定 IP) */
+const WEBSHARE_ROTATE = /-rotate$/i;
 /** 登录速率限制的上限(每分钟) */
 const MAX_LOGINS_PER_MINUTE = 10000;
 
 export function isSteamHost(hostname: string): boolean {
 	return STEAM_HOST.test(hostname);
+}
+
+/**
+ * 全局代理各项拼成的地址(不管开没开)。轮换代理按账号固定 IP 时是带 {n} 的模板:用户名(或密码、主机)里写了 {n} 的照用,
+ * 填了 IP 数量的 webshare「用户名-rotate」换成「用户名-{n}」;都没有(固定不了,如旧版迁移来还没填 IP 数量)、静态代理就是普通地址
+ */
+export function globalProxyUrl(settings: GlobalProxySettings): string {
+	const plain = buildProxyUrl(settings);
+	if (settings.type !== 'rotating' || isProxyTemplate(plain) || settings.poolSize < 1 || !WEBSHARE_ROTATE.test(settings.username)) {
+		return plain;
+	}
+	return buildProxyUrl({...settings, username: settings.username.replace(WEBSHARE_ROTATE, `-${PROXY_INDEX_PLACEHOLDER}`)});
 }
 
 /** cookie 里 steamLoginSecure 的 SteamID(值是「SteamID||令牌」URL 编码后的样子);没有为 '' */
@@ -64,11 +81,9 @@ export interface PublicProxyConfig {
 	global: string;
 	/** 全局代理各项(设置页的表单) */
 	settings: PublicGlobalProxy;
-	/** 全局代理带 {n}:固定 IP 模式 */
+	/** 全局代理是轮换、按账号固定 IP */
 	sticky: boolean;
-	/** 固定 IP 模式的编号范围 */
-	range: {from: number; to: number};
-	/** 固定 IP 模式下各账号分到的编号(账号名小写) */
+	/** 这次运行里各账号分到的编号(账号名小写;'' 是认不出账号的请求共用的) */
 	assigned: Record<string, number>;
 	/** 单独设置过的账号(账号名小写):direct 不走代理,custom 用自己的代理(密码打码) */
 	accounts: Record<string, {mode: 'direct' | 'custom'; url: string}>;
@@ -110,9 +125,8 @@ export interface GlobalProxyBody {
 	type?: unknown;
 	username?: unknown;
 	password?: unknown;
+	poolSize?: unknown;
 	loginsPerMinute?: unknown;
-	from?: unknown;
-	to?: unknown;
 }
 
 function proxyError(statusCode: number, message: string): Error & {statusCode: number} {
@@ -175,14 +189,19 @@ function checkedLoginLimit(raw: unknown): number {
 	return limit;
 }
 
-/** 校验编号范围;没给的用现在的 */
-function checkedRange(body: {from?: unknown; to?: unknown}, current: {from: number; to: number}): {from: number; to: number} {
-	const from = body.from === undefined || body.from === '' ? current.from : Number(body.from);
-	const to = body.to === undefined || body.to === '' ? current.to : Number(body.to);
-	if (!Number.isInteger(from) || !Number.isInteger(to) || from < 1 || to > MAX_INDEX || from > to) {
-		throw proxyError(400, `编号范围要是 1 到 ${MAX_INDEX} 之间的整数,起始不大于结束`);
+/** IP 数量:轮换代理必填(1 到上限的整数),静态代理不用 */
+function checkedPoolSize(raw: unknown, required: boolean): number {
+	if (raw === undefined || raw === null || raw === '' || raw === 0) {
+		if (required) {
+			throw proxyError(400, '请填写 IP 数量(轮换池里有几个 IP,webshare 是代理列表的个数)');
+		}
+		return 0;
 	}
-	return {from, to};
+	const size = Number(raw);
+	if (!Number.isInteger(size) || size < 1 || size > MAX_POOL_SIZE) {
+		throw proxyError(400, `IP 数量要是 1 到 ${MAX_POOL_SIZE} 的整数`);
+	}
+	return size;
 }
 
 export function createProxyService(options: ProxyServiceOptions) {
@@ -191,14 +210,15 @@ export function createProxyService(options: ProxyServiceOptions) {
 	const now = options.now ?? Date.now;
 	const random = options.random ?? Math.random;
 	let config: ProxyConfig = options.store.load();
-	/** 全局代理现在用的地址:没启用、没填主机为 ''(直连) */
-	const globalUrl = () => (config.global.enabled && config.global.host ? buildProxyUrl(config.global) : '');
+	/** 全局代理现在用的地址:没启用、没填主机为 ''(直连);轮换代理是带 {n} 的模板 */
+	const globalUrl = () => (config.global.enabled && config.global.host ? globalProxyUrl(config.global) : '');
+	/** 这次运行里各账号分到的编号(账号名小写;'' 是认不出账号的请求共用的);不存盘,重启后重新分 */
+	const assigned = new Map<string, number>();
 	/** 走全局代理开始的 Steam 登录:每分钟次数限制;全局代理没启用时不限 */
 	const logins = createLoginLimiter({limit: () => (globalUrl() ? config.global.loginsPerMinute : 0), ...options.loginClock});
 	/**
-	 * 「账号 + 代理地址」→ 走它的 fetch。每个账号各用各的长连接:轮换代理每个新连接换一个出口 IP,
-	 * 共用连接的话几个账号会从同一个 IP 出去;分开后同一账号一段时间内 IP 稳定,账号之间不混。
-	 * 认不出账号的请求(查价格、nameid)共用一组
+	 * 「账号 + 代理地址」→ 走它的 fetch。每个账号各用各的长连接,账号之间的连接不混
+	 * (单独代理是一个按连接换 IP 的入口时,同一账号一段时间内 IP 也稳定)。认不出账号的请求(查价格、nameid)共用一组
 	 */
 	const fetchers = new Map<string, typeof fetch>();
 	/** SteamID → 账号名,只记找到的 */
@@ -229,36 +249,26 @@ export function createProxyService(options: ProxyServiceOptions) {
 	}
 
 	const isSticky = () => isProxyTemplate(globalUrl());
-	const inRange = (index: unknown): index is number =>
-		Number.isInteger(index) && (index as number) >= config.range.from && (index as number) <= config.range.to;
+	/** 轮换池的编号是 1 到 IP 数量 */
+	const poolSize = () => Math.max(1, config.global.poolSize);
 
-	/** 给账号挑编号:先挑没被别的账号占着的;都占满了就随便挑。尽量不挑 avoid(换编号时的旧编号) */
-	function pickIndex(key: string, avoid?: number): number {
-		const {from, to} = config.range;
-		const taken = new Set(Object.entries(config.assigned).filter(([other]) => other !== key).map(([, index]) => index));
-		const all: number[] = [];
-		const free: number[] = [];
-		for (let index = from; index <= to; index++) {
-			if (index === avoid && to > from) {
-				continue;
-			}
-			all.push(index);
-			if (!taken.has(index)) {
-				free.push(index);
-			}
-		}
+	/** 给账号挑编号:先挑没被别的账号占着的;都占满了就随便挑 */
+	function pickIndex(key: string): number {
+		const taken = new Set([...assigned].filter(([other]) => other !== key).map(([, index]) => index));
+		const all = Array.from({length: poolSize()}, (_, offset) => offset + 1);
+		const free = all.filter(index => !taken.has(index));
 		const pool = free.length ? free : all;
 		return pool[Math.min(pool.length - 1, Math.floor(random() * pool.length))]!;
 	}
 
-	/** 账号的编号:分过(且还在范围内)就用分过的,没有就现分一个并记下 */
+	/** 账号的编号:这次运行分过(且还在池里)就用分过的,没有就现分一个 */
 	function indexFor(key: string): number {
-		const current = config.assigned[key];
-		if (inRange(current)) {
+		const current = assigned.get(key);
+		if (current !== undefined && current <= poolSize()) {
 			return current;
 		}
 		const index = pickIndex(key);
-		persist({...config, assigned: {...config.assigned, [key]: index}});
+		assigned.set(key, index);
 		return index;
 	}
 
@@ -289,17 +299,6 @@ export function createProxyService(options: ProxyServiceOptions) {
 	 */
 	function queueLogin(accountName: unknown, cancelled?: () => boolean): LoginSlot | null {
 		return usesGlobal(accountName) ? logins.acquire(cancelled) : null;
-	}
-
-	/** 手动登录(新建会话)前调:固定 IP 模式下给走全局代理的账号换一个编号(也就是换一个 IP) */
-	function renew(accountName: unknown): void {
-		const key = String(accountName || '').trim().toLowerCase();
-		const override = key ? config.accounts[key] : undefined;
-		if (!key || !isSticky() || (override && override !== 'global')) {
-			return;
-		}
-		const previous = config.assigned[key];
-		persist({...config, assigned: {...config.assigned, [key]: pickIndex(key, inRange(previous) ? previous : undefined)}});
 	}
 
 	function accountOf(steamId: string): string {
@@ -350,9 +349,8 @@ export function createProxyService(options: ProxyServiceOptions) {
 			global: maskProxyUrl(globalUrl()),
 			settings: {...settings, hasPassword: !!password},
 			sticky: isSticky(),
-			range: {...config.range},
 			accounts,
-			assigned: {...config.assigned}
+			assigned: Object.fromEntries(assigned)
 		};
 	}
 
@@ -379,7 +377,7 @@ export function createProxyService(options: ProxyServiceOptions) {
 		const port = checkedPort(pick('port'), host);
 		const type = String(pick('type') ?? '') as ProxyKind;
 		if (!PROXY_KINDS.includes(type)) {
-			throw proxyError(400, '类型只能是 静态 / 轮换 / 按账号固定 IP');
+			throw proxyError(400, '类型只能是 静态 或 轮换');
 		}
 		const username = String(pick('username') ?? '').trim();
 		const typed = body.password === undefined || body.password === null ? '' : String(body.password).trim();
@@ -395,27 +393,32 @@ export function createProxyService(options: ProxyServiceOptions) {
 			type,
 			username,
 			password: username ? typed || current.password : '',
+			poolSize: checkedPoolSize(pick('poolSize'), type === 'rotating' && !!host),
 			loginsPerMinute: checkedLoginLimit(pick('loginsPerMinute'))
 		};
-		const template = isProxyTemplate(buildProxyUrl(settings));
-		if (type === 'sticky' && host && !template) {
-			throw proxyError(400, '按账号固定 IP 要在用户名里写 {n}(如 kxkviurm-{n}),{n} 换成每个账号分到的编号');
-		}
-		if (type !== 'sticky' && template) {
-			throw proxyError(400, '写了 {n} 的是按账号固定 IP:类型选「按账号固定 IP」,或者把 {n} 换成具体编号');
+		if (type === 'static') {
+			settings.poolSize = 0;
+			if (isProxyTemplate(buildProxyUrl(settings))) {
+				throw proxyError(400, '静态代理只有一个 IP,用户名里不要写 {n}');
+			}
+		} else if (host && !isProxyTemplate(globalProxyUrl(settings))) {
+			throw proxyError(400, '轮换代理要能给每个账号固定一个 IP:webshare 的用户名以 -rotate 结尾,别家在用户名里用 {n} 标出编号的位置;做不到的类型选「静态」');
 		}
 		return settings;
 	}
 
 	/**
-	 * 设全局代理:各项不传的照旧(密码留空保留原来的),enabled 关了就直连;按账号固定 IP 要编号范围 from / to。
-	 * 已分的编号在新范围里的照旧,范围外的下次用时重新分。登录速率限制改了马上按新的放行排队的登录
+	 * 设全局代理:各项不传的照旧(密码留空保留原来的),enabled 关了就直连。
+	 * 已分的编号还在新的 IP 数量以内的照旧,超出的下次用时重新分。登录速率限制改了马上按新的放行排队的登录
 	 */
 	function setGlobal(body: GlobalProxyBody): PublicProxyConfig {
 		const global = checkedGlobal(body, false);
-		const range = isProxyTemplate(buildProxyUrl(global)) ? checkedRange(body, config.range) : config.range;
-		const assigned = Object.fromEntries(Object.entries(config.assigned).filter(([, index]) => index >= range.from && index <= range.to));
-		const result = save({...config, global, range, assigned});
+		for (const [key, index] of assigned) {
+			if (index > Math.max(1, global.poolSize)) {
+				assigned.delete(key);
+			}
+		}
+		const result = save({...config, global});
 		logins.update();
 		return result;
 	}
@@ -473,17 +476,15 @@ export function createProxyService(options: ProxyServiceOptions) {
 
 	/**
 	 * 测代理:传了 host 测页面上还没保存的全局代理各项,传了 proxy 测填的地址(账号的单独代理),
-	 * 都没有测这个账号(或全局)现在用的;带 {n} 的随机挑范围里一个编号。
-	 * 回出口 IP 和耗时,再顺带打开一次 Steam 社区看这个 IP 有没有被限流。
-	 * 固定 IP 模式下两次请求是同一个 IP;轮换代理每个连接换 IP,两次不一定是同一个
+	 * 都没有测这个账号(或全局)现在用的;轮换代理测还没保存的(或认不出账号的)随机挑池里一个编号。
+	 * 回出口 IP 和耗时,再顺带打开一次 Steam 社区看这个 IP 有没有被限流;两次请求是同一个编号(同一个 IP)
 	 */
 	async function test(body: GlobalProxyBody & {proxy?: unknown; accountName?: unknown}): Promise<ProxyTestResult> {
-		let proxyUrl = body.host !== undefined
-			? buildProxyUrl(checkedGlobal(body, true))
-			: String(body.proxy ?? '').trim() ? checkedProxyUrl(body.proxy) : proxyFor(body.accountName);
+		const form = body.host !== undefined ? checkedGlobal(body, true) : null;
+		let proxyUrl = form ? globalProxyUrl(form) : String(body.proxy ?? '').trim() ? checkedProxyUrl(body.proxy) : proxyFor(body.accountName);
 		if (isProxyTemplate(proxyUrl)) {
-			const {from, to} = checkedRange(body, config.range);
-			proxyUrl = fillProxyTemplate(proxyUrl, from + Math.min(to - from, Math.floor(random() * (to - from + 1))));
+			const size = Math.max(1, form ? form.poolSize : config.global.poolSize);
+			proxyUrl = fillProxyTemplate(proxyUrl, 1 + Math.min(size - 1, Math.floor(random() * size)));
 		}
 		if (!proxyUrl) {
 			throw proxyError(400, body.accountName ? '这个账号现在不走代理' : config.global.host ? '全局代理没启用' : '还没有设置代理');
@@ -515,7 +516,7 @@ export function createProxyService(options: ProxyServiceOptions) {
 		return {ip: ip.slice(0, 64), ms, proxy: maskProxyUrl(proxyUrl), steam: await checkSteam(proxyUrl)};
 	}
 
-	return {proxyFor, proxyForCookies, renew, queueLogin, fetch: steamFetch, publicConfig, setGlobal, setAccount, test};
+	return {proxyFor, proxyForCookies, queueLogin, fetch: steamFetch, publicConfig, setGlobal, setAccount, test};
 }
 
 export type ProxyService = ReturnType<typeof createProxyService>;

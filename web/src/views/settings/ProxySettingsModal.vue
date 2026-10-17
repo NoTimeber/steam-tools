@@ -1,6 +1,7 @@
 <script setup lang="ts">
-// 全局 Steam 代理的设置页(运行设置 → Steam 代理):连接(协议、主机、端口、类型、登录速率限制、启用)和身份验证(用户名、密码)分开填。
-// 密码不回显,留空保留原来的;往主机栏粘贴一整串 http://用户名:密码@主机:端口 会自动拆开。单个账号的代理在账户管理里改。
+// 全局 Steam 代理的设置页(运行设置 → Steam 代理):连接(协议、主机、端口、类型、IP 数量、登录速率限制、启用)和身份验证(用户名、密码)
+// 分开填,输入框里不放灰字示例。密码不回显,留空保留原来的;往主机栏粘贴一整串 http://用户名:密码@主机:端口 会自动拆开。
+// 单个账号的代理在账户管理里改。
 import {computed, reactive, watch} from 'vue';
 import {
 	NAlert, NButton, NCard, NForm, NFormItem, NInput, NInputNumber, NModal, NSelect, NSpace, NSwitch, NTooltip, useMessage
@@ -19,7 +20,7 @@ const protocolOptions = [{label: 'HTTP', value: 'http'}, {label: 'HTTPS', value:
 const kindOptions = PROXY_KIND_OPTIONS.map(({value, label}) => ({value, label}));
 
 const form = reactive<GlobalProxyForm>({
-	enabled: false, protocol: 'http', host: '', port: null, type: 'rotating', username: '', password: '', loginsPerMinute: null, from: 1, to: 1
+	enabled: false, protocol: 'http', host: '', port: null, type: 'rotating', username: '', password: '', poolSize: null, loginsPerMinute: null
 });
 const ui = reactive({authOpen: true, busy: '' as '' | 'save' | 'test', error: '', result: null as ProxyTestResult | null});
 
@@ -28,7 +29,7 @@ watch(() => props.show, show => {
 	if (!show) {
 		return;
 	}
-	const {settings, range} = proxy.config;
+	const {settings} = proxy.config;
 	Object.assign(form, {
 		enabled: settings.enabled,
 		protocol: settings.protocol,
@@ -37,16 +38,15 @@ watch(() => props.show, show => {
 		type: settings.type,
 		username: settings.username,
 		password: '',
-		loginsPerMinute: settings.loginsPerMinute || null,
-		from: range.from,
-		to: range.to
+		poolSize: settings.poolSize || null,
+		loginsPerMinute: settings.loginsPerMinute || null
 	});
 	Object.assign(ui, {authOpen: true, busy: '', error: '', result: null});
 }, {immediate: true});
 
 const kindHelp = computed(() => PROXY_KIND_OPTIONS.find(option => option.value === form.type)?.help ?? '');
-const sticky = computed(() => form.type === 'sticky');
-const steamView = computed(() => (ui.result ? steamCheckView(ui.result.steam, false) : null));
+const rotating = computed(() => form.type === 'rotating');
+const steamView = computed(() => (ui.result ? steamCheckView(ui.result.steam) : null));
 
 /** 主机栏粘贴了一整串地址:拆成各项填好 */
 function onHostPaste(event: ClipboardEvent): void {
@@ -56,9 +56,8 @@ function onHostPaste(event: ClipboardEvent): void {
 	}
 	event.preventDefault();
 	Object.assign(form, {protocol: parts.protocol, host: parts.host, port: parts.port, username: parts.username, password: parts.password});
-	if ([parts.host, parts.username, parts.password].some(text => text.includes('{n}'))) {
-		form.type = 'sticky';
-	} else if (form.type === 'sticky') {
+	// 带 {n} 或 webshare 的 -rotate:是轮换入口
+	if ([parts.host, parts.username, parts.password].some(text => text.includes('{n}')) || /-rotate$/i.test(parts.username)) {
 		form.type = 'rotating';
 	}
 	ui.authOpen = true;
@@ -118,30 +117,22 @@ function check(): Promise<void> {
 							<NSelect v-model:value="form.protocol" :options="protocolOptions" />
 						</NFormItem>
 						<NFormItem label="主机" required>
-							<NInput
-								v-model:value="form.host"
-								placeholder="p.webshare.io"
-								:input-props="{autocomplete: 'off', spellcheck: false, onPaste: onHostPaste}"
-							/>
+							<NInput v-model:value="form.host" placeholder="" :input-props="{autocomplete: 'off', spellcheck: false, onPaste: onHostPaste}" />
 						</NFormItem>
 						<NFormItem label="端口" required>
-							<NInputNumber v-model:value="form.port" :min="1" :max="65535" :precision="0" :show-button="false" placeholder="80" class="full" />
+							<NInputNumber v-model:value="form.port" :min="1" :max="65535" :precision="0" :show-button="false" placeholder="" class="full" />
 						</NFormItem>
 						<NFormItem label="类型" required :feedback="kindHelp">
 							<NSelect v-model:value="form.type" :options="kindOptions" />
 						</NFormItem>
-						<NFormItem v-if="sticky" class="wide" label="编号范围" required feedback="{n} 从这个范围里给每个账号分一个(webshare 按代理列表的序号)。">
-							<NSpace align="center" :size="6" :wrap="false">
-								<NInputNumber v-model:value="form.from" :min="1" :max="100000" :precision="0" class="index-input" />
-								<span class="muted">-</span>
-								<NInputNumber v-model:value="form.to" :min="1" :max="100000" :precision="0" class="index-input" />
-							</NSpace>
+						<NFormItem v-if="rotating" label="IP 数量" required feedback="池里有几个 IP(webshare 是代理列表的个数),每个账号分一个不重复的。">
+							<NInputNumber v-model:value="form.poolSize" :min="1" :max="100000" :precision="0" :show-button="false" placeholder="" class="full" />
 						</NFormItem>
 						<NFormItem
 							label="登录速率限制"
 							feedback="每分钟最多经这个代理开始几次 Steam 登录,所有任务都算。同一 IP 登录太多次 Steam 会拒绝,提供商按间隔换 IP 或静态代理时建议设。超出的排队等待,留空不限。"
 						>
-							<NInputNumber v-model:value="form.loginsPerMinute" :min="1" :max="10000" :precision="0" :show-button="false" placeholder="不限" clearable class="full">
+							<NInputNumber v-model:value="form.loginsPerMinute" :min="1" :max="10000" :precision="0" :show-button="false" placeholder="" clearable class="full">
 								<template #suffix>次/分钟</template>
 							</NInputNumber>
 						</NFormItem>
@@ -161,18 +152,14 @@ function check(): Promise<void> {
 					</button>
 					<div v-show="ui.authOpen" class="fields">
 						<NFormItem label="用户名">
-							<NInput
-								v-model:value="form.username"
-								:placeholder="sticky ? 'kxkviurm-{n}' : 'kxkviurm-rotate'"
-								:input-props="{autocomplete: 'off', spellcheck: false}"
-							/>
+							<NInput v-model:value="form.username" placeholder="" :input-props="{autocomplete: 'off', spellcheck: false}" />
 						</NFormItem>
 						<NFormItem label="密码" :feedback="proxy.config.settings.hasPassword ? '留空保留当前密码。' : ''">
 							<NInput
 								v-model:value="form.password"
 								type="password"
 								show-password-on="click"
-								:placeholder="proxy.config.settings.hasPassword ? '已保存' : ''"
+								placeholder=""
 								:input-props="{autocomplete: 'new-password'}"
 							/>
 						</NFormItem>
@@ -281,10 +268,6 @@ function check(): Promise<void> {
 
 .full {
 	width: 100%;
-}
-
-.index-input {
-	width: 120px;
 }
 
 .row {

@@ -94,8 +94,8 @@ export interface PublicHistory {
 
 export type ProxyProtocol = 'http' | 'https';
 
-/** 代理类型:静态、轮换、按账号固定 IP(用户名里写 {n}) */
-export type ProxyKind = 'static' | 'rotating' | 'sticky';
+/** 代理类型:静态(一个固定 IP,账号共用)、轮换(工具台把每个账号固定在池里的一个 IP 上) */
+export type ProxyKind = 'static' | 'rotating';
 
 /** 全局代理各项(src/store/proxies.ts);密码不下发,只说有没有 */
 export interface GlobalProxySettings {
@@ -107,22 +107,23 @@ export interface GlobalProxySettings {
 	type: ProxyKind;
 	username: string;
 	hasPassword: boolean;
+	/** 轮换池里有几个 IP,0 为没填 */
+	poolSize: number;
 	/** 每分钟最多经这个代理开始几次 Steam 登录,0 不限 */
 	loginsPerMinute: number;
 }
 
 /** Steam 代理设置(src/proxy/index.ts;代理密码打码成 ****) */
 export interface PublicProxyConfig {
-	/** 全局代理现在用的地址,'' 为没设或没启用;带 {n} 时是固定 IP 模式 */
+	/** 全局代理现在用的地址,'' 为没设或没启用;轮换代理是带 {n} 的模板 */
 	global: string;
 	/** 全局代理各项(代理设置页的表单) */
 	settings: GlobalProxySettings;
+	/** 全局代理是轮换、按账号固定 IP */
 	sticky: boolean;
-	/** 固定 IP 模式的编号范围 */
-	range: {from: number; to: number};
 	/** 单独设置过的账号(账号名小写) */
 	accounts: Record<string, {mode: 'direct' | 'custom'; url: string}>;
-	/** 固定 IP 模式下各账号分到的编号(账号名小写) */
+	/** 这次运行里各账号分到的编号(账号名小写;重启后重新分) */
 	assigned: Record<string, number>;
 }
 

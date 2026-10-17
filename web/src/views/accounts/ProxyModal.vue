@@ -57,8 +57,8 @@ function check(): Promise<void> {
 	});
 }
 
-/** 测试结果里的 Steam 社区检查;跟随全局的固定 IP 账号被限流时提示重新登录换一个 */
-const steamView = computed(() => (form.result ? steamCheckView(form.result.steam, form.mode === 'global' && proxy.config.sticky) : null));
+/** 测试结果里的 Steam 社区检查 */
+const steamView = computed(() => (form.result ? steamCheckView(form.result.steam) : null));
 
 const canSave = computed(() => form.mode !== 'custom' || !!form.input.trim() || !!ownProxy.value);
 const canTest = computed(() => (form.mode === 'custom' ? !!form.input.trim() || !!ownProxy.value : form.mode === 'global' && !!proxy.config.global));

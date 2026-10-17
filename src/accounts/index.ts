@@ -49,8 +49,6 @@ export interface AccountServiceOptions {
 	now?: () => number;
 	/** 消费记录翻页之间的等待(测试里给立即返回的) */
 	sleep?: (ms: number) => Promise<void>;
-	/** 手动登录、要新建会话前调(固定 IP 代理在这时给账号换 IP);复用现有会话、自动重连、重启恢复都不调 */
-	onNewLogin?: (accountName: string) => void;
 	logger?: Pick<Console, 'warn'>;
 }
 
@@ -258,7 +256,6 @@ export function createAccountService(options: AccountServiceOptions) {
 		}
 
 		// 新建会话时会先拆掉该账号的旧会话(已登出/掉线/失败的)
-		options.onNewLogin?.(accountName);
 		const attempt = sessions.createAttempt(attemptProfile(accountName, remember, sharedSecret, identitySecret));
 		if (!body.sharedSecret && local.sharedSecret) {
 			sessions.addLog(attempt, 'info', '已从本地 maFile 载入 shared_secret');
@@ -285,9 +282,6 @@ export function createAccountService(options: AccountServiceOptions) {
 			throw accountError(400, 'refreshToken 不能为空');
 		}
 		const local = profiles.local(accountName);
-		if (accountName) {
-			options.onNewLogin?.(accountName);
-		}
 		const attempt = sessions.createAttempt(attemptProfile(accountName, !!body.remember, local.sharedSecret, local.identitySecret));
 		sessions.startLogon(attempt, {refreshToken});
 		return {attempt: sessions.publicAttempt(attempt)};

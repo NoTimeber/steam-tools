@@ -99,13 +99,11 @@ test('maFile 与 session:加密存取、按账号名不区分大小写', () => {
 
 test('代理设置:没存过是空的;加密存取,代理密码不明文落盘', () => {
 	const {store, dir} = freshStore();
-	const empty = {enabled: false, protocol: 'http', host: '', port: 0, type: 'rotating', username: '', password: '', loginsPerMinute: 0} as const;
-	assert.deepEqual(store.proxies.load(), {global: empty, range: {from: 1, to: 1}, accounts: {}, assigned: {}});
+	const empty = {enabled: false, protocol: 'http', host: '', port: 0, type: 'rotating', username: '', password: '', poolSize: 0, loginsPerMinute: 0} as const;
+	assert.deepEqual(store.proxies.load(), {global: empty, accounts: {}});
 	const config = {
-		global: {enabled: true, protocol: 'http', host: 'p.example.io', port: 80, type: 'sticky', username: 'user-{n}', password: 'PROXY-PLAINTEXT', loginsPerMinute: 5},
-		range: {from: 1, to: 100},
-		accounts: {alpha: 'direct', bravo: 'http://u:p@1.2.3.4:8080'},
-		assigned: {charlie: 7}
+		global: {enabled: true, protocol: 'http', host: 'p.example.io', port: 80, type: 'rotating', username: 'user-rotate', password: 'PROXY-PLAINTEXT', poolSize: 100, loginsPerMinute: 5},
+		accounts: {alpha: 'direct', bravo: 'http://u:p@1.2.3.4:8080'}
 	} as const;
 	store.proxies.save(structuredClone(config) as never);
 	assert.deepEqual(store.proxies.load(), config);
@@ -113,23 +111,40 @@ test('代理设置:没存过是空的;加密存取,代理密码不明文落盘',
 	store.close();
 });
 
-test('代理设置:1.6.8–1.6.10 存的整串全局地址读出来拆成各项(开着;带 {n} 是按账号固定 IP,其它当轮换),账号设置和编号照旧', () => {
+test('代理设置:1.6.8–1.6.10 存的整串全局地址拆成各项(开着、轮换;带 {n} 的 IP 数量取编号范围结束值),旧的编号不再读,账号设置照旧', () => {
 	const {store} = freshStore();
 	const old = (global: string) => ({global, range: {from: 2, to: 9}, accounts: {alpha: 'direct'}, assigned: {bravo: 3}});
 	store.proxies.save(old('http://kxk-rotate:p%40ss%3Aword@p.webshare.io:80') as never);
 	assert.deepEqual(store.proxies.load(), {
-		global: {enabled: true, protocol: 'http', host: 'p.webshare.io', port: 80, type: 'rotating', username: 'kxk-rotate', password: 'p@ss:word', loginsPerMinute: 0},
-		range: {from: 2, to: 9},
-		accounts: {alpha: 'direct'},
-		assigned: {bravo: 3}
+		global: {enabled: true, protocol: 'http', host: 'p.webshare.io', port: 80, type: 'rotating', username: 'kxk-rotate', password: 'p@ss:word', poolSize: 0, loginsPerMinute: 0},
+		accounts: {alpha: 'direct'}
 	});
 	store.proxies.save(old('https://kxk-{n}:pw@P.Example.io:8443') as never);
-	assert.deepEqual(store.proxies.load().global, {enabled: true, protocol: 'https', host: 'p.example.io', port: 8443, type: 'sticky', username: 'kxk-{n}', password: 'pw', loginsPerMinute: 0});
+	assert.deepEqual(store.proxies.load().global, {enabled: true, protocol: 'https', host: 'p.example.io', port: 8443, type: 'rotating', username: 'kxk-{n}', password: 'pw', poolSize: 9, loginsPerMinute: 0});
 	store.proxies.save(old('10.0.0.1:3128') as never);
-	assert.deepEqual(store.proxies.load().global, {enabled: true, protocol: 'http', host: '10.0.0.1', port: 3128, type: 'rotating', username: '', password: '', loginsPerMinute: 0});
+	assert.deepEqual(store.proxies.load().global, {enabled: true, protocol: 'http', host: '10.0.0.1', port: 3128, type: 'rotating', username: '', password: '', poolSize: 0, loginsPerMinute: 0});
 	store.proxies.save(old('') as never);
 	assert.equal(store.proxies.load().global.enabled, false, '没设过的还是没设');
 	assert.equal(store.proxies.load().global.host, '');
+	store.close();
+});
+
+test('代理设置:1.6.11 的「按账号固定 IP」并进轮换(IP 数量取编号范围结束值),静态照旧', () => {
+	const {store} = freshStore();
+	const v1611 = (type: string) => ({
+		global: {enabled: true, protocol: 'http', host: 'p.webshare.io', port: 80, type, username: 'kxk-{n}', password: 'pw', loginsPerMinute: 3},
+		range: {from: 1, to: 50},
+		accounts: {},
+		assigned: {alpha: 7}
+	});
+	store.proxies.save(v1611('sticky') as never);
+	assert.deepEqual(store.proxies.load(), {
+		global: {enabled: true, protocol: 'http', host: 'p.webshare.io', port: 80, type: 'rotating', username: 'kxk-{n}', password: 'pw', poolSize: 50, loginsPerMinute: 3},
+		accounts: {}
+	});
+	assert.deepEqual([store.proxies.load().global.type, store.proxies.load().global.poolSize], ['rotating', 50]);
+	store.proxies.save(v1611('static') as never);
+	assert.deepEqual([store.proxies.load().global.type, store.proxies.load().global.poolSize], ['static', 0]);
 	store.close();
 });
 

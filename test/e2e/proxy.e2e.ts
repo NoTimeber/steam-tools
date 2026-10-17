@@ -57,7 +57,7 @@ describe('Steam 代理', () => {
 		await new Promise<void>(resolve => proxyServer.listen(0, '127.0.0.1', resolve));
 		const port = (proxyServer.address() as AddressInfo).port;
 		proxyUrl = `http://e2e-user:e2e%3Apass@127.0.0.1:${port}`;
-		fields = {enabled: true, protocol: 'http', host: '127.0.0.1', port, type: 'rotating', username: 'e2e-user', password: 'e2e:pass', loginsPerMinute: ''};
+		fields = {enabled: true, protocol: 'http', host: '127.0.0.1', port, type: 'static', username: 'e2e-user', password: 'e2e:pass', poolSize: '', loginsPerMinute: ''};
 
 		appRoot = tempDir('proxy');
 		mkdirSync(join(appRoot, 'data', 'config'), {recursive: true});
@@ -75,8 +75,8 @@ describe('Steam 代理', () => {
 	});
 
 	test('设置:没设时为空;不对的 400;保存后下发各项(不带密码)和打码的地址;密码留空保留', async () => {
-		const empty = {enabled: false, protocol: 'http', host: '', port: 0, type: 'rotating', username: '', hasPassword: false, loginsPerMinute: 0};
-		assert.deepEqual((await client.get('/api/proxy')).json.proxy, {global: '', settings: empty, sticky: false, range: {from: 1, to: 1}, accounts: {}, assigned: {}});
+		const empty = {enabled: false, protocol: 'http', host: '', port: 0, type: 'rotating', username: '', hasPassword: false, poolSize: 0, loginsPerMinute: 0};
+		assert.deepEqual((await client.get('/api/proxy')).json.proxy, {global: '', settings: empty, sticky: false, accounts: {}, assigned: {}});
 		const bad = await client.post('/api/proxy/global', {...fields, protocol: 'socks5'});
 		assert.equal(bad.status, 400);
 		assert.match(bad.json.error, /SOCKS/);
@@ -126,25 +126,27 @@ describe('Steam 代理', () => {
 		assert.deepEqual([directly.status, directly.count], ['done', 37]);
 	});
 
-	test('按账号固定 IP:用户名带 {n},账号分到的编号记下来;手动重新登录换一个,测试按编号连代理', async () => {
-		const saved = await client.post('/api/proxy/global', {enabled: true, type: 'sticky', username: 'e2e-{n}', from: 1, to: 5});
+	test('轮换:webshare 的 -rotate 换成 -编号,账号分到一个编号一直用,重新登录也不换;测试按编号连代理', async () => {
+		const saved = await client.post('/api/proxy/global', {enabled: true, type: 'rotating', username: 'e2e-rotate', poolSize: 5});
 		assert.equal(saved.status, 200, saved.text);
-		assert.deepEqual([saved.json.proxy.sticky, saved.json.proxy.range], [true, {from: 1, to: 5}]);
+		assert.deepEqual([saved.json.proxy.sticky, saved.json.proxy.settings.username, saved.json.proxy.settings.poolSize], [true, 'e2e-rotate', 5]);
 
 		const tested = await client.post('/api/proxy/test', {accountName: 'hotel'});
 		assert.equal(tested.status, 200, tested.text);
 		const first = (await client.get('/api/proxy')).json.proxy.assigned.hotel as number;
 		assert.ok(first >= 1 && first <= 5, String(first));
-		assert.equal(plain.at(-1)?.auth, 'Basic ' + Buffer.from(`e2e-${first}:e2e:pass`).toString('base64'), '用分到的编号连代理');
+		const auth = 'Basic ' + Buffer.from(`e2e-${first}:e2e:pass`).toString('base64');
+		assert.equal(plain.at(-1)?.auth, auth, '用分到的编号连代理');
 
 		const relogin = await client.post('/api/login', {accountName: 'hotel', force: true});
 		assert.equal(relogin.status, 200, relogin.text);
-		const second = (await client.get('/api/proxy')).json.proxy.assigned.hotel as number;
-		assert.ok(second >= 1 && second <= 5 && second !== first, `${first} → ${second}`);
+		assert.equal((await client.get('/api/proxy')).json.proxy.assigned.hotel, first, '重新登录不换');
+		await client.post('/api/proxy/test', {accountName: 'hotel'});
+		assert.equal(plain.at(-1)?.auth, auth, '还是同一个编号');
 
-		const again = await client.post('/api/login', {accountName: 'hotel'});
-		assert.equal(again.json.reused, true);
-		assert.equal((await client.get('/api/proxy')).json.proxy.assigned.hotel, second, '在线时再点登录不换');
+		const unpinned = await client.post('/api/proxy/global', {username: 'e2e-user'});
+		assert.equal(unpinned.status, 400, '不知道怎么固定的轮换代理不让存');
+		assert.match(unpinned.json.error, /轮换代理要能给每个账号固定一个 IP/);
 		await client.post('/api/proxy/global', {enabled: false});
 	});
 });

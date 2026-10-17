@@ -6,18 +6,18 @@ import type {AccountProxyMode, GlobalProxySettings, ProxyKind, ProxyProtocol, Pr
 import {addLog} from './logs.ts';
 
 const emptySettings = (): GlobalProxySettings => ({
-	enabled: false, protocol: 'http', host: '', port: 0, type: 'rotating', username: '', hasPassword: false, loginsPerMinute: 0
+	enabled: false, protocol: 'http', host: '', port: 0, type: 'rotating', username: '', hasPassword: false, poolSize: 0, loginsPerMinute: 0
 });
 
 const state = reactive({
-	config: {global: '', settings: emptySettings(), sticky: false, range: {from: 1, to: 1}, accounts: {}, assigned: {}} as PublicProxyConfig,
+	config: {global: '', settings: emptySettings(), sticky: false, accounts: {}, assigned: {}} as PublicProxyConfig,
 	loaded: false,
 	error: ''
 });
 
 export const proxy = state;
 
-/** 代理设置页提交的各项;password 留空保留原来的,数字留空为 null(端口没填、登录不限) */
+/** 代理设置页提交的各项;password 留空保留原来的,数字留空为 null(没填;登录速率限制为不限) */
 export interface GlobalProxyForm {
 	enabled: boolean;
 	protocol: ProxyProtocol;
@@ -26,15 +26,14 @@ export interface GlobalProxyForm {
 	type: ProxyKind;
 	username: string;
 	password: string;
+	/** 轮换池里有几个 IP */
+	poolSize: number | null;
 	loginsPerMinute: number | null;
-	/** 按账号固定 IP 的编号范围 */
-	from: number | null;
-	to: number | null;
 }
 
 /** 表单各项转成接口参数(空的数字传 '') */
 function formBody(form: GlobalProxyForm) {
-	return {...form, port: form.port ?? '', loginsPerMinute: form.loginsPerMinute ?? '', from: form.from ?? '', to: form.to ?? ''};
+	return {...form, port: form.port ?? '', poolSize: form.poolSize ?? '', loginsPerMinute: form.loginsPerMinute ?? ''};
 }
 
 /** 读代理设置;读不到时页面上照样能用(当作没设) */
@@ -51,9 +50,9 @@ export async function loadProxy(): Promise<void> {
 /** 保存全局代理;不对的服务端回 400,错误抛给页面显示 */
 export async function saveGlobalProxy(form: GlobalProxyForm): Promise<void> {
 	state.config = (await api.post<{proxy: PublicProxyConfig}>('/api/proxy/global', formBody(form))).proxy;
-	const {settings, sticky, range} = state.config;
+	const {settings, sticky} = state.config;
 	addLog('success', settings.enabled
-		? `全局 Steam 代理已设为 ${state.config.global}` + (sticky ? `(按账号固定 IP,编号 ${range.from}-${range.to})` : '')
+		? `全局 Steam 代理已设为 ${state.config.global}` + (sticky ? `(轮换,${settings.poolSize} 个 IP,每个账号固定一个)` : '')
 			+ (settings.loginsPerMinute ? `,登录每分钟最多 ${settings.loginsPerMinute} 次` : '')
 		: '全局 Steam 代理已关闭,Steam 请求直连');
 }
