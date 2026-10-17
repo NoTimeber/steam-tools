@@ -25,3 +25,7 @@ module-development/
 *.md
 **/*.test.ts
 test/
+
+# 面板一键更新:宿主机脚本和进度,不进镜像
+deploy/
+updater/

@@ -218,3 +218,24 @@ export interface UpdateStatus {
 	/** 最近一次检查失败的原因 */
 	error?: string;
 }
+
+/** 面板「立即更新」的进度(src/core/self-update.ts;更新在宿主机上做) */
+export interface SelfUpdateStatus {
+	/** 服务器上装了更新器(deploy/install-updater.sh) */
+	installed: boolean;
+	/** idle 没有更新;pending 请求放了、更新器还没接手;running 更新中;done / failed 上次的结果 */
+	state: 'idle' | 'pending' | 'running' | 'done' | 'failed';
+	/** git 拉代码、pull 拉镜像、up 重启服务 */
+	step: '' | 'git' | 'pull' | 'up';
+	message: string;
+	/** 失败那一步最后几十行输出 */
+	log: string;
+	requestedAt: number;
+	startedAt: number;
+	finishedAt: number;
+	updatedAt: number;
+	from: string;
+	to: string;
+	/** 请求很久没人接手,或者「更新中」很久没动静 */
+	stale: boolean;
+}

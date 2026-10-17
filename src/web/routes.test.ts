@@ -6,6 +6,7 @@ import {accountRoutes} from '../accounts/routes.ts';
 import type {AccountService} from '../accounts/index.ts';
 import {buyGameRoutes} from '../buygame/routes.ts';
 import type {BuyGameService} from '../buygame/index.ts';
+import type {SelfUpdate} from '../core/self-update.ts';
 import type {VersionCheck} from '../core/version-check.ts';
 import {inventoryRoutes} from '../inventory/routes.ts';
 import {marketRoutes} from '../market/routes.ts';
@@ -90,7 +91,7 @@ function registerAll(overrides: {
 } = {}) {
 	const {router, table} = recordingRouter();
 	const debug = debugOnly(!!overrides.debug);
-	systemRoutes(router, {sessionCount: () => 3, versionCheck: stub<VersionCheck>(overrides.versionCheck ?? {}), uptime: () => 12});
+	systemRoutes(router, {sessionCount: () => 3, versionCheck: stub<VersionCheck>(overrides.versionCheck ?? {}), selfUpdate: stub<SelfUpdate>({}), uptime: () => 12});
 	accountRoutes(router, {accounts: stub<AccountService>({cookies: async (id: string) => ({id, cookies: ['c']})}), debug});
 	inventoryRoutes(router, {
 		inventory: {get: async () => ({source: 'community', items: []}) as never},
@@ -115,7 +116,7 @@ test('路由表:拆分前 app/server.js 注册的全部保留,另加新版前端
 		`${prefix === 'purchase' ? 'POST' : 'GET'} /api/${prefix}/refresh-rates`
 	]);
 	const expected = [
-		'GET /api/health', 'GET /api/update/status', 'POST /api/update/check',
+		'GET /api/health', 'GET /api/update/status', 'POST /api/update/check', 'GET /api/update/progress', 'POST /api/update/apply',
 		'GET /api/attempts', 'GET /api/accounts/list', 'POST /api/accounts/list', 'POST /api/accounts/upsert', 'POST /api/accounts/meta', 'POST /api/mafile/import',
 		'POST /api/accounts/groups', 'POST /api/accounts/groups/:id', 'DELETE /api/accounts/groups/:id', 'POST /api/accounts/group-order', 'POST /api/accounts/group-members',
 		'POST /api/auth-code', 'POST /api/auth-codes', 'POST /api/login', 'POST /api/login-refresh', 'POST /api/guard/:id', 'POST /api/web-session/:id',

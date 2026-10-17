@@ -85,6 +85,11 @@ export interface Config {
 	};
 	/** 新版本提示查这个 GitHub 仓库(owner/repo)的最新 Release;UPDATE_CHECK=0 时为空,不检查 */
 	updateRepo: string;
+	/**
+	 * 面板「立即更新」读进度的目录(宿主机 deploy/update.sh 写,容器里只读)。UPDATER_DIR,镜像里是 /updater,
+	 * 本地默认安装根下的 updater/
+	 */
+	updaterDir: string;
 	/** 检测代理时查出口 IP 的地址(只用它);空为默认的 ipinfo.io(不行再 api.ipify.org)。PROXY_TEST_URL */
 	proxyTestUrl: string;
 	/** 检测代理时打开的 Steam 社区市场页(看工具台的市场、库存请求会不会被 429);空为默认的市场页。PROXY_STEAM_TEST_URL */
@@ -173,6 +178,7 @@ export function loadConfig(env: Env, dirs: ConfigDirs): Config {
 			inspectKey: env.INSPECT_KEY || ''
 		},
 		updateRepo: String(env.UPDATE_CHECK || '1') === '0' ? '' : (env.GITHUB_REPO || '').trim() || 'NoTimeber/steam-tools',
+		updaterDir: env.UPDATER_DIR ? resolve(env.UPDATER_DIR) : join(appRoot, 'updater'),
 		proxyTestUrl: (env.PROXY_TEST_URL || '').trim(),
 		proxySteamTestUrl: (env.PROXY_STEAM_TEST_URL || '').trim(),
 		proxySteamHomeUrl: (env.PROXY_STEAM_HOME_URL || '').trim()

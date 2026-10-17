@@ -1,5 +1,6 @@
-// 新版本提示:当前版本取 package.json,最新版本查 GitHub 仓库的最新 Release。只提示不自动更新——
-// 镜像由 GitHub Actions 发版时构建,更新要在服务器上执行 git pull && docker compose pull && docker compose up -d。
+// 新版本提示:当前版本取 package.json,最新版本查 GitHub 仓库的最新 Release。这里只查不更新——
+// 镜像由 GitHub Actions 发版时构建,更新在服务器上执行 git pull && docker compose pull && docker compose up -d;
+// 服务器上装了更新器时面板能一键做这件事(./self-update.ts)。
 
 /** 上次查成功后多久再查;查失败的话隔一会儿就重试 */
 const FRESH_MS = 6 * 60 * 60 * 1000;

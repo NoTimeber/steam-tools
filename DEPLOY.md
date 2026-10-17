@@ -107,7 +107,7 @@ docker compose logs steam-tools | grep 初始化令牌
 
 ## 7. 更新
 
-有新版本时，面板顶部会提示（服务端每 6 小时查一次 GitHub 上的最新 Release，「运行设置 → 检查更新」可以手动查）。面板只提示，不会自己更新，更新在服务器上执行：
+有新版本时，面板顶部会提示（服务端每 6 小时查一次 GitHub 上的最新 Release，「运行设置 → 检查更新」可以手动查）。装了下面的「面板一键更新」就能在面板上点「立即更新」；没装时在服务器上执行：
 
 ```bash
 git pull
@@ -121,6 +121,30 @@ docker compose up -d
 - 旧镜像不会自动删，攒多了用 `docker image prune -f` 清掉。
 
 服务器连不上 GitHub 或者不想让它访问外网，在 `.env` 里设 `UPDATE_CHECK=0` 关掉检查。
+
+### 面板一键更新（可选）
+
+在服务器上装一个小更新器后，面板顶部的新版本提示和「运行设置」里会出现「立即更新」，点一下就在服务器上执行上面那三条命令，进度显示在面板上。
+
+先照常更新到 1.6.17 或更新的版本（从这个版本起 `docker-compose.yml` 才把 `./updater` 挂进容器），再在部署目录执行一次：
+
+```bash
+sudo ./deploy/install-updater.sh
+```
+
+- 平时 `docker compose` 带 `-f` 的，装的时候带上一样的，比如 `sudo ./deploy/install-updater.sh -f docker-compose.yml -f compose.override.yaml`。不带时用 `docker-compose.yml`，部署目录里有 `compose.override.yaml` 也一起带上。数据目录不是 `./data` 时加 `--data 目录`。
+- 需要 Linux + systemd。装的是两个 systemd 单元：`steam-tools-updater.path`（盯着 `data/update/request.json`）和 `steam-tools-updater.service`（执行 `deploy/update.sh`）。
+- 点「立即更新」后，容器在 `data/update/` 里放一个请求文件。更新器看到后删掉它，依次执行 `git pull --ff-only`、`docker compose pull`、`docker compose up -d --wait`（等新容器健康），每一步的进度写进 `updater/status.json`，面板读这个文件显示。失败时面板上显示是哪一步、服务器上的最后几十行输出，可以重试。
+- compose 里有 `build:`（源码构建）时不拉镜像，改成 `up -d --build --wait`。
+- `git pull` 用部署目录主人的身份执行。部署目录里改过跟踪的文件时 `git pull --ff-only` 会失败，面板上能看到原因。
+- 更新时服务会重启：在线的 Steam 账号断开后自动恢复，面板要重新登录一次，登录后能看到更新结果。
+- 看更新日志：`journalctl -u steam-tools-updater.service`。卸载：`sudo ./deploy/install-updater.sh --uninstall`。
+
+安全上：
+
+- 容器没有任何新权限：不挂 `docker.sock`，它只能往 `data/update/` 里放请求文件。
+- `updater/` 归 root、只读挂进容器，容器改不了。更新器不读请求文件的内容，也不往 `data/` 里写东西，执行的命令是写死的。
+- `deploy/update.sh` 以 root 运行，会随 `git pull` 一起更新，相当于信任这个仓库。这和你平时 `git pull` 之后执行部署命令是一样的。
 
 服务器拉不到 `ghcr.io`（或者太慢）时，可以改在服务器上从源码构建，以后更新也用这条：
 

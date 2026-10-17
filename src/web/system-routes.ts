@@ -1,12 +1,15 @@
-// 运行状态和新版本提示(见 ../core/version-check.ts)的 HTTP 路由。
+// 运行状态、新版本提示(见 ../core/version-check.ts)和面板「立即更新」(见 ../core/self-update.ts)的 HTTP 路由。
 
+import type {SelfUpdate} from '../core/self-update.ts';
 import type {VersionCheck} from '../core/version-check.ts';
+import {keyedRoute} from './http.ts';
 import type {Router} from './http.ts';
 
 export interface SystemRouteDeps {
 	/** 当前会话数 */
 	sessionCount(): number;
 	versionCheck: VersionCheck;
+	selfUpdate: SelfUpdate;
 	uptime?: () => number;
 }
 
@@ -26,4 +29,8 @@ export function systemRoutes(router: Router, deps: SystemRouteDeps): void {
 	router.post('/api/update/check', async (req, res) => {
 		res.json({success: true, status: await deps.versionCheck.check()});
 	});
+
+	// 一键更新:宿主机更新器的进度;请求更新(没装更新器、已经在更新时 409)。
+	router.get('/api/update/progress', keyedRoute('update', () => deps.selfUpdate.status(), '读取更新进度失败'));
+	router.post('/api/update/apply', keyedRoute('update', () => deps.selfUpdate.request(), '请求更新失败'));
 }

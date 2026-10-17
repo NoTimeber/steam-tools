@@ -23,6 +23,7 @@ ENV NODE_ENV=production \
 	APP_ROOT=/srv/steam-tools \
 	DATA_DIR=/data \
 	MASTER_KEY_FILE=/run/secrets/master_key \
+	UPDATER_DIR=/updater \
 	HOST=0.0.0.0 \
 	PORT=53110
 RUN apt-get update \
@@ -45,5 +46,6 @@ EXPOSE 53110
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
 	CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||53110)+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
-# 镜像由 GitHub Actions 在发版时构建(.github/workflows/image.yml);服务器上 docker compose pull 拉新镜像(面板只提示有新版)
+# 镜像由 GitHub Actions 在发版时构建(.github/workflows/image.yml);服务器上 docker compose pull 拉新镜像。
+# 装了 deploy/install-updater.sh 时面板能一键更新:容器只在 /data/update 放请求,宿主机执行,进度经只读的 /updater 回来
 CMD ["node", "src/main.ts"]

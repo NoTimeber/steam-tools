@@ -16,6 +16,7 @@ import {loadConfig} from './config.ts';
 import {readJsonFileSafe, writeFileAtomic, writeJsonAtomic} from './core/atomic-file.ts';
 import {createAuth} from './core/auth.ts';
 import {createOriginCheck, parseCookieSecure, parseTrustProxy} from './core/http.ts';
+import {createSelfUpdate} from './core/self-update.ts';
 import {createVersionCheck} from './core/version-check.ts';
 import {openStore} from './store/index.ts';
 import type {Store} from './store/index.ts';
@@ -368,6 +369,8 @@ const c5 = createC5Service({
 // 新版本提示:启动时先查一次,之后前端来问时过期了再查
 const versionCheck = createVersionCheck({current: (require('../package.json') as {version: string}).version, repo: config.updateRepo});
 void versionCheck.check();
+// 面板「立即更新」:请求放进数据目录,宿主机上的更新器(deploy/install-updater.sh 装)执行,进度从只读的 updater 目录读
+const selfUpdate = createSelfUpdate({dataDir: config.dataDir, updaterDir: config.updaterDir, log: message => console.log(message)});
 
 // ===== 路由 =====
 const debug = debugOnly(config.http.debugEndpoints);
@@ -377,7 +380,7 @@ const app = createWebApp({
 	trustProxy: parseTrustProxy(config.http.trustProxy),
 	webDir: config.webDir,
 	routes: [
-		router => systemRoutes(router, {sessionCount: () => attempts.size, versionCheck}),
+		router => systemRoutes(router, {sessionCount: () => attempts.size, versionCheck, selfUpdate}),
 		router => accountRoutes(router, {accounts, debug}),
 		router => inventoryRoutes(router, {inventory, getAttempt: id => attempts.get(id), publicAttempt: sessions.publicAttempt}),
 		router => terminalRoutes(router, {terminal}),

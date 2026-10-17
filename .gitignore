@@ -27,3 +27,6 @@ Thumbs.db
 
 # 本机预览配置(写的是本机 Node 路径)
 /.claude/launch.json
+
+# 面板一键更新的进度(宿主机 deploy/update.sh 写)
+/updater/

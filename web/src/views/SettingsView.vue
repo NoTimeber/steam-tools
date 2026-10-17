@@ -1,13 +1,26 @@
 <script setup lang="ts">
-// 运行设置:当前版本和检查新版本、修改访问口令、退出登录。Steam 代理在左边「代理管理」。
+// 运行设置:当前版本、检查新版本和一键更新(服务器上装了更新器才能点)、修改访问口令、退出登录。Steam 代理在左边「代理管理」。
 import {computed, reactive, ref} from 'vue';
-import {NAlert, NButton, NCard, NForm, NFormItem, NInput, NModal, NSpace, useMessage} from 'naive-ui';
+import {NAlert, NButton, NCard, NForm, NFormItem, NInput, NModal, NSpace, NTooltip, useMessage} from 'naive-ui';
 import {api, errorText} from '../api/http.ts';
 import {addLog} from '../stores/logs.ts';
-import {checkForUpdate, update} from '../stores/update.ts';
+import {useApplyUpdate} from '../components/useApplyUpdate.ts';
+import {checkForUpdate, INSTALL_UPDATER_COMMAND, isUpdating, selfUpdate, update} from '../stores/update.ts';
 
 const message = useMessage();
 const checking = ref(false);
+const {confirmUpdate, requesting} = useApplyUpdate();
+
+/** 一键更新的一句话状态 */
+const updaterText = computed(() => {
+	if (!selfUpdate.loaded) {
+		return '';
+	}
+	if (isUpdating()) {
+		return '一键更新:更新中(进度见页面顶部)';
+	}
+	return selfUpdate.installed ? '一键更新:服务器上的更新器已装好' : '一键更新:服务器上还没装更新器';
+});
 
 const latestText = computed(() => {
 	if (update.disabled) {
@@ -77,11 +90,20 @@ async function logout(): Promise<void> {
 				<div class="module-counts">
 					<span>当前版本:{{ update.current ? 'v' + update.current : '读取中' }}</span>
 					<span v-if="latestText">{{ latestText }}</span>
+					<span v-if="updaterText">{{ updaterText }}</span>
 				</div>
 			</div>
 		</header>
 		<NSpace>
 			<NButton :loading="checking" :disabled="update.disabled" @click="check">检查更新</NButton>
+			<NTooltip placement="bottom" :disabled="selfUpdate.installed">
+				<template #trigger>
+					<span class="tip-anchor">
+						<NButton type="primary" :loading="requesting" :disabled="!selfUpdate.installed || isUpdating()" @click="confirmUpdate">立即更新</NButton>
+					</span>
+				</template>
+				服务器上还没装更新器:在部署目录执行一次 {{ INSTALL_UPDATER_COMMAND }}(见 DEPLOY.md「7. 更新」)
+			</NTooltip>
 			<NButton @click="openPassword">修改口令</NButton>
 			<NButton @click="logout">退出登录</NButton>
 		</NSpace>
