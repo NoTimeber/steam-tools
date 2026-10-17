@@ -1,10 +1,9 @@
 // 账户列表的纯逻辑(不依赖 Vue,单元测试直接用 node 跑):登录状态归并、导入文本解析、余额显示、按序号勾选、按分组筛选、
-// 搜索和粘贴账号列表匹配。
-// 规则照搬旧版前端。
+// 搜索和粘贴账号列表匹配、账户表的筛选 / 排序 / 余额合计 / 导出。登录状态和导入的规则照搬旧版前端。
+
+import {csvDocument, textCell} from './csv.ts';
 
 export type LoginStatus = '未登录' | '登录中' | '登录成功' | '登录失败';
-/** 表格里按状态分的几段(和用户自己建的「分组」不是一回事) */
-export type StatusGroup = 'gc' | 'online' | 'offline';
 
 /** 登录状态标签的颜色(Naive 的 NTag type) */
 export const STATUS_TAG: Readonly<Record<LoginStatus, 'success' | 'warning' | 'error' | 'default'>> = {
@@ -13,13 +12,6 @@ export const STATUS_TAG: Readonly<Record<LoginStatus, 'success' | 'warning' | 'e
 	登录失败: 'error',
 	未登录: 'default'
 };
-
-/** 状态段从上到下的显示顺序 */
-export const STATUS_GROUPS: ReadonlyArray<{key: StatusGroup; title: string}> = [
-	{key: 'gc', title: 'GC 已连接'},
-	{key: 'online', title: '在线'},
-	{key: 'offline', title: '未在线'}
-];
 
 /**
  * 会话状态 → 列表上的登录状态。已登录成功的账号掉线重连(connecting / failed / disconnected 等)时
@@ -45,13 +37,6 @@ export function collapseAttemptStatus(status: string, previous: LoginStatus): Lo
 	}
 }
 
-export function statusGroup(row: {status: LoginStatus; cs2GcConnected: boolean; tf2GcConnected: boolean}): StatusGroup {
-	if (row.cs2GcConnected || row.tf2GcConnected) {
-		return 'gc';
-	}
-	return row.status === '登录成功' ? 'online' : 'offline';
-}
-
 // ===== 用户建的分组 =====
 
 /** 分组筛选:ALL_ACCOUNTS 全部,NO_GROUP 未分组,其它是分组 id */
@@ -63,26 +48,6 @@ export function matchesGroupFilter(row: {groupId: string}, filter: string): bool
 		return true;
 	}
 	return filter === NO_GROUP ? !row.groupId : row.groupId === filter;
-}
-
-export interface GroupFilterOption {
-	value: string;
-	label: string;
-	count: number;
-}
-
-/** 筛选项:全部、各分组(按分组顺序)、未分组(有分组时才列) */
-export function groupFilterOptions(groups: ReadonlyArray<{id: string; name: string}>, rows: ReadonlyArray<{groupId: string}>): GroupFilterOption[] {
-	const counts = new Map<string, number>();
-	for (const row of rows) {
-		counts.set(row.groupId, (counts.get(row.groupId) ?? 0) + 1);
-	}
-	const options: GroupFilterOption[] = [{value: ALL_ACCOUNTS, label: '全部', count: rows.length}];
-	if (groups.length) {
-		options.push(...groups.map(group => ({value: group.id, label: group.name, count: counts.get(group.id) ?? 0})));
-		options.push({value: NO_GROUP, label: '未分组', count: counts.get('') ?? 0});
-	}
-	return options;
 }
 
 /** 分组 id 列表里把 id 往前(-1)或往后(+1)挪一位;到头了原样返回 */
@@ -131,6 +96,150 @@ export function matchNameList<T extends {accountName: string; steamID: string}>(
 		}
 	}
 	return {matched: [...matched], missing};
+}
+
+// ===== 账户表:筛选、排序、汇总、导出 =====
+
+/** 会话(登录状态)在表格里的叫法 */
+export const SESSION_LABEL: Readonly<Record<LoginStatus, string>> = {
+	登录成功: '在线',
+	登录中: '登录中',
+	登录失败: '登录失败',
+	未登录: '离线'
+};
+
+export interface AccountFilters {
+	/** ALL_ACCOUNTS / NO_GROUP / 分组 id */
+	group: string;
+	/** '' 不限 */
+	session: '' | LoginStatus;
+	gc: '' | 'connected' | 'none';
+	/** mafile 有 maFile;secret 只有名单里的 shared_secret;none 都没有 */
+	guard: '' | 'mafile' | 'secret' | 'none';
+	minBalance: number | null;
+	maxBalance: number | null;
+}
+
+export function emptyFilters(): AccountFilters {
+	return {group: ALL_ACCOUNTS, session: '', gc: '', guard: '', minBalance: null, maxBalance: null};
+}
+
+/** 生效的筛选条件个数(筛选按钮上的角标) */
+export function activeFilterCount(filters: AccountFilters): number {
+	return [filters.group !== ALL_ACCOUNTS, filters.session, filters.gc, filters.guard, filters.minBalance != null, filters.maxBalance != null].filter(Boolean).length;
+}
+
+export interface FilterableAccount {
+	groupId: string;
+	status: LoginStatus;
+	cs2GcConnected: boolean;
+	tf2GcConnected: boolean;
+	hasMaFile: boolean;
+	hasSharedSecret: boolean;
+	hasWallet: boolean;
+	balance: number | null;
+}
+
+/** 余额上下限:设了就只留有钱包、余额在范围里的 */
+export function matchesFilters(row: FilterableAccount, filters: AccountFilters): boolean {
+	if (!matchesGroupFilter(row, filters.group) || (filters.session && row.status !== filters.session)) {
+		return false;
+	}
+	const gc = row.cs2GcConnected || row.tf2GcConnected;
+	if ((filters.gc === 'connected' && !gc) || (filters.gc === 'none' && gc)) {
+		return false;
+	}
+	const guard = row.hasMaFile ? 'mafile' : row.hasSharedSecret ? 'secret' : 'none';
+	if (filters.guard && guard !== filters.guard) {
+		return false;
+	}
+	if (filters.minBalance != null || filters.maxBalance != null) {
+		const balance = row.hasWallet && row.balance != null ? Number(row.balance) : NaN;
+		if (!Number.isFinite(balance) || (filters.minBalance != null && balance < filters.minBalance) || (filters.maxBalance != null && balance > filters.maxBalance)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+export type SortKey = 'accountName' | 'status' | 'balance';
+export type SortOrder = 'ascend' | 'descend';
+
+/** 会话排序:GC 已连接 → 在线 → 登录中 → 登录失败 → 离线 */
+function statusRank(row: FilterableAccount): number {
+	if (row.cs2GcConnected || row.tf2GcConnected) {
+		return 0;
+	}
+	return {登录成功: 1, 登录中: 2, 登录失败: 3, 未登录: 4}[row.status];
+}
+
+/** 排序(不改原数组);相同的保持原来的先后;没有余额的总排在最后 */
+export function sortAccounts<T extends FilterableAccount & {accountName: string}>(rows: readonly T[], key: SortKey | '', order: SortOrder): T[] {
+	if (!key) {
+		return [...rows];
+	}
+	const flip = order === 'descend' ? -1 : 1;
+	const balanceOf = (row: T) => (row.hasWallet && row.balance != null && Number.isFinite(Number(row.balance)) ? Number(row.balance) : null);
+	return rows
+		.map((row, index) => ({row, index}))
+		.sort((a, b) => {
+			let result = 0;
+			if (key === 'balance') {
+				const x = balanceOf(a.row);
+				const y = balanceOf(b.row);
+				if (x == null || y == null) {
+					result = x == null && y == null ? 0 : x == null ? 1 : -1;
+					return result || a.index - b.index;
+				}
+				result = (x - y) * flip;
+			} else if (key === 'status') {
+				result = (statusRank(a.row) - statusRank(b.row)) * flip;
+			} else {
+				result = a.row.accountName.localeCompare(b.row.accountName, 'zh-CN', {numeric: true, sensitivity: 'base'}) * flip;
+			}
+			return result || a.index - b.index;
+		})
+		.map(item => item.row);
+}
+
+/** 钱包余额按币种合计,账号多的币种在前 */
+export function walletTotals(rows: ReadonlyArray<{hasWallet: boolean; balance: number | null; currency: number | null}>): Array<{currency: number | null; total: number; count: number}> {
+	const byCurrency = new Map<number | null, {currency: number | null; total: number; count: number}>();
+	for (const row of rows) {
+		const balance = Number(row.balance);
+		if (!row.hasWallet || row.balance == null || !Number.isFinite(balance)) {
+			continue;
+		}
+		const entry = byCurrency.get(row.currency) ?? {currency: row.currency, total: 0, count: 0};
+		entry.total += balance;
+		entry.count++;
+		byCurrency.set(row.currency, entry);
+	}
+	return [...byCurrency.values()]
+		.map(entry => ({...entry, total: Math.round(entry.total * 100) / 100}))
+		.sort((a, b) => b.count - a.count || b.total - a.total);
+}
+
+/** 导出账户列表:序号、账号、分组、会话、SteamID、国家、余额、币种(不含密码和令牌) */
+export function accountsCsv(
+	rows: ReadonlyArray<FilterableAccount & {accountName: string; steamID: string; country: string; currency: number | null}>,
+	groupName: (groupId: string) => string
+): string {
+	const lines = ['序号,账号,分组,会话,SteamID,国家,余额,币种'];
+	rows.forEach((row, index) => {
+		const balance = row.hasWallet && row.balance != null && Number.isFinite(Number(row.balance)) ? Number(row.balance).toFixed(2) : '';
+		lines.push([
+			String(index + 1),
+			textCell(row.accountName),
+			textCell(row.groupId ? groupName(row.groupId) : ''),
+			SESSION_LABEL[row.status],
+			textCell(row.steamID),
+			textCell(row.country),
+			balance,
+			textCell(balance ? currencySymbol(row.currency).trim() : '')
+		].join(','));
+	});
+	return csvDocument(lines);
 }
 
 export interface ImportedAccount {

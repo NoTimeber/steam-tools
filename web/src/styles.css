@@ -1,18 +1,49 @@
-/* 全局样式:页面骨架。组件本身的外观交给 Naive UI 主题(App.vue) */
+/* 全局样式:配色变量和页面骨架。组件本身的外观交给 Naive UI 主题(theme.ts,两边的颜色要一致)。
+   锌灰 + 琥珀色,浅色和深色跟随系统 */
 :root {
-	color-scheme: dark;
-	--bg: #0d0f13;
-	--sidebar: #12161c;
-	--surface: #171c23;
-	--surface-2: #1e242d;
-	--line: #2f3946;
-	--line-soft: #232c36;
-	--text: #eef2f6;
-	--muted: #93a1ae;
-	--accent: #4c9fff;
-	--ok: #5ec98a;
-	--warn: #f2c15d;
-	--danger: #ff6b6b;
+	color-scheme: light;
+	--bg: #f4f4f5;
+	--sidebar: #ffffff;
+	--surface: #ffffff;
+	--surface-2: #f4f4f5;
+	--hover: rgba(9, 9, 11, 0.04);
+	--line: #e4e4e7;
+	--line-soft: #f0f0f2;
+	--text: #18181b;
+	--muted: #71717a;
+	--accent: #d97706;
+	--accent-text: #b45309;
+	--accent-soft: rgba(217, 119, 6, 0.12);
+	--on-accent: #ffffff;
+	--ok: #16a34a;
+	--warn: #d97706;
+	--danger: #dc2626;
+	--info: #2563eb;
+	--shadow: 0 1px 2px rgba(9, 9, 11, 0.05);
+}
+
+@media (prefers-color-scheme: dark) {
+	:root {
+		color-scheme: dark;
+		--bg: #09090b;
+		--sidebar: #18181b;
+		--surface: #18181b;
+		--surface-2: #222225;
+		--hover: rgba(255, 255, 255, 0.05);
+		--line: #2e2e33;
+		--line-soft: #26262a;
+		--text: #fafafa;
+		--muted: #a1a1aa;
+		--accent: #f59e0b;
+		--accent-text: #fbbf24;
+		--accent-soft: rgba(245, 158, 11, 0.14);
+		--on-accent: #18181b;
+		--ok: #4ade80;
+		--warn: #fbbf24;
+		--danger: #f87171;
+		--info: #60a5fa;
+		--shadow: none;
+	}
 }
 
 * {
@@ -29,8 +60,9 @@ body,
 body {
 	background: var(--bg);
 	color: var(--text);
-	font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+	font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
 	font-size: 14px;
+	-webkit-font-smoothing: antialiased;
 }
 
 .muted {
@@ -76,4 +108,48 @@ body {
 .module-body {
 	flex: 1;
 	min-height: 0;
+}
+
+/* 面包屑 + 大标题 + 右侧操作按钮(账户管理用,其它页面以后也可以用) */
+.page-header {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: flex-end;
+	justify-content: space-between;
+	gap: 12px 16px;
+}
+
+.breadcrumb {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 6px;
+	margin-bottom: 6px;
+	color: var(--muted);
+	font-size: 13px;
+}
+
+.breadcrumb a {
+	color: inherit;
+	text-decoration: none;
+	cursor: pointer;
+}
+
+.breadcrumb a:hover {
+	color: var(--text);
+}
+
+.page-title {
+	margin: 0;
+	font-size: 28px;
+	font-weight: 700;
+	letter-spacing: -0.01em;
+}
+
+/* 白底(深色时锌灰)圆角卡片 */
+.panel {
+	background: var(--surface);
+	border: 1px solid var(--line);
+	border-radius: 12px;
+	box-shadow: var(--shadow);
 }

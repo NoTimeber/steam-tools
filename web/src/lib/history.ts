@@ -1,6 +1,7 @@
 // 消费记录的纯逻辑(不依赖 Vue,单元测试直接用 node 跑):类型名、按类型计数、筛选、导出 CSV。
 
 import type {HistoryKind, HistoryMoney, HistoryRow} from '../api/types.ts';
+import {csvDocument, textCell} from './csv.ts';
 
 /** 类型的显示顺序和名字 */
 export const HISTORY_KINDS: ReadonlyArray<{key: HistoryKind; label: string}> = [
@@ -69,15 +70,6 @@ function spentMoney(row: HistoryRow): HistoryMoney | null {
 	return [row.total, row.walletChange].find(money => money?.amount != null) ?? null;
 }
 
-function csvCell(value: string): string {
-	return /[",\r\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
-}
-
-/** 文字列:= + - @ 开头的前面加 ',免得 Excel 当公式执行 */
-function textCell(text: string): string {
-	return csvCell(/^[=+\-@\t\r]/.test(text) ? `'${text}` : text);
-}
-
 /**
  * 导出 CSV:只导花钱的记录,列是日期、商品、金额,最后一行合计。金额写数值(表格里能直接求和),解析不出的写原文、不进合计。
  * 只有一种币种时币种写在表头;混了几种币种时加一列币种,合计按币种各一行。
@@ -108,7 +100,7 @@ export function historyCsv(rows: readonly HistoryRow[]): string {
 		const cells = ['合计', '', amountText(totals.get(currency)!)];
 		lines.push((mixed ? [...cells, textCell(currency)] : cells).join(','));
 	}
-	return String.fromCharCode(0xfeff) + lines.join('\r\n') + '\r\n';
+	return csvDocument(lines);
 }
 
 /** 导出文件名:账号-消费记录-起止日期(不限时间为「全部」) */

@@ -182,7 +182,7 @@ h2 {
 }
 
 :deep(.group-row td) {
-	background: #12161c;
+	background: var(--surface-2);
 }
 
 :deep(.group-title) {

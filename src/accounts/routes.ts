@@ -33,6 +33,8 @@ export function accountRoutes(router: Router, {accounts, debug}: AccountRouteDep
 	// 服务端持久化 maFile:完整 maFile(含 identity_secret)加密存入数据库,发货/求购确认时取 identity_secret。
 	router.post('/api/mafile/import', spreadRoute(req => accounts.importMaFiles(req.body || {}), '导入 maFile 失败'));
 	router.post('/api/auth-code', spreadRoute(req => accounts.authCode(req.body || {}), '生成验证码失败'));
+	// 账户列表里一起显示的验证码(一次给全部能生成的账号)
+	router.post('/api/auth-codes', spreadRoute(req => accounts.authCodes(req.body || {}), '生成验证码失败'));
 	router.post('/api/login', spreadRoute(req => accounts.login(req.body || {}), '登录失败'));
 	router.post('/api/login-refresh', spreadRoute(req => accounts.loginWithRefreshToken(req.body || {}), '登录失败'));
 	router.post('/api/guard/:id', spreadRoute(req => accounts.submitGuard(req.params.id!, req.body || {}), '提交验证码失败'));

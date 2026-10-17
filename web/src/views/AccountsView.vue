@@ -1,97 +1,58 @@
 <script setup lang="ts">
-// 账户管理:按「GC 已连接 / 在线 / 未在线」分段的账号表,可按用户建的分组筛选;导入、登录/登出/删除、移到分组、按序号勾选、
-// Steam Guard、令牌验证码、消费记录、Steam 代理、连接 GC。
-import {computed, h, onMounted, reactive, ref} from 'vue';
-import {NAlert, NButton, NCard, NDataTable, NDropdown, NInput, NModal, NRadioButton, NRadioGroup, NSpace, NTag, useDialog, useMessage} from 'naive-ui';
-import type {DataTableColumns, DataTableRowKey, DropdownOption} from 'naive-ui';
+// 账户管理:面包屑 + 大标题 + 右上角操作按钮,下面「账户」「账户分组」两个标签页(账户分组可进单个分组的编辑页)。
+// 账户列表在 accounts/AccountsTab.vue,分组在 accounts/GroupsTab.vue;这里管导入、导出、新建 / 删除分组、Steam Guard 验证码。
+import {computed, reactive, ref, watch} from 'vue';
+import {NAlert, NButton, NCard, NInput, NModal, NSpace, NTab, NTabs, useDialog, useMessage} from 'naive-ui';
 import {errorText} from '../api/http.ts';
-import type {GameId} from '../api/types.ts';
-import {NO_GROUP, STATUS_TAG, formatBalance, groupFilterOptions, padSeq, resolveSeqRange} from '../lib/accounts.ts';
-import {
-	accounts, canUseGc, connectGc, connectedGame, createGroup, deleteSelected, disconnectGc, forSelected, gameLabel, groupName,
-	importAccountText, importMaFiles, loginAccount, logoutAccount, moveToGroup, onlineCount, orderedAccounts, selectedRows, setGroupFilter,
-	statusGroups, submitGuardCode
-} from '../stores/accounts.ts';
-import type {AccountRow, StatusGroupView} from '../stores/accounts.ts';
-import {accountProxy} from '../lib/proxy.ts';
-import {loadProxy, proxy} from '../stores/proxy.ts';
-import GroupsModal from './accounts/GroupsModal.vue';
-import HistoryModal from './accounts/HistoryModal.vue';
-import ProxyModal from './accounts/ProxyModal.vue';
-import TotpModal from './accounts/TotpModal.vue';
+import AppIcon from '../components/AppIcon.vue';
+import {accountsCsv} from '../lib/accounts.ts';
+import {downloadCsv} from '../lib/csv.ts';
+import {accounts, createGroup, deleteGroup, groupName, importAccountText, importMaFiles, submitGuardCode, visibleRows} from '../stores/accounts.ts';
+import type {AccountRow} from '../stores/accounts.ts';
+import {refreshAuthCodes} from '../stores/authcodes.ts';
+import AccountsTab from './accounts/AccountsTab.vue';
+import GroupsTab from './accounts/GroupsTab.vue';
 
 const message = useMessage();
 const dialog = useDialog();
 
-type TableRow =
-	| {kind: 'status'; key: string; group: StatusGroupView; children: TableRow[]}
-	| {kind: 'account'; key: string; row: AccountRow; seq: number};
+// ===== 标签页 / 分组编辑页 =====
+const tab = ref<'accounts' | 'groups'>('accounts');
+const editingId = ref('');
+const editingGroup = computed(() => accounts.groups.find(group => group.id === editingId.value));
 
-const STATUS_PREFIX = 'status:';
-
-// ===== 表格数据:状态段是父行,账号是子行;序号按显示顺序连续编号(收起的段也占号) =====
-const tableData = computed<TableRow[]>(() => {
-	let seq = 0;
-	return statusGroups.value.filter(group => group.rows.length).map(group => ({
-		kind: 'status' as const,
-		key: STATUS_PREFIX + group.key,
-		group,
-		children: group.rows.map(row => ({kind: 'account' as const, key: row.key, row, seq: ++seq}))
-	}));
+// 正在编辑的分组被删掉(别的浏览器删的也算)就回列表
+watch(editingGroup, group => {
+	if (editingId.value && !group) {
+		editingId.value = '';
+	}
 });
 
-const collapsed = reactive(new Set<string>());
-const expandedKeys = computed(() => tableData.value.map(group => group.key).filter(key => !collapsed.has(key)));
+function openTab(value: 'accounts' | 'groups'): void {
+	tab.value = value;
+	editingId.value = '';
+}
 
-function onExpandedChange(keys: DataTableRowKey[]): void {
-	const open = new Set(keys.map(String));
-	for (const group of tableData.value) {
-		if (open.has(group.key)) {
-			collapsed.delete(group.key);
-		} else {
-			collapsed.add(group.key);
-		}
+const header = computed(() => {
+	if (editingGroup.value) {
+		return {crumbs: ['账户', '账户分组', editingGroup.value.name, '编辑'], title: `编辑 ${editingGroup.value.name}`};
+	}
+	return tab.value === 'groups' ? {crumbs: ['账户', '账户分组', '列表'], title: '账户分组'} : {crumbs: ['账户', '列表'], title: '账户'};
+});
+
+function onCrumb(index: number): void {
+	if (index === 0) {
+		openTab('accounts');
+	} else if (index === 1 && header.value.crumbs.length > 2) {
+		openTab('groups');
 	}
 }
 
-const checkedKeys = computed(() => [...accounts.selected]);
-
-function onCheckedChange(keys: DataTableRowKey[]): void {
-	accounts.selected.clear();
-	for (const key of keys.map(String)) {
-		if (!key.startsWith(STATUS_PREFIX)) {
-			accounts.selected.add(key);
-		}
-	}
-}
-
-// ===== 分组 =====
-const filterOptions = computed(() => groupFilterOptions(accounts.groups, accounts.rows));
-const groupsOpen = ref(false);
-const NEW_GROUP = 'new-group';
-
-/** 「移到分组」的选项;current 是单个账号现在的分组(批量时不传) */
-function moveOptions(current?: string): DropdownOption[] {
-	const options: DropdownOption[] = accounts.groups.map(group => ({label: group.name, key: group.id, disabled: group.id === current}));
-	if (options.length) {
-		options.push({label: '移出分组', key: NO_GROUP, disabled: current === ''}, {type: 'divider', key: 'divider'});
-	}
-	options.push({label: '新建分组…', key: NEW_GROUP});
-	return options;
-}
-
-function onMove(key: string, rows: AccountRow[]): void {
-	if (key === NEW_GROUP) {
-		openNewGroup(rows);
-	} else {
-		moveToGroup(rows, key === NO_GROUP ? '' : key);
-	}
-}
-
-/** 新建分组并把这些账号移进去 */
+// ===== 新建 / 删除分组 =====
+/** 新建分组;rows 不空时建好把它们移进去(账户页的「新建分组…」),空的建好进编辑页 */
 const newGroup = reactive({open: false, name: '', saving: false, error: '', rows: [] as AccountRow[]});
 
-function openNewGroup(rows: AccountRow[]): void {
+function openNewGroup(rows: AccountRow[] = []): void {
 	Object.assign(newGroup, {open: true, name: '', saving: false, error: '', rows: [...rows]});
 }
 
@@ -104,8 +65,12 @@ async function submitNewGroup(): Promise<void> {
 	newGroup.saving = true;
 	newGroup.error = '';
 	try {
-		await createGroup(name, newGroup.rows);
+		const group = await createGroup(name, newGroup.rows);
 		newGroup.open = false;
+		if (!newGroup.rows.length) {
+			tab.value = 'groups';
+			editingId.value = group.id;
+		}
 	} catch (err) {
 		newGroup.error = errorText(err);
 	} finally {
@@ -113,169 +78,28 @@ async function submitNewGroup(): Promise<void> {
 	}
 }
 
-function groupCell(row: AccountRow) {
-	const name = groupName(row.groupId);
-	return h(NDropdown, {trigger: 'click', options: moveOptions(row.groupId), onSelect: (key: string) => onMove(key, [row])},
-		() => h(NButton, {size: 'tiny', quaternary: !name, class: 'group-button', title: name || '点击移到分组'}, () => name || '未分组'));
-}
-
-const totpAccount = ref('');
-const historyAccount = ref('');
-const proxyAccount = ref('');
-
-onMounted(loadProxy);
-
-function gcCell(row: AccountRow) {
-	const game = canUseGc(row) ? connectedGame(row) : '';
-	if (game) {
-		return h(NButton, {size: 'tiny', onClick: () => disconnectGc(row, game)}, () => `断开${gameLabel(game)}`);
-	}
-	if (!canUseGc(row)) {
-		return h(NButton, {size: 'tiny', disabled: true}, () => '连接GC');
-	}
-	return h(NDropdown, {
-		trigger: 'click',
-		options: [{label: '连接CS2', key: 'cs2'}, {label: '连接TF2', key: 'tf2'}],
-		onSelect: (key: GameId) => connectGc(row, key)
-	}, () => h(NButton, {size: 'tiny'}, () => '连接GC'));
-}
-
-const DATA_COLUMNS = 11;
-
-const columns: DataTableColumns<TableRow> = [
-	{type: 'selection'},
-	{
-		title: '序号',
-		key: 'seq',
-		width: 90,
-		// 状态段行占满整行:标题 + 人数
-		colSpan: item => (item.kind === 'status' ? DATA_COLUMNS : 1),
-		render: item => item.kind === 'status'
-			? h('span', {class: 'status-title'}, [
-				item.group.title,
-				h(NTag, {size: 'small', round: true, bordered: false, type: item.group.key === 'offline' ? 'default' : 'success', class: 'status-count'}, () => String(item.group.rows.length))
-			])
-			: h('span', {class: 'mono'}, padSeq(item.seq))
-	},
-	{title: '账号', key: 'accountName', width: 170, ellipsis: {tooltip: true}, render: item => (item.kind === 'account' ? item.row.accountName : null)},
-	{title: '分组', key: 'group', width: 120, render: item => (item.kind === 'account' ? groupCell(item.row) : null)},
-	{
-		title: 'maFile',
-		key: 'maFile',
-		width: 130,
-		render: item => {
-			if (item.kind !== 'account') return null;
-			const row = item.row;
-			return h(NSpace, {size: 6, align: 'center', wrap: false}, () => [
-				h(NTag, {size: 'small', bordered: false, type: row.hasMaFile ? 'success' : 'default'}, () => (row.hasMaFile ? '有' : '无')),
-				h(NButton, {size: 'tiny', disabled: !(row.hasMaFile || row.hasSharedSecret), onClick: () => (totpAccount.value = row.accountName)}, () => '验证码')
-			]);
-		}
-	},
-	{
-		title: '状态',
-		key: 'status',
-		width: 100,
-		render: item => (item.kind === 'account'
-			? h(NTag, {size: 'small', bordered: false, type: STATUS_TAG[item.row.status], title: item.row.lastError || undefined}, () => item.row.status)
-			: null)
-	},
-	{title: '国家', key: 'country', width: 70, render: item => (item.kind === 'account' ? item.row.country || '-' : null)},
-	{title: '余额', key: 'balance', width: 110, render: item => (item.kind === 'account' ? formatBalance(item.row) : null)},
-	{
-		title: '消费记录',
-		key: 'history',
-		width: 90,
-		// 不在线也能点:服务端会用上次登录存下的网页会话去读
-		render: item => (item.kind === 'account'
-			? h(NButton, {size: 'tiny', onClick: () => (historyAccount.value = item.row.accountName)}, () => '查看')
-			: null)
-	},
-	{
-		title: '代理',
-		key: 'proxy',
-		width: 130,
-		render: item => {
-			if (item.kind !== 'account') return null;
-			const view = accountProxy(proxy.config, item.row.accountName);
-			return h(NButton, {size: 'tiny', quaternary: view.mode === 'global', title: view.title, onClick: () => (proxyAccount.value = item.row.accountName)}, () => view.label);
-		}
-	},
-	{title: 'SteamID', key: 'steamID', width: 170, ellipsis: {tooltip: true}, render: item => (item.kind === 'account' ? h('span', {class: 'mono'}, item.row.steamID || '-') : null)},
-	{title: 'GC操作', key: 'gc', width: 100, render: item => (item.kind === 'account' ? gcCell(item.row) : null)}
-];
-
-function rowProps(item: TableRow) {
-	if (item.kind !== 'status') {
-		return {};
-	}
-	return {
-		style: 'cursor: pointer',
-		// 点状态段行(复选框、展开箭头除外)收起/展开
-		onClick: (event: MouseEvent) => {
-			if ((event.target as HTMLElement).closest('.n-checkbox, .n-data-table-expand-trigger')) {
-				return;
-			}
-			if (collapsed.has(item.key)) {
-				collapsed.delete(item.key);
-			} else {
-				collapsed.add(item.key);
-			}
-		}
-	};
-}
-
-// ===== 按序号勾选 =====
-const range = reactive({start: '', end: ''});
-
-function selectRange(): void {
-	const order = orderedAccounts.value;
-	const result = resolveSeqRange(range.start, range.end, order.length);
-	if ('error' in result) {
-		message.warning(result.error);
-		return;
-	}
-	for (let seq = result.start; seq <= result.end; seq++) {
-		accounts.selected.add(order[seq - 1]!.key);
-	}
-	message.success(`已勾选序号 ${padSeq(result.start)}–${padSeq(result.end)},共 ${result.end - result.start + 1} 个账户`);
-}
-
-// ===== 批量操作 =====
-const busy = ref<'' | 'login' | 'logout' | 'delete'>('');
-
-async function run(kind: 'login' | 'logout', action: (row: AccountRow) => Promise<void>): Promise<void> {
-	busy.value = kind;
-	try {
-		await forSelected(action);
-	} finally {
-		busy.value = '';
-	}
-	if (kind === 'login') {
-		// 固定 IP 代理:登录时服务端会给账号分 / 换编号,刷新一下「代理」列
-		loadProxy();
-	}
-}
-
-function confirmDelete(): void {
-	const count = accounts.selected.size;
+function confirmDeleteGroup(id: string): void {
+	const name = groupName(id);
+	const count = accounts.rows.filter(row => row.groupId === id).length;
 	dialog.warning({
-		title: '删除账户',
-		content: `删除选中的 ${count} 个账户?会登出这些账号、删掉服务端保存的密码和登录会话,不能撤销。`,
+		title: '删除分组',
+		content: count ? `删除分组「${name}」?组里的 ${count} 个账户会变成未分组,账户本身不删。` : `删除分组「${name}」?`,
 		positiveText: '删除',
 		negativeText: '取消',
 		onPositiveClick: async () => {
-			busy.value = 'delete';
 			try {
-				await deleteSelected();
-			} finally {
-				busy.value = '';
+				await deleteGroup(id);
+				if (editingId.value === id) {
+					editingId.value = '';
+				}
+			} catch (err) {
+				message.error(errorText(err));
 			}
 		}
 	});
 }
 
-// ===== 导入 =====
+// ===== 导入 / 导出 =====
 const importModal = reactive({open: false, text: '', saving: false, error: ''});
 
 async function submitImport(): Promise<void> {
@@ -300,7 +124,21 @@ async function onMaFiles(event: Event): Promise<void> {
 	input.value = '';
 	if (files.length) {
 		await importMaFiles(files);
+		// 新导入的令牌马上显示验证码
+		refreshAuthCodes();
 	}
+}
+
+/** 导出表格里现在显示的账户(按当前筛选和排序) */
+function exportCsv(): void {
+	const rows = visibleRows.value;
+	if (!rows.length) {
+		message.warning('没有可导出的账户');
+		return;
+	}
+	const date = new Date().toLocaleDateString('sv-SE');
+	downloadCsv(`账户-${date}.csv`, accountsCsv(rows, groupName));
+	message.success(`已导出 ${rows.length} 个账户`);
 }
 
 // ===== Steam Guard =====
@@ -326,46 +164,43 @@ async function submitGuard(): Promise<void> {
 </script>
 
 <template>
-	<div class="module-page">
-		<header class="module-header">
+	<div class="module-page accounts-page">
+		<header class="page-header">
 			<div>
-				<h1>账户管理</h1>
-				<div class="module-counts">
-					<span>{{ accounts.rows.length }} 个账户</span>
-					<span>在线数:{{ onlineCount }}</span>
-					<span>离线数:{{ accounts.rows.length - onlineCount }}</span>
-					<span>{{ accounts.selected.size }} 已选</span>
-				</div>
+				<nav class="breadcrumb">
+					<template v-for="(crumb, index) in header.crumbs" :key="index">
+						<AppIcon v-if="index" name="chevronRight" :size="14" />
+						<a v-if="index < 2 && index < header.crumbs.length - 1" @click="onCrumb(index)">{{ crumb }}</a>
+						<span v-else>{{ crumb }}</span>
+					</template>
+				</nav>
+				<h1 class="page-title">{{ header.title }}</h1>
 			</div>
-			<NSpace align="center">
-				<NSpace :size="4" align="center" :wrap="false" title="输入序号区间,勾选对应账户(留空一侧表示单个)">
-					<span class="muted">按序号勾选</span>
-					<NInput v-model:value="range.start" size="small" placeholder="00" class="seq-input" @keyup.enter="selectRange" />
-					<span class="muted">-</span>
-					<NInput v-model:value="range.end" size="small" placeholder="00" class="seq-input" @keyup.enter="selectRange" />
-					<NButton size="small" @click="selectRange">勾选</NButton>
-				</NSpace>
-				<NButton @click="importModal.open = true">导入账户</NButton>
-				<NButton @click="fileInput?.click()">导入 maFile</NButton>
-				<NButton type="primary" :disabled="!accounts.selected.size" :loading="busy === 'login'" @click="run('login', loginAccount)">登录选中</NButton>
-				<NButton :disabled="!accounts.selected.size" :loading="busy === 'logout'" @click="run('logout', logoutAccount)">登出选中</NButton>
-				<NDropdown trigger="click" :options="moveOptions()" :disabled="!accounts.selected.size" @select="(key: string) => onMove(key, selectedRows)">
-					<NButton :disabled="!accounts.selected.size">移到分组</NButton>
-				</NDropdown>
-				<NButton :disabled="!accounts.selected.size" :loading="busy === 'delete'" @click="confirmDelete">删除选中</NButton>
+			<NSpace :size="8">
+				<template v-if="editingGroup">
+					<NButton type="error" secondary @click="confirmDeleteGroup(editingGroup.id)">
+						<template #icon><AppIcon name="trash" :size="16" /></template>删除
+					</NButton>
+				</template>
+				<template v-else-if="tab === 'groups'">
+					<NButton type="primary" @click="openNewGroup()">
+						<template #icon><AppIcon name="plus" :size="16" /></template>创建账户分组
+					</NButton>
+				</template>
+				<template v-else>
+					<NButton @click="exportCsv"><template #icon><AppIcon name="download" :size="16" /></template>导出 CSV</NButton>
+					<NButton @click="fileInput?.click()"><template #icon><AppIcon name="key" :size="16" /></template>导入 maFile</NButton>
+					<NButton type="primary" @click="importModal.open = true"><template #icon><AppIcon name="upload" :size="16" /></template>导入账户</NButton>
+				</template>
 			</NSpace>
 		</header>
 
-		<input ref="fileInput" type="file" accept=".maFile,.json,application/json" multiple hidden @change="onMaFiles">
+		<NTabs v-if="!editingGroup" type="line" :value="tab" class="page-tabs" @update:value="openTab">
+			<NTab name="accounts"><span class="tab-label"><AppIcon name="users" :size="16" />账户</span></NTab>
+			<NTab name="groups"><span class="tab-label"><AppIcon name="folder" :size="16" />账户分组</span></NTab>
+		</NTabs>
 
-		<div class="group-bar">
-			<NRadioGroup :value="accounts.groupFilter" size="small" @update:value="setGroupFilter">
-				<NRadioButton v-for="option in filterOptions" :key="option.value" :value="option.value" :title="option.label">
-					<span class="group-option">{{ option.label }}</span><span class="group-option-count">{{ option.count }}</span>
-				</NRadioButton>
-			</NRadioGroup>
-			<NButton size="small" quaternary @click="groupsOpen = true">管理分组</NButton>
-		</div>
+		<input ref="fileInput" type="file" accept=".maFile,.json,application/json" multiple hidden @change="onMaFiles">
 
 		<NAlert v-if="accounts.guard" type="warning" :bordered="false"
 			:title="`${accounts.guard.accountName}:需要${accounts.guard.type === 'email' ? '邮箱' : '移动令牌'} Steam Guard`">
@@ -380,37 +215,14 @@ async function submitGuard(): Promise<void> {
 
 		<NAlert v-if="accounts.error" type="error" :bordered="false">读取账户名单失败:{{ accounts.error }}</NAlert>
 
-		<div class="module-body">
-			<NDataTable
-				class="account-table"
-				flex-height
-				size="small"
-				:columns="columns"
-				:data="tableData"
-				:row-key="(item: TableRow) => item.key"
-				:checked-row-keys="checkedKeys"
-				:expanded-row-keys="expandedKeys"
-				:row-class-name="(item: TableRow) => (item.kind === 'status' ? 'status-row' : '')"
-				:row-props="rowProps"
-				:indent="0"
-				:scroll-x="1320"
-				:loading="accounts.loading && !accounts.loaded"
-				virtual-scroll
-				@update:checked-row-keys="onCheckedChange"
-				@update:expanded-row-keys="onExpandedChange"
-			>
-				<template #empty>
-					<span v-if="accounts.rows.length" class="muted">这个分组里没有账户,可以在「分组」列或「移到分组」里把账户移进来</span>
-					<span v-else class="muted">暂无账户,点「导入账户」或「导入 maFile」添加</span>
-				</template>
-			</NDataTable>
-		</div>
+		<AccountsTab v-if="tab === 'accounts' && !editingGroup" @new-group="openNewGroup" />
+		<GroupsTab v-else :editing-id="editingId" @edit="(id: string) => (editingId = id)" @delete="confirmDeleteGroup" @back="editingId = ''" />
 
 		<NModal v-model:show="importModal.open" :mask-closable="!importModal.saving">
-			<NCard title="导入账户" style="width: 520px" :bordered="false" role="dialog" aria-modal="true">
-				<p class="muted import-hint">账号----密码,一行一个。已有的账号会更新密码,其它账号不受影响。</p>
+			<NCard title="导入账户" style="width: 520px; max-width: calc(100vw - 32px)" :bordered="false" role="dialog" aria-modal="true">
+				<p class="muted modal-hint">账号----密码,一行一个。已有的账号会更新密码,其它账号不受影响。</p>
 				<NInput v-model:value="importModal.text" type="textarea" :rows="12" placeholder="account1----password1&#10;account2----password2" :input-props="{spellcheck: false}" />
-				<NAlert v-if="importModal.error" type="error" :bordered="false" class="import-error">{{ importModal.error }}</NAlert>
+				<NAlert v-if="importModal.error" type="error" :bordered="false" class="modal-error">{{ importModal.error }}</NAlert>
 				<template #footer>
 					<NSpace justify="end">
 						<NButton :disabled="importModal.saving" @click="importModal.open = false">取消</NButton>
@@ -421,41 +233,38 @@ async function submitGuard(): Promise<void> {
 		</NModal>
 
 		<NModal v-model:show="newGroup.open" :mask-closable="!newGroup.saving">
-			<NCard title="新建分组" style="width: 400px; max-width: calc(100vw - 32px)" :bordered="false" role="dialog" aria-modal="true">
-				<p class="muted import-hint">
+			<NCard title="创建账户分组" style="width: 420px; max-width: calc(100vw - 32px)" :bordered="false" role="dialog" aria-modal="true">
+				<p v-if="newGroup.rows.length" class="muted modal-hint">
 					{{ newGroup.rows.length === 1 ? `建好后把 ${newGroup.rows[0]!.accountName} 移进去` : `建好后把选中的 ${newGroup.rows.length} 个账户移进去` }}
 				</p>
-				<NInput v-model:value="newGroup.name" placeholder="分组名" :maxlength="20" autofocus @keyup.enter="submitNewGroup" />
-				<NAlert v-if="newGroup.error" type="error" :bordered="false" class="import-error">{{ newGroup.error }}</NAlert>
+				<label class="field-label">名称<span class="required">*</span></label>
+				<NInput v-model:value="newGroup.name" placeholder="" :maxlength="20" show-count autofocus @keyup.enter="submitNewGroup" />
+				<NAlert v-if="newGroup.error" type="error" :bordered="false" class="modal-error">{{ newGroup.error }}</NAlert>
 				<template #footer>
 					<NSpace justify="end">
 						<NButton :disabled="newGroup.saving" @click="newGroup.open = false">取消</NButton>
-						<NButton type="primary" :loading="newGroup.saving" @click="submitNewGroup">新建并移入</NButton>
+						<NButton type="primary" :loading="newGroup.saving" @click="submitNewGroup">{{ newGroup.rows.length ? '创建并移入' : '创建' }}</NButton>
 					</NSpace>
 				</template>
 			</NCard>
 		</NModal>
-
-		<GroupsModal :show="groupsOpen" @close="groupsOpen = false" />
-		<TotpModal :account-name="totpAccount" @close="totpAccount = ''" />
-		<HistoryModal :account-name="historyAccount" @close="historyAccount = ''" />
-		<ProxyModal :account-name="proxyAccount" @close="proxyAccount = ''" />
 	</div>
 </template>
 
 <style scoped>
-.module-body {
-	display: flex;
-	flex-direction: column;
+.accounts-page {
+	gap: 16px;
+	padding: 20px 28px 24px;
 }
 
-.account-table {
-	flex: 1;
-	min-height: 240px;
+.page-tabs {
+	flex: none;
 }
 
-.seq-input {
-	width: 56px;
+.tab-label {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
 }
 
 .guard-body {
@@ -470,53 +279,23 @@ async function submitGuard(): Promise<void> {
 	width: 120px;
 }
 
-.import-hint {
-	margin: 0 0 8px;
+.modal-hint {
+	margin: 0 0 10px;
 }
 
-.import-error {
+.modal-error {
 	margin-top: 8px;
 }
 
-.group-bar {
-	display: flex;
-	flex-wrap: wrap;
-	align-items: center;
-	gap: 8px;
+.field-label {
+	display: block;
+	margin-bottom: 6px;
+	font-size: 13px;
+	font-weight: 500;
 }
 
-.group-option {
-	display: inline-block;
-	max-width: 10em;
-	overflow: hidden;
-	text-overflow: ellipsis;
-	white-space: nowrap;
-	vertical-align: bottom;
-}
-
-.group-option-count {
-	margin-left: 6px;
-	opacity: 0.6;
-}
-
-:deep(.group-button) {
-	max-width: 100%;
-}
-
-:deep(.group-button .n-button__content) {
-	overflow: hidden;
-	text-overflow: ellipsis;
-	white-space: nowrap;
-}
-
-:deep(.status-row td) {
-	background: #12161c;
-	font-weight: 600;
-}
-
-:deep(.status-title) {
-	display: inline-flex;
-	align-items: center;
-	gap: 8px;
+.required {
+	margin-left: 2px;
+	color: var(--danger);
 }
 </style>

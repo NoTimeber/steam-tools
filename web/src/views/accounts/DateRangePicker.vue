@@ -233,12 +233,12 @@ function turn(delta: number): void {
 
 .day.between {
 	border-radius: 0;
-	background: rgba(76, 159, 255, 0.18);
+	background: var(--accent-soft);
 }
 
 .day.edge {
 	background: var(--accent);
-	color: #fff;
+	color: var(--on-accent);
 	opacity: 1;
 }
 

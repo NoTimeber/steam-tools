@@ -312,6 +312,14 @@ test('令牌验证码:优先请求里的,再 maFile,再名单;都没有 409', ()
 	assert.throws(() => svc.authCode({accountName: 'x', sharedSecret: 'BAD'}), (err: Error & {statusCode?: number}) => err.statusCode === 500);
 });
 
+test('批量令牌验证码:名单里有 maFile 或 shared_secret 的都给,坏的跳过;可以只要几个', () => {
+	const {svc} = service([
+		{accountName: 'alpha'}, {accountName: 'Bravo', sharedSecret: 'SS-list'}, {accountName: 'charlie'}, {accountName: 'echo', sharedSecret: 'BAD'}
+	], {}, {alpha: {shared_secret: 'SS-ma'}});
+	assert.deepEqual(svc.authCodes({}), {codes: {alpha: 'C-SS-ma', Bravo: 'C-SS-list'}, expiresIn: 23, period: 30});
+	assert.deepEqual(svc.authCodes({accountNames: ['bravo', 'charlie']}).codes, {Bravo: 'C-SS-list'});
+});
+
 test('自动恢复凭据:保存的 refreshToken + 名单密码 + maFile 令牌;已删除的账号返回 null', () => {
 	const {svc} = service([{accountName: 'alpha', password: 'pw', sharedSecret: 'SS-list', country: 'jp', currency: 23, balance: 4, hasWallet: true}], {}, {alpha: {identity_secret: 'IS'}});
 	assert.deepEqual(svc.restoreCredentials('ALPHA'), {

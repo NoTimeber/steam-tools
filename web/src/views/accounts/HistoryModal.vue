@@ -7,6 +7,7 @@ import {NAlert, NButton, NCard, NDataTable, NInput, NModal, NSelect, NSpace, NSp
 import type {DataTableColumns} from 'naive-ui';
 import {errorText} from '../../api/http.ts';
 import type {HistoryKind, HistoryMoney, HistoryRow, PublicHistory} from '../../api/types.ts';
+import {downloadCsv} from '../../lib/csv.ts';
 import {countKinds, csvFileName, filterHistory, historyCsv, inDateRange, kindLabel, spendingRows} from '../../lib/history.ts';
 import {fetchHistory, startHistory} from '../../stores/accounts.ts';
 import DateRangePicker from './DateRangePicker.vue';
@@ -116,12 +117,7 @@ const spending = computed(() => spendingRows(filtered.value));
 /** 导出当前列表(日期范围、类型、关键字筛过的)里花钱的记录和合计 */
 function exportCsv(): void {
 	const list = spending.value;
-	const url = URL.createObjectURL(new Blob([historyCsv(list)], {type: 'text/csv;charset=utf-8'}));
-	const link = document.createElement('a');
-	link.href = url;
-	link.download = csvFileName(props.accountName, view.range);
-	link.click();
-	window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+	downloadCsv(csvFileName(props.accountName, view.range), historyCsv(list));
 	message.success(`已导出 ${list.length} 条`);
 }
 

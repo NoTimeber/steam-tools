@@ -234,6 +234,31 @@ export function createAccountService(options: AccountServiceOptions) {
 		}
 	}
 
+	/**
+	 * 账户列表一起显示的令牌验证码:名单里能生成的账号(maFile 或名单里的 shared_secret)都给;
+	 * 传了 accountNames 只给这些。shared_secret 坏的跳过。验证码 30 秒一换,expiresIn 是这一批还剩几秒
+	 */
+	function authCodes(body: {accountNames?: unknown}): {codes: Record<string, string>; expiresIn: number; period: number} {
+		const wanted = Array.isArray(body.accountNames) ? new Set(body.accountNames.map(name => String(name ?? '').trim().toLowerCase())) : null;
+		const expiresIn = 30 - (totp().time() % 30) || 30;
+		const codes: Record<string, string> = {};
+		for (const account of store.accounts.list()) {
+			if (wanted && !wanted.has(account.accountName.toLowerCase())) {
+				continue;
+			}
+			const sharedSecret = String(profiles.local(account.accountName).sharedSecret || account.sharedSecret || '').trim();
+			if (!sharedSecret) {
+				continue;
+			}
+			try {
+				codes[account.accountName] = totp().generateAuthCode(sharedSecret);
+			} catch {
+				// shared_secret 不对,这个账号不显示
+			}
+		}
+		return {codes, expiresIn, period: 30};
+	}
+
 	// ===== 登录 / 会话控制 =====
 
 	/**
@@ -478,7 +503,7 @@ export function createAccountService(options: AccountServiceOptions) {
 	}
 
 	return {
-		listAccounts, saveAccounts, upsertAccounts, meta, importMaFiles, authCode,
+		listAccounts, saveAccounts, upsertAccounts, meta, importMaFiles, authCode, authCodes,
 		createGroup: groups.createGroup, renameGroup: groups.renameGroup, deleteGroup: groups.deleteGroup,
 		reorderGroups: groups.reorderGroups, moveToGroup: groups.moveToGroup,
 		login, loginWithRefreshToken, submitGuard, requestWebSession, logout, cleanup, connectGc, disconnectGc, cookies, listAttempts,

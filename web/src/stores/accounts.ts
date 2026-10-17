@@ -5,8 +5,8 @@ import {computed, reactive} from 'vue';
 import {api, errorText} from '../api/http.ts';
 import {socket} from '../api/socket.ts';
 import type {AccountGroup, AccountGroupState, AccountProfile, GameId, PublicAttempt, PublicHistory, StoredAccount} from '../api/types.ts';
-import {ALL_ACCOUNTS, NO_GROUP, STATUS_GROUPS, collapseAttemptStatus, lastErrorMessage, matchesGroupFilter, parseAccountText, statusGroup} from '../lib/accounts.ts';
-import type {LoginStatus, StatusGroup} from '../lib/accounts.ts';
+import {ALL_ACCOUNTS, NO_GROUP, collapseAttemptStatus, emptyFilters, lastErrorMessage, matchesFilters, matchesSearch, parseAccountText, sortAccounts} from '../lib/accounts.ts';
+import type {AccountFilters, LoginStatus, SortKey, SortOrder} from '../lib/accounts.ts';
 import {addLog} from './logs.ts';
 
 export interface AccountRow {
@@ -42,8 +42,11 @@ const state = reactive({
 	selected: new Set<string>(),
 	/** 用户建的分组(按显示顺序) */
 	groups: [] as AccountGroup[],
-	/** 表格只显示哪个分组的账号(ALL_ACCOUNTS / NO_GROUP / 分组 id) */
-	groupFilter: ALL_ACCOUNTS,
+	/** 账户表的筛选、搜索、排序(sortKey 为 '' 时按名单顺序) */
+	filters: emptyFilters() as AccountFilters,
+	search: '',
+	sortKey: '' as SortKey | '',
+	sortOrder: 'ascend' as SortOrder,
 	/** 正在等 Steam Guard 验证码的会话 */
 	guard: null as null | {attemptId: string; accountName: string; type: string; domain: string; lastCodeWrong: boolean}
 });
@@ -98,8 +101,9 @@ function applyList(list: StoredAccount[]): void {
 /** 分组改了:正在筛的分组被删掉时回到全部 */
 function applyGroups(groups: AccountGroup[]): void {
 	state.groups = groups;
-	if (state.groupFilter !== ALL_ACCOUNTS && state.groupFilter !== NO_GROUP && !groups.some(group => group.id === state.groupFilter)) {
-		state.groupFilter = ALL_ACCOUNTS;
+	const group = state.filters.group;
+	if (group !== ALL_ACCOUNTS && group !== NO_GROUP && !groups.some(item => item.id === group)) {
+		state.filters.group = ALL_ACCOUNTS;
 	}
 }
 
@@ -249,26 +253,12 @@ export function startAccounts(): void {
 
 // ===== 派生 =====
 
-export interface StatusGroupView {
-	key: StatusGroup;
-	title: string;
-	rows: AccountRow[];
-}
-
-/** 当前分组筛选下表格里显示的账号 */
-export const visibleRows = computed(() => state.rows.filter(row => matchesGroupFilter(row, state.groupFilter)));
-
-/** 显示的账号按状态排好(GC 已连接 → 在线 → 未在线),序号按这个顺序从 1 开始 */
-export const statusGroups = computed<StatusGroupView[]>(() => {
-	const byStatus: Record<StatusGroup, AccountRow[]> = {gc: [], online: [], offline: []};
-	for (const row of visibleRows.value) {
-		byStatus[statusGroup(row)].push(row);
-	}
-	return STATUS_GROUPS.map(group => ({key: group.key, title: group.title, rows: byStatus[group.key]}));
-});
-
-/** 显示顺序的扁平列表(按序号勾选用) */
-export const orderedAccounts = computed(() => statusGroups.value.flatMap(group => group.rows));
+/** 表格里显示的账号:筛选、搜索后排好序;序号和「按序号勾选」都按这个顺序 */
+export const visibleRows = computed(() => sortAccounts(
+	state.rows.filter(row => matchesFilters(row, state.filters) && matchesSearch(row, state.search)),
+	state.sortKey,
+	state.sortOrder
+));
 
 export const onlineCount = computed(() => state.rows.filter(row => row.status === '登录成功').length);
 
@@ -276,9 +266,25 @@ export const selectedRows = computed(() => state.rows.filter(row => state.select
 
 // ===== 分组 =====
 
-export function setGroupFilter(filter: string): void {
-	state.groupFilter = filter;
+/** 改筛选条件(只改给了的);筛掉的账号取消勾选 */
+export function setFilters(patch: Partial<AccountFilters>): void {
+	Object.assign(state.filters, patch);
 	pruneSelection();
+}
+
+export function resetFilters(): void {
+	state.filters = emptyFilters();
+	pruneSelection();
+}
+
+export function setSearch(search: string): void {
+	state.search = search;
+	pruneSelection();
+}
+
+export function setSort(key: SortKey | '', order: SortOrder = 'ascend'): void {
+	state.sortKey = key;
+	state.sortOrder = order;
 }
 
 export function groupName(groupId: string): string {
@@ -515,17 +521,6 @@ export async function submitGuardCode(code: string): Promise<void> {
 	}
 	const data = await api.post<{attempt: PublicAttempt}>(`/api/guard/${encodeURIComponent(guard.attemptId)}`, {code});
 	mergeAttempt(data.attempt);
-}
-
-export interface AuthCode {
-	accountName: string;
-	code: string;
-	expiresIn: number;
-}
-
-/** 令牌验证码(服务端用 maFile 或名单里的 shared_secret 生成) */
-export function fetchAuthCode(accountName: string): Promise<AuthCode> {
-	return api.post<AuthCode>('/api/auth-code', {accountName});
 }
 
 /** 消费记录:上次读取的结果或进度,没读过为 null */

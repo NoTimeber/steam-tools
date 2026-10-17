@@ -2,9 +2,18 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {
-	ALL_ACCOUNTS, NO_GROUP, collapseAttemptStatus, formatBalance, groupFilterOptions, lastErrorMessage, matchNameList, matchesGroupFilter, matchesSearch,
-	moveGroupId, padSeq, parseAccountText, parseNameList, resolveSeqRange, statusGroup
+	ALL_ACCOUNTS, NO_GROUP, accountsCsv, activeFilterCount, collapseAttemptStatus, emptyFilters, formatBalance, lastErrorMessage, matchNameList,
+	matchesFilters, matchesGroupFilter, matchesSearch, moveGroupId, padSeq, parseAccountText, parseNameList, resolveSeqRange, sortAccounts,
+	walletTotals
 } from './accounts.ts';
+import type {FilterableAccount} from './accounts.ts';
+
+function account(name: string, extra: Partial<FilterableAccount & {steamID: string; country: string; currency: number | null}> = {}) {
+	return {
+		accountName: name, steamID: '', country: '', currency: null, groupId: '', status: '未登录' as const,
+		cs2GcConnected: false, tf2GcConnected: false, hasMaFile: false, hasSharedSecret: false, hasWallet: false, balance: null, ...extra
+	};
+}
 
 test('登录状态归并:登录成功后的重连过程仍显示登录成功', () => {
 	assert.equal(collapseAttemptStatus('web_session', '未登录'), '登录成功');
@@ -17,24 +26,69 @@ test('登录状态归并:登录成功后的重连过程仍显示登录成功', (
 	assert.equal(collapseAttemptStatus('weird', '登录成功'), '未登录');
 });
 
-test('状态段:任一 GC 连着算 GC 段,其次看登录成功', () => {
-	assert.equal(statusGroup({status: '登录成功', cs2GcConnected: false, tf2GcConnected: true}), 'gc');
-	assert.equal(statusGroup({status: '登录成功', cs2GcConnected: false, tf2GcConnected: false}), 'online');
-	assert.equal(statusGroup({status: '登录中', cs2GcConnected: false, tf2GcConnected: false}), 'offline');
-});
-
-test('分组筛选:全部、按分组、未分组;筛选项带人数,没有分组时只有「全部」', () => {
+test('分组筛选:全部、按分组、未分组', () => {
 	const rows = [{groupId: 'g1'}, {groupId: ''}, {groupId: 'g1'}, {groupId: 'gone'}];
 	assert.equal(rows.filter(row => matchesGroupFilter(row, ALL_ACCOUNTS)).length, 4);
 	assert.equal(rows.filter(row => matchesGroupFilter(row, 'g1')).length, 2);
 	assert.equal(rows.filter(row => matchesGroupFilter(row, NO_GROUP)).length, 1);
-	assert.deepEqual(groupFilterOptions([], rows), [{value: ALL_ACCOUNTS, label: '全部', count: 4}]);
-	assert.deepEqual(groupFilterOptions([{id: 'g2', name: '仓库'}, {id: 'g1', name: '主号'}], rows), [
-		{value: ALL_ACCOUNTS, label: '全部', count: 4},
-		{value: 'g2', label: '仓库', count: 0},
-		{value: 'g1', label: '主号', count: 2},
-		{value: NO_GROUP, label: '未分组', count: 1}
-	]);
+});
+
+test('账户表筛选:分组、会话、GC、令牌来源、余额上下限;角标数生效的条件', () => {
+	const rows = [
+		account('a', {groupId: 'g1', status: '登录成功', cs2GcConnected: true, hasMaFile: true, hasWallet: true, balance: 5}),
+		account('b', {status: '登录成功', hasSharedSecret: true, hasWallet: true, balance: 20}),
+		account('c', {status: '未登录'}),
+		account('d', {status: '登录失败', hasWallet: true, balance: null})
+	];
+	const names = (patch: Partial<ReturnType<typeof emptyFilters>>) => rows.filter(row => matchesFilters(row, {...emptyFilters(), ...patch})).map(row => row.accountName);
+	assert.deepEqual(names({}), ['a', 'b', 'c', 'd']);
+	assert.deepEqual(names({group: 'g1'}), ['a']);
+	assert.deepEqual(names({group: NO_GROUP, session: '登录成功'}), ['b']);
+	assert.deepEqual(names({gc: 'connected'}), ['a']);
+	assert.deepEqual(names({gc: 'none'}), ['b', 'c', 'd']);
+	assert.deepEqual(names({guard: 'mafile'}), ['a']);
+	assert.deepEqual(names({guard: 'secret'}), ['b']);
+	assert.deepEqual(names({guard: 'none'}), ['c', 'd']);
+	assert.deepEqual(names({minBalance: 10}), ['b'], '没钱包、没余额的账号设了余额条件就筛掉');
+	assert.deepEqual(names({minBalance: 0, maxBalance: 10}), ['a']);
+	assert.equal(activeFilterCount(emptyFilters()), 0);
+	assert.equal(activeFilterCount({...emptyFilters(), group: NO_GROUP, gc: 'none', minBalance: 0}), 3, '余额下限填 0 也算');
+});
+
+test('账户表排序:用户名(数字按大小)、会话(GC → 在线 → 登录中 → 失败 → 离线)、余额(没余额的总在最后);相同的保持原顺序', () => {
+	const rows = [
+		account('acc10', {status: '未登录'}),
+		account('acc2', {status: '登录成功', hasWallet: true, balance: 3}),
+		account('Acc1', {status: '登录成功', tf2GcConnected: true, hasWallet: true, balance: 9}),
+		account('acc3', {status: '登录中'}),
+		account('acc4', {status: '登录成功', hasWallet: true, balance: 3})
+	];
+	const names = (list: typeof rows) => list.map(row => row.accountName);
+	assert.deepEqual(names(sortAccounts(rows, 'accountName', 'ascend')), ['Acc1', 'acc2', 'acc3', 'acc4', 'acc10']);
+	assert.deepEqual(names(sortAccounts(rows, 'accountName', 'descend')), ['acc10', 'acc4', 'acc3', 'acc2', 'Acc1']);
+	assert.deepEqual(names(sortAccounts(rows, 'status', 'ascend')), ['Acc1', 'acc2', 'acc4', 'acc3', 'acc10']);
+	assert.deepEqual(names(sortAccounts(rows, 'balance', 'descend')), ['Acc1', 'acc2', 'acc4', 'acc10', 'acc3']);
+	assert.deepEqual(names(sortAccounts(rows, 'balance', 'ascend')), ['acc2', 'acc4', 'Acc1', 'acc10', 'acc3']);
+	assert.deepEqual(names(sortAccounts(rows, '', 'ascend')), names(rows));
+});
+
+test('钱包合计:按币种分开加,账号多的币种在前;没钱包的不算', () => {
+	assert.deepEqual(walletTotals([
+		account('a', {hasWallet: true, balance: 1.1, currency: 1}),
+		account('b', {hasWallet: true, balance: 2.2, currency: 23}),
+		account('c', {hasWallet: true, balance: 3.3, currency: 23}),
+		account('d', {hasWallet: false, balance: 100, currency: 1}),
+		account('e', {hasWallet: true, balance: null, currency: 1})
+	]), [{currency: 23, total: 5.5, count: 2}, {currency: 1, total: 1.1, count: 1}]);
+	assert.deepEqual(walletTotals([]), []);
+});
+
+test('导出账户列表:序号按导出顺序,分组写名字,会话写在线/离线,余额两位小数;= 开头的防公式', () => {
+	const csv = accountsCsv([
+		account('alpha', {groupId: 'g1', status: '登录成功', steamID: '7656', country: 'US', hasWallet: true, balance: 1.5, currency: 1}),
+		account('=bad', {status: '未登录'})
+	], id => (id === 'g1' ? '市场号' : ''));
+	assert.equal(csv, '﻿序号,账号,分组,会话,SteamID,国家,余额,币种\r\n1,alpha,市场号,在线,7656,US,1.50,$\r\n2,\'=bad,,离线,,,,\r\n');
 });
 
 test('搜索:账号名不分大小写包含,或 SteamID 包含;空关键词都算', () => {
