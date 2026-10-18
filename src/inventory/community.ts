@@ -67,7 +67,19 @@ function pickTag(tags: Tag[], category: string): string {
 	return tag ? (tag.localized_tag_name || tag.name || tag.internal_name || '') : '';
 }
 
-/** 社区描述里的交易冷却截止时间:过期字段,或说明文字里的「Tradable After ...」 */
+// 中文库存(l=schinese)里的日期写成「2026年10月25日 (7:00:00) GMT」,Date 解析不了;要带时刻才认(没时刻按 0 点算会提前显示可交易)
+const ZH_DATE_TIME = /(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日\s*[(（]?\s*(\d{1,2}):(\d{2})(?::(\d{2}))?/;
+
+function parseZhDateTime(text: string): string {
+	const match = ZH_DATE_TIME.exec(text);
+	if (!match) {
+		return '';
+	}
+	const [year, month, day, hour, minute, second] = match.slice(1).map(part => Number(part || 0)) as [number, number, number, number, number, number];
+	return toIsoString(new Date(Date.UTC(year, month - 1, day, hour, minute, second)));
+}
+
+/** 社区描述里的交易冷却截止时间:过期字段,或说明文字里的「Tradable After ...」(英文或中文日期,按 GMT) */
 export function extractCommunityTradableAfter(description: any): string {
 	if (!description || typeof description !== 'object') {
 		return '';
@@ -95,7 +107,7 @@ export function extractCommunityTradableAfter(description: any): string {
 				.replace(/[()]/g, ' ')
 				.replace(/\s+/g, ' ')
 				.trim();
-			const parsed = toIsoString(normalized) || toIsoString(text);
+			const parsed = parseZhDateTime(text) || toIsoString(normalized) || toIsoString(text);
 			if (parsed) {
 				return parsed;
 			}

@@ -66,6 +66,24 @@ test('交易冷却文字:括号里的时刻不能丢(V8 会把括号当注释)',
 	assert.equal(extractCommunityTradableAfter({descriptions: ['', 'Marketable After Mar 10, 2099 (16:00:00) GMT']}), '2099-03-10T16:00:00.000Z');
 	assert.equal(extractCommunityTradableAfter({cache_expiration: '2099-01-01T08:00:00Z', owner_descriptions: ['Tradable After Feb 03, 2099 (7:00:00) GMT']}), '2099-01-01T08:00:00.000Z');
 	assert.equal(extractCommunityTradableAfter({owner_descriptions: ['不是日期']}), '');
+	assert.equal(extractCommunityTradableAfter({owner_descriptions: [{value: 'Tradable/Marketable After Oct 25, 2026 (7:00:00) GMT'}]}), '2026-10-25T07:00:00.000Z');
+});
+
+test('交易冷却文字:中文日期(l=schinese 拉的),按 GMT;没有时刻的不认', () => {
+	for (const text of [
+		'Tradable/Marketable After 2026年10月25日 (7:00:00) GMT',
+		'在 2026年10月25日 (7:00:00) GMT 之后可交易/出售',
+		'<span>可交易时间：2026 年 10 月 25 日 （7:00:00） GMT</span>'
+	]) {
+		assert.equal(extractCommunityTradableAfter({owner_descriptions: [{value: text}]}), '2026-10-25T07:00:00.000Z', text);
+	}
+	assert.equal(extractCommunityTradableAfter({owner_descriptions: ['2099年2月3日 (16:30) GMT']}), '2099-02-03T16:30:00.000Z');
+	assert.equal(extractCommunityTradableAfter({descriptions: ['2024年哥本哈根锦标赛纪念品'], owner_descriptions: ['2026年10月25日']}), '');
+	const [key] = normalizeCommunityInventoryPage({
+		assets: [{assetid: '1', classid: 'k', instanceid: '0'}],
+		descriptions: [{classid: 'k', instanceid: '0', name: '武器箱钥匙', tradable: 0, owner_descriptions: [{value: ' '}, {value: '2099年2月3日 (7:00:00) GMT'}]}]
+	}, null, Date.UTC(2099, 1, 3, 6));
+	assert.deepEqual([key?.tradable, key?.tradableAfter], [false, '2099-02-03T07:00:00.000Z'], '解锁当天 6 点还在冷却');
 	assert.equal(extractCommunityTradableAfter(null), '');
 });
 
