@@ -1,6 +1,6 @@
 {
   "name": "steam-tools",
-  "version": "1.6.26",
+  "version": "1.6.27",
   "private": true,
   "description": "Steam 多账号工具台(服务端)",
   "main": "src/main.ts",
