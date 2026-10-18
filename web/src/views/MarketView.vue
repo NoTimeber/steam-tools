@@ -317,7 +317,6 @@ const ordersEmpty = computed(() => (market.visibleIds
 						</NSelect>
 						<NButton :loading="market.contextLoading" :disabled="!market.item" @click="queryContext">查行情</NButton>
 					</div>
-					<p class="hint muted">在本地词库(CS2 饰品中英文名、TF2 物品英文名)里搜,从下拉里选具体哪一件(磨损、StatTrak、纪念品各算一件);选中后自动去 Steam 查最高求购价 / 最低在售价辅助定价(需先选一个账户)。其它游戏粘贴带英文名的商品链接。</p>
 
 					<div v-if="market.context" class="context">
 						<div class="context-name">
@@ -333,7 +332,6 @@ const ordersEmpty = computed(() => (market.visibleIds
 						<NButton v-if="suggestion != null" size="small" secondary type="primary" class="suggest" @click="setPrice(suggestion)">
 							↑ 比最高求购高一档 {{ contextCurrency }}{{ suggestion.toFixed(2) }}
 						</NButton>
-						<p v-else class="hint muted">未取到「最高求购」。CS2/TF2 会自动从本地数据库解析;若仍为空,多为冷门物品或其它游戏(最低在售/均价/销量不受影响)。</p>
 					</div>
 
 					<div class="price-grid">
@@ -442,11 +440,6 @@ const ordersEmpty = computed(() => (market.visibleIds
 	display: grid;
 	grid-template-columns: minmax(0, 1fr) auto;
 	gap: 6px;
-}
-
-.hint {
-	margin: 0;
-	font-size: 12px;
 }
 
 .context {
