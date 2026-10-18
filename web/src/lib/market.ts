@@ -21,27 +21,13 @@ export interface MarketContext {
 	volume: string;
 }
 
-/** 搜商品的一条结果(src/market/client.ts 的 MarketSearchItem) */
+/** 搜商品的一条(src/market/index.ts 的 MarketSearchItem) */
 export interface MarketItem {
 	appid: number;
+	/** Steam 英文名 */
 	marketHashName: string;
-	/** 中文名(Steam 没有中文的就是英文名) */
-	name: string;
-	appName: string;
-	iconUrl: string;
-	/** 在售数量;本地词库的结果为 null */
-	sellListings: number | null;
-	/** 最低在售价,带币种符号 */
-	sellPriceText: string;
-	groupId: string;
-}
-
-/** GET /api/market/search 的结果 */
-export interface MarketSearch {
-	items: MarketItem[];
-	/** local:Steam 没搜成,用的本地 CS2 中文名词库 */
-	source: 'steam' | 'local';
-	error?: string;
+	/** 中文名;词库里没有(新出的饰品按英文名用、其它游戏的链接)为 null */
+	zh: string | null;
 }
 
 /** 下拉选项的 value:同名物品在不同游戏里可能都有 */
@@ -49,26 +35,17 @@ export function itemKey(item: Pick<MarketItem, 'appid' | 'marketHashName'>): str
 	return `${item.appid}|${item.marketHashName}`;
 }
 
-/** 下拉右边:在售数量和最低在售价;本地词库的结果没有 */
-export function listingText(item: MarketItem): string {
-	if (item.sellListings == null) {
-		return '';
-	}
-	if (item.sellListings <= 0) {
-		return '暂无在售';
-	}
-	return `在售 ${item.sellListings}` + (item.sellPriceText ? ` · ${item.sellPriceText} 起` : '');
+/** 页面上显示的名字:有中文用中文 */
+export function itemLabel(item: MarketItem): string {
+	return item.zh || item.marketHashName;
 }
 
-/** 下拉底部:结果从哪来 */
-export function searchNote(result: MarketSearch | null): string {
-	if (!result?.items.length) {
-		return '';
+/** 名字后面的小字:有中文时是英文名;没有时说明是怎么来的 */
+export function itemSubText(item: MarketItem): string {
+	if (item.zh) {
+		return item.marketHashName;
 	}
-	if (result.source === 'local') {
-		return `Steam 市场没搜成(${result.error || '原因未知'}),下面是本地词库里的 CS2 物品,没有价格`;
-	}
-	return '价格是 Steam 市场最低在售价,定价以「查行情」为准';
+	return item.appid === 730 ? '词库里没有,按英文名使用(要和 Steam 英文名完全一致)' : `其它游戏(appid ${item.appid})`;
 }
 
 /** 本工具挂出的求购单(src/market/ledger.ts 的 BuyOrderRecord) */

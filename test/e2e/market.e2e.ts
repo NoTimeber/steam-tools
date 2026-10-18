@@ -103,33 +103,26 @@ describe('市场求购', () => {
 		assert.deepEqual([alpha, charlie].map(a => [a.account, a.currency, a.currencyISO, a.balance]), [['alpha', 1, 'USD', 10], ['charlie', 1, 'USD', 10]]);
 	});
 
-	test('搜商品:中文按空格分词搜,带账号 cookie;新版分组链接只留这一组;Steam 限流时退回本地中文名词库', async () => {
-		const res = await client.get(`/api/market/search?q=${encodeURIComponent('红线 久经')}&accountId=${encodeURIComponent(alpha.attemptId)}`);
-		assert.equal(res.status, 200, res.text);
-		assert.equal(res.json.source, 'steam');
-		assert.deepEqual(res.json.items.map((item: {marketHashName: string; name: string; sellPriceText: string}) => [item.marketHashName, item.name, item.sellPriceText]), [
-			[AK, 'AK-47 | 红线 (久经沙场)', '$31.56'],
-			['StatTrak™ AK-47 | Redline (Field-Tested)', 'AK-47（StatTrak™） | 红线 (久经沙场)', '$78.20'],
-			['AWP | Redline (Field-Tested)', 'AWP | 红线 (久经沙场)', '$22.90']
-		]);
-		const searched = marketCalls('/market/search/render/').at(-1);
-		assert.ok(searched?.owner, '带了账号的 cookie');
-		assert.equal(searched?.query?.l, 'schinese');
+	test('搜商品:只搜随包的中英文名词库(不请求 Steam 搜索);老链接就是那一件;新版分组链接读分组名再搜词库', async () => {
+		type Item = {appid: number; marketHashName: string; zh: string | null};
+		const search = async (q: string) => {
+			const res = await client.get('/api/market/search?q=' + encodeURIComponent(q));
+			assert.equal(res.status, 200, res.text);
+			return res.json.items as Item[];
+		};
+		assert.deepEqual(await search('千瓦'), [{appid: 730, marketHashName: 'Kilowatt Case', zh: '千瓦武器箱'}]);
+		const redline = await search('红线 久经');
+		assert.ok(redline.some(item => item.marketHashName === AK && item.zh === 'AK-47 | 红线 (久经沙场)'), JSON.stringify(redline));
+		assert.deepEqual(await search('Brand New Unreleased Case'), [{appid: 730, marketHashName: 'Brand New Unreleased Case', zh: null}]);
+		assert.deepEqual(await search(AK_URL), [{appid: 730, marketHashName: AK, zh: 'AK-47 | 红线 (久经沙场)'}]);
 
-		const group = await client.get('/api/market/search?q=' + encodeURIComponent('https://steamcommunity.com/market/listings/730/G1807209A023004'));
-		assert.equal(group.status, 200, group.text);
-		assert.deepEqual(group.json.items.map((item: {marketHashName: string}) => item.marketHashName),
-			[AK, 'AK-47 | Redline (Minimal Wear)', 'StatTrak™ AK-47 | Redline (Field-Tested)']);
-
-		scenario({searchFail: 429});
-		const local = await client.get('/api/market/search?q=' + encodeURIComponent('千瓦'));
-		assert.equal(local.status, 200, local.text);
-		assert.equal(local.json.source, 'local');
-		assert.match(local.json.error, /429/);
-		assert.deepEqual([local.json.items[0].marketHashName, local.json.items[0].name, local.json.items[0].sellListings], ['Kilowatt Case', '千瓦武器箱', null]);
-		const failed = await client.get('/api/market/search?q=' + encodeURIComponent('不存在的东西'));
-		assert.equal(failed.status, 502);
-		scenario({});
+		const group = await search('https://steamcommunity.com/market/listings/730/G1807209A023004');
+		assert.equal(group.length, 12);
+		assert.ok(group.every(item => item.marketHashName.includes('AK-47 | Redline (')), JSON.stringify(group));
+		assert.equal(marketCalls('/market/search/render/').length, 0, '不请求 Steam 的市场搜索');
+		const missing = await client.get('/api/market/search?q=' + encodeURIComponent('https://steamcommunity.com/market/listings/730/G00000000000'));
+		assert.equal(missing.status, 502);
+		assert.match(missing.json.error, /HTTP 404.*直接输名字搜/);
 	});
 
 	test('行情:nameid 从随程序打包的社区库查到,盘口和概览价按账号币种查,nameid 记进缓存', async () => {

@@ -4,8 +4,8 @@
 import {computed, reactive} from 'vue';
 import {api, errorText} from '../api/http.ts';
 import {socket} from '../api/socket.ts';
-import {clampMarketConcurrency, perAccountMax, selectedCurrency} from '../lib/market.ts';
-import type {BuyOrder, MarketAccount, MarketContext, MarketItem, MarketSearch, PlaceResult} from '../lib/market.ts';
+import {clampMarketConcurrency, itemLabel, perAccountMax, selectedCurrency} from '../lib/market.ts';
+import type {BuyOrder, MarketAccount, MarketContext, MarketItem, PlaceResult} from '../lib/market.ts';
 import {addLog} from './logs.ts';
 
 export const market = reactive({
@@ -70,11 +70,10 @@ export async function loadOrders(): Promise<void> {
 	}
 }
 
-/** 按名字搜商品(中文或英文,也认商品链接);选了账号就用第一个账号搜,在售价按它的钱包币种 */
-export async function searchItems(q: string): Promise<MarketSearch> {
-	const first = selectedAccounts.value[0];
-	const data = await api.get<Partial<MarketSearch>>('/api/market/search?q=' + encodeURIComponent(q) + (first ? '&accountId=' + encodeURIComponent(first.attemptId) : ''));
-	return {items: data.items || [], source: data.source === 'local' ? 'local' : 'steam', error: data.error};
+/** 按名字搜商品(本地 CS2 中英文名词库,中文或英文都行;也认商品链接) */
+export async function searchItems(q: string): Promise<MarketItem[]> {
+	const data = await api.get<{items?: MarketItem[]}>('/api/market/search?q=' + encodeURIComponent(q));
+	return data.items || [];
 }
 
 /** 换了商品:之前的行情作废 */
@@ -120,7 +119,7 @@ export async function placeOrders(): Promise<PlaceOutcome> {
 		appid: market.item?.appid,
 		marketHashName: market.item?.marketHashName,
 		pricePerItem: Number(market.price),
-		itemName: market.item?.name || market.context?.itemName || '',
+		itemName: market.item ? itemLabel(market.item) : market.context?.itemName || '',
 		concurrency: clampMarketConcurrency(market.concurrency)
 	};
 	if (market.perAccountMax) {

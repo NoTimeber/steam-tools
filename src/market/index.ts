@@ -6,7 +6,7 @@ import type {NameDb} from '../items/names.ts';
 import {currencyIdToIso} from '../steam/currencies.ts';
 import type {Attempt} from '../steam/session-manager.ts';
 import {createMarketClient, isGroupId, matchListingUrl, parseListingUrl} from './client.ts';
-import type {CreateBuyOrderParams, LiveBuyOrder, MarketClient, MarketContext, MarketLog, MarketSearchItem, MarketTarget} from './client.ts';
+import type {CreateBuyOrderParams, LiveBuyOrder, MarketClient, MarketContext, MarketLog, MarketTarget} from './client.ts';
 import {createBuyOrderConfirmer} from './confirmations.ts';
 import type {BuyOrderConfirmer} from './confirmations.ts';
 import {createBuyOrderLedger} from './ledger.ts';
@@ -14,7 +14,7 @@ import type {BuyOrderRecord, ReconcileResult} from './ledger.ts';
 import {createNameIdResolver} from './nameids.ts';
 
 export {parseListingUrl};
-export type {BuyOrderRecord, MarketContext, MarketSearchItem};
+export type {BuyOrderRecord, MarketContext};
 
 /** 求购单要手机确认时,带 confirmation 重发 createbuyorder 最多几次、间隔多久(确认生效可能稍有延迟) */
 const RESEND_ATTEMPTS = 4;
@@ -79,18 +79,16 @@ export interface ContextQuery {
 export interface SearchQuery {
 	/** 中文或英文名;也可以是商品链接(老的英文名链接或新版分组链接) */
 	q?: unknown;
-	/** 只搜这个游戏 */
-	appid?: unknown;
-	/** 带上就用该账号的 cookie 搜,在售价按它的钱包币种 */
-	accountId?: unknown;
+}
+
+/** 搜商品的一条:Steam 英文名 + 中文名 */
+export interface MarketSearchItem extends MarketTarget {
+	/** 词库里没有(新出的饰品按英文名用、其它游戏的链接)为 null */
+	zh: string | null;
 }
 
 export interface MarketSearchResult {
 	items: MarketSearchItem[];
-	/** steam:Steam 市场搜的;local:Steam 没搜成,用随包的 CS2 中文名词库(没有价格和在售数) */
-	source: 'steam' | 'local';
-	/** source 为 local 时 Steam 搜索失败的原因 */
-	error?: string;
 }
 
 export interface PlaceRequest {
@@ -155,7 +153,7 @@ export interface MarketServiceOptions {
 	readJson(file: string): unknown;
 	writeJson(file: string, value: unknown): void;
 	writeText(file: string, text: string): void;
-	/** CS2 中英文名词库:Steam 搜索失败时退回它 */
+	/** CS2 中英文名词库:搜商品就搜它 */
 	names?: Pick<NameDb, 'search' | 'zh'>;
 	client?: MarketClient;
 	confirmer?: BuyOrderConfirmer;
@@ -192,89 +190,46 @@ export function createMarketService(options: MarketServiceOptions) {
 
 	// ===== 搜商品 =====
 
-	/** 只有英文名的一条(粘贴的老链接、本地词库的结果):没有图标和价格 */
-	function bareItem(target: MarketTarget, name?: string | null): MarketSearchItem {
-		return {
-			...target,
-			name: name || options.names?.zh(target.marketHashName) || target.marketHashName,
-			appName: '',
-			iconUrl: '',
-			sellListings: null,
-			sellPriceText: '',
-			groupId: ''
-		};
-	}
-
-	/** 和输入完全一致的排最前;粘贴的老链接那一件一定在结果里 */
-	function exactFirst(items: MarketSearchItem[], keyword: string, exact: MarketTarget | null): MarketSearchItem[] {
-		const q = keyword.toLowerCase();
-		const isExact = (item: MarketSearchItem) => exact
-			? item.appid === exact.appid && item.marketHashName === exact.marketHashName
-			: item.marketHashName.toLowerCase() === q || item.name.toLowerCase() === q;
-		const list = [...items.filter(isExact), ...items.filter(item => !isExact(item))];
-		return exact && !list.some(isExact) ? [bareItem(exact), ...list] : list;
-	}
-
-	/** Steam 没搜成时:CS2 中文名词库(粘贴的老链接就只给那一件) */
-	function searchLocal(keyword: string, appid: number | undefined, exact: MarketTarget | null): MarketSearchItem[] {
-		if (exact) {
-			return [bareItem(exact)];
+	/** 词库里搜(中文或英文,空格分开的几个词都要出现);rawName:输的像英文全名又不在词库里(新出的饰品),附一个按原文用的选项 */
+	function searchNames(text: string, rawName: boolean): MarketSearchItem[] {
+		const found: MarketSearchItem[] = (options.names?.search(text, 30) ?? []).map(match => ({appid: 730, marketHashName: match.name, zh: match.zh}));
+		if (rawName && !/[㐀-鿿]/.test(text) && text.length >= 3 && !found.some(item => item.marketHashName === text)) {
+			found.push({appid: 730, marketHashName: text, zh: null});
 		}
-		if (appid && appid !== 730) {
-			return [];
-		}
-		return (options.names?.search(keyword, 20) ?? []).map(match => bareItem({appid: 730, marketHashName: match.name}, match.zh));
+		return found;
 	}
 
 	/**
-	 * 按名字搜市场商品(中文或英文)。也认粘贴进来的链接:老的英文名链接就是那一件;
-	 * 新版分组链接(/market/listings/730/G…)先读分组名再搜,只留这一组里的(各磨损 / StatTrak / 纪念品)。
+	 * 按名字搜商品:只搜随包的 CS2 中英文名词库,选中后再去 Steam 查行情(盘口按 item_nameid 查,不受影响)。
+	 * 不用 Steam 的 market/search/render:它对机房 / 代理 IP 上的请求一律 429。
+	 * 也认粘贴的链接:老的英文名链接就是那一件(其它游戏也行);新版分组链接读分组页标题拿分组名,再在词库里搜。
 	 */
 	async function search(query: SearchQuery): Promise<MarketSearchResult> {
 		const text = String(query.q ?? '').trim().slice(0, 300);
 		if (!text) {
-			return {items: [], source: 'steam'};
+			return {items: []};
 		}
-		const attempt = findAttempt(query.accountId);
-		const session = attempt ? {cookies: options.cookiesFor(attempt), userAgent: attempt.userAgent} : {};
-		let appid = Number(query.appid) > 0 ? Math.round(Number(query.appid)) : undefined;
-		let keyword = text;
-		let exact: MarketTarget | null = null;
-		let groupId = '';
 		const link = matchListingUrl(text);
-		if (link) {
-			if (!Number.isInteger(link.appid) || link.appid <= 0 || !link.segment) {
-				throw marketError(400, '链接中缺少有效的 appid 或物品名');
-			}
-			appid = link.appid;
-			if (isGroupId(link.segment)) {
-				groupId = link.segment;
-				try {
-					keyword = await client.fetchGroupName({appid, groupId, ...session});
-				} catch (err) {
-					throw marketError(502, `这是新版市场的分组链接,读取分组名失败(${errorText(err) || '网络错误'}),请直接输名字搜`);
-				}
-			} else {
-				exact = {appid, marketHashName: link.segment};
-				keyword = link.segment;
-			}
+		if (!link) {
+			return {items: searchNames(text, true)};
 		}
+		if (!Number.isInteger(link.appid) || link.appid <= 0 || !link.segment) {
+			throw marketError(400, '链接中缺少有效的 appid 或物品名');
+		}
+		if (!isGroupId(link.segment)) {
+			const zh = link.appid === 730 ? options.names?.zh(link.segment) ?? null : null;
+			return {items: [{appid: link.appid, marketHashName: link.segment, zh}]};
+		}
+		if (link.appid !== 730) {
+			throw marketError(400, '词库里只有 CS2 的物品,其它游戏的新版分组链接认不出是哪一件,请粘贴带英文名的商品链接');
+		}
+		let groupName: string;
 		try {
-			let items = await client.searchItems({query: keyword, appid, count: groupId ? 30 : 20, ...session});
-			if (groupId) {
-				const inGroup = items.filter(item => item.groupId === groupId);
-				items = inGroup.length ? inGroup : items;
-			}
-			return {items: exactFirst(items, keyword, exact), source: 'steam'};
+			groupName = await client.fetchGroupName({appid: link.appid, groupId: link.segment});
 		} catch (err) {
-			const reason = errorText(err) || '网络错误';
-			log('warn', `[market-buyorder] 市场搜索失败「${keyword}」: ${reason}`);
-			const items = searchLocal(keyword, appid, exact);
-			if (!items.length) {
-				throw marketError(502, 'Steam 市场搜索失败:' + reason);
-			}
-			return {items, source: 'local', error: reason};
+			throw marketError(502, `这是新版市场的分组链接,读取分组名失败(${errorText(err) || '网络错误'}),请直接输名字搜`);
 		}
+		return {items: searchNames(groupName, false)};
 	}
 
 	// ===== 行情参考 =====

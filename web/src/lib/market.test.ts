@@ -2,8 +2,8 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {
-	clampMarketConcurrency, formatCentsIn, itemKey, listingText, lockedOut, perAccountMax, placeConfirmText, placeSummary, quantityText,
-	searchNote, selectAllSameCurrency, selectedCurrency, suggestedPrice, syncSummaryText
+	clampMarketConcurrency, formatCentsIn, itemKey, itemLabel, itemSubText, lockedOut, perAccountMax, placeConfirmText, placeSummary,
+	quantityText, selectAllSameCurrency, selectedCurrency, suggestedPrice, syncSummaryText
 } from './market.ts';
 import type {BuyOrder, MarketAccount, MarketItem} from './market.ts';
 
@@ -11,21 +11,15 @@ const account = (name: string, fields: Partial<MarketAccount> = {}): MarketAccou
 	account: name, attemptId: 'a-' + name, country: 'US', hasWallet: true, currency: 1, currencyISO: 'USD', balance: 10, ...fields
 });
 
-const item = (fields: Partial<MarketItem> = {}): MarketItem => ({
-	appid: 730, marketHashName: 'Kilowatt Case', name: '千瓦武器箱', appName: 'Counter-Strike 2', iconUrl: '', sellListings: 763174,
-	sellPriceText: '$0.13', groupId: 'G18A8263004', ...fields
-});
+const item = (fields: Partial<MarketItem> = {}): MarketItem => ({appid: 730, marketHashName: 'Kilowatt Case', zh: '千瓦武器箱', ...fields});
 
-test('搜商品:选项 key、在售文字、下拉底部说明', () => {
+test('搜商品:选项 key、显示名、名字后面的小字', () => {
 	assert.equal(itemKey(item()), '730|Kilowatt Case');
-	assert.equal(listingText(item()), '在售 763174 · $0.13 起');
-	assert.equal(listingText(item({sellPriceText: ''})), '在售 763174');
-	assert.equal(listingText(item({sellListings: 0})), '暂无在售');
-	assert.equal(listingText(item({sellListings: null})), '', '本地词库的结果没有在售数');
-	assert.equal(searchNote(null), '');
-	assert.equal(searchNote({items: [], source: 'local', error: 'x'}), '');
-	assert.match(searchNote({items: [item()], source: 'steam'}), /最低在售价/);
-	assert.equal(searchNote({items: [item()], source: 'local', error: 'Steam 限流了(429)'}), 'Steam 市场没搜成(Steam 限流了(429)),下面是本地词库里的 CS2 物品,没有价格');
+	assert.equal(itemLabel(item()), '千瓦武器箱');
+	assert.equal(itemSubText(item()), 'Kilowatt Case');
+	assert.equal(itemLabel(item({marketHashName: 'Gallery Case', zh: null})), 'Gallery Case');
+	assert.match(itemSubText(item({marketHashName: 'Gallery Case', zh: null})), /词库里没有,按英文名使用/);
+	assert.equal(itemSubText(item({appid: 570, marketHashName: 'Inscribed Pauldron', zh: null})), '其它游戏(appid 570)');
 });
 
 test('币种:同币种才行;混了标出来;选了一种后别的币种锁住', () => {

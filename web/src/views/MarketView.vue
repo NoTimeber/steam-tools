@@ -8,10 +8,10 @@ import type {DataTableColumns, SelectOption} from 'naive-ui';
 import {errorText} from '../api/http.ts';
 import {formatBalance} from '../lib/accounts.ts';
 import {
-	clampMarketConcurrency, currencyPrefix, formatCentsIn, itemKey, listingText, lockedOut, placeConfirmText, placeSummary, quantityText,
-	searchNote, selectAllSameCurrency, suggestedPrice, syncSummaryText
+	clampMarketConcurrency, currencyPrefix, formatCentsIn, itemKey, itemLabel, itemSubText, lockedOut, placeConfirmText, placeSummary,
+	quantityText, selectAllSameCurrency, suggestedPrice, syncSummaryText
 } from '../lib/market.ts';
-import type {BuyOrder, MarketItem, MarketSearch} from '../lib/market.ts';
+import type {BuyOrder, MarketItem} from '../lib/market.ts';
 import {
 	cancelOrder, currency, enterMarket, fetchContext, leaveMarket, market, maxPreview, pickItem, placeOrders, refreshAccounts, searchItems,
 	selectedAccounts, syncOrders, visibleOrders
@@ -50,16 +50,16 @@ function setSelected(names: string[]): void {
 	market.selected = names;
 }
 
-// ===== 搜商品:输中文或英文名(或粘贴商品链接),停 300 毫秒后向后端搜,从下拉里选具体哪一件 =====
-const itemSearch = reactive({query: '', loading: false, result: null as MarketSearch | null});
+// ===== 搜商品:输中文或英文名(或粘贴商品链接),停 300 毫秒后向后端搜本地词库,从下拉里选具体哪一件 =====
+const itemSearch = reactive({query: '', loading: false, items: [] as MarketItem[]});
 let searchSeq = 0;
 let searchTimer: number | undefined;
 
 const itemOptions = computed<SelectOption[]>(() => {
-	const items = itemSearch.result?.items ?? [];
+	const items = itemSearch.items;
 	const picked = market.item;
 	const list = picked && !items.some(item => itemKey(item) === itemKey(picked)) ? [picked, ...items] : items;
-	return list.map(item => ({value: itemKey(item), label: item.name, item}));
+	return list.map(item => ({value: itemKey(item), label: itemLabel(item), item}));
 });
 
 function onSearch(query: string): void {
@@ -68,20 +68,20 @@ function onSearch(query: string): void {
 	itemSearch.query = q;
 	const seq = ++searchSeq;
 	if (!q) {
-		itemSearch.result = null;
+		itemSearch.items = [];
 		itemSearch.loading = false;
 		return;
 	}
 	itemSearch.loading = true;
 	searchTimer = window.setTimeout(async () => {
 		try {
-			const result = await searchItems(q);
+			const items = await searchItems(q);
 			if (seq === searchSeq) {
-				itemSearch.result = result;
+				itemSearch.items = items;
 			}
 		} catch (err) {
 			if (seq === searchSeq) {
-				itemSearch.result = null;
+				itemSearch.items = [];
 				message.error('搜索商品失败:' + errorText(err));
 			}
 		} finally {
@@ -100,23 +100,15 @@ function onPick(value: string | null, option: SelectOption | null): void {
 	}
 }
 
-/** 下拉每一行:图标、中文名 + 英文名,右边在售数和最低价。下拉菜单挂在 body 下,样式见文件末尾不带 scoped 的那段 */
+/** 下拉每一行:中文名 + 英文名(词库里没有的写明按英文名使用)。下拉菜单挂在 body 下,样式见文件末尾不带 scoped 的那段 */
 function renderItemOption(option: SelectOption): VNodeChild {
 	const item = option.item as MarketItem;
-	const listing = listingText(item);
-	const sub = [item.marketHashName !== item.name ? item.marketHashName : '', item.appid !== 730 ? item.appName : ''].filter(Boolean).join(' · ');
-	return h('div', {class: 'market-option'}, [
-		item.iconUrl ? h('img', {class: 'market-option-icon', src: item.iconUrl, alt: '', loading: 'lazy'}) : null,
-		h('span', {class: 'market-option-name'}, [item.name, sub ? h('span', {class: 'muted market-option-sub'}, sub) : null]),
-		listing ? h('span', {class: item.sellListings ? 'market-option-listing' : 'muted market-option-listing'}, listing) : null
-	]);
+	return h('span', {class: 'market-option'}, [itemLabel(item), h('span', {class: 'muted market-option-sub'}, itemSubText(item))]);
 }
-
-const itemNote = computed(() => (itemSearch.loading ? '' : searchNote(itemSearch.result)));
 
 const itemEmpty = computed(() => {
 	if (!itemSearch.query) return '输中文或英文名搜索,也可以粘贴商品链接';
-	return itemSearch.loading ? '搜索中…' : '没搜到,换个关键词试试(多个词用空格分开)';
+	return itemSearch.loading ? '搜索中…' : '词库里没搜到;新出的饰品可以直接输完整英文名';
 });
 
 // ===== 行情 =====
@@ -172,7 +164,7 @@ function place(): void {
 	const text = placeConfirmText({
 		accounts: selectedAccounts.value.length,
 		// 确认框里带上英文名,一眼看清是哪一件(哪个磨损、是不是 StatTrak)
-		itemName: market.item && market.item.name !== market.item.marketHashName ? `${market.item.name}(${market.item.marketHashName})` : market.item?.name || '',
+		itemName: market.item?.zh ? `${market.item.zh}(${market.item.marketHashName})` : market.item?.marketHashName || '',
 		concurrency: clampMarketConcurrency(market.concurrency),
 		prefix: currencyPrefix(currency.value.currency, currency.value.currencyISO),
 		pricePerItem: Number(market.price),
@@ -315,26 +307,22 @@ const ordersEmpty = computed(() => (market.visibleIds
 							:loading="itemSearch.loading"
 							:render-label="renderItemOption"
 							:consistent-menu-width="false"
-							placeholder="搜商品:输中文或英文名,如 千瓦、红线 久经、Kilowatt"
+							placeholder="搜商品:输中文或英文名,如 千瓦、红线 久经、Kilowatt;也能粘贴商品链接"
 							@search="onSearch"
 							@update:value="onPick"
 						>
 							<template #empty>
 								<span class="muted">{{ itemEmpty }}</span>
 							</template>
-							<template v-if="itemNote" #action>
-								<span :class="itemSearch.result?.source === 'local' ? 'warn-text' : 'muted'" class="item-note">{{ itemNote }}</span>
-							</template>
 						</NSelect>
 						<NButton :loading="market.contextLoading" :disabled="!market.item" @click="queryContext">查行情</NButton>
 					</div>
-					<p class="hint muted">从下拉里选具体哪一件(磨损、StatTrak、纪念品各算一件);也可以粘贴商品链接。选中后自动查当前最高求购价 / 最低在售价辅助定价(需先选一个账户)。</p>
+					<p class="hint muted">在本地词库(CS2 饰品中英文名)里搜,从下拉里选具体哪一件(磨损、StatTrak、纪念品各算一件);选中后自动去 Steam 查最高求购价 / 最低在售价辅助定价(需先选一个账户)。其它游戏粘贴带英文名的商品链接。</p>
 
 					<div v-if="market.context" class="context">
 						<div class="context-name">
-							<img v-if="market.item?.iconUrl" class="context-icon" :src="market.item.iconUrl" alt="" />
-							<span>{{ market.item?.name || market.context.itemName || market.context.marketHashName }}</span>
-							<span v-if="market.item && market.item.name !== market.context.marketHashName" class="muted item-sub">{{ market.context.marketHashName }}</span>
+							<span>{{ market.item?.zh || market.context.itemName || market.context.marketHashName }}</span>
+							<span v-if="market.item?.zh" class="muted item-sub">{{ market.context.marketHashName }}</span>
 						</div>
 						<NSpace :size="6">
 							<NTag type="success" :bordered="false">最高求购 <strong>{{ formatCentsIn(market.context.highestBuyOrderCents, market.context.currency, market.context.currencyISO) }}</strong></NTag>
@@ -456,14 +444,6 @@ const ordersEmpty = computed(() => (market.visibleIds
 	gap: 6px;
 }
 
-.item-note {
-	font-size: 12px;
-}
-
-.warn-text {
-	color: var(--warn);
-}
-
 .hint {
 	margin: 0;
 	font-size: 12px;
@@ -484,12 +464,6 @@ const ordersEmpty = computed(() => (market.visibleIds
 	align-items: center;
 	gap: 4px 8px;
 	font-weight: 600;
-}
-
-.context-icon {
-	width: 36px;
-	height: 36px;
-	object-fit: contain;
 }
 
 .item-sub {
@@ -556,23 +530,7 @@ const ordersEmpty = computed(() => (market.visibleIds
 <style>
 /* 搜商品下拉的选项(菜单挂在 body 下,scoped 样式管不到) */
 .market-option {
-	display: flex;
-	align-items: center;
-	gap: 8px;
-	width: 100%;
-	min-width: 0;
-}
-
-.market-option-icon {
-	flex: none;
-	width: 24px;
-	height: 24px;
-	object-fit: contain;
-}
-
-.market-option-name {
-	flex: 1;
-	min-width: 0;
+	display: block;
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
@@ -581,16 +539,5 @@ const ordersEmpty = computed(() => (market.visibleIds
 .market-option-sub {
 	margin-left: 8px;
 	font-size: 12px;
-}
-
-.market-option-listing {
-	flex: none;
-	color: var(--ok);
-	font-size: 12px;
-	white-space: nowrap;
-}
-
-.market-option-listing.muted {
-	color: var(--muted);
 }
 </style>

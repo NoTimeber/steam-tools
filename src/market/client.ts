@@ -8,11 +8,11 @@
 //   4. 挂求购单                          POST steamcommunity.com/market/createbuyorder/
 //   5. 撤求购单                          POST steamcommunity.com/market/cancelbuyorder/
 //   6. 我的求购单                        GET  steamcommunity.com/market/mylistings/?norender=1
-//   7. 按名字搜商品                      GET  steamcommunity.com/market/search/render/?norender=1&l=schinese
-//      (免登录;中文、英文都能搜,回中文名和 market_hash_name;在售价是请求方的币种,不带 cookie 时按出口 IP 定)
+//   7. 新版分组页(取分组名)            GET  steamcommunity.com/market/listings/<appid>/<分组 id>
 //
 // 2026 新版市场:/market/listings/<appid>/<英文名> 会 302 到 /market/listings/<appid>/G1807209A023004 这种分组地址,
-// 一组是同一皮肤的全部磨损 / StatTrak / 纪念品,从地址栏复制的分组链接定位不到具体哪一件,所以页面改成按名字搜。
+// 一组是同一皮肤的全部磨损 / StatTrak / 纪念品,从地址栏复制的分组链接定位不到具体哪一件,所以页面改成按名字搜
+// (搜随包的中英文名词库,见 ./index.ts;Steam 的 market/search/render 对机房 / 代理 IP 一律 429,用不了)。
 //
 // 要点:
 //   - createbuyorder 是表单 POST,字段 sessionid / currency(钱包数字货币枚举) / appid / market_hash_name /
@@ -44,31 +44,6 @@ export interface MarketContext extends MarketTarget {
 	medianPrice: string;
 	volume: string;
 	currencyISO?: string;
-}
-
-/** 市场搜索的一条结果 */
-export interface MarketSearchItem extends MarketTarget {
-	/** 中文名(Steam 没有中文的就是英文名) */
-	name: string;
-	/** 游戏名;本地词库的结果为 '' */
-	appName: string;
-	iconUrl: string;
-	/** 在售数量;本地词库的结果为 null */
-	sellListings: number | null;
-	/** 最低在售价,带币种符号;没有为 '' */
-	sellPriceText: string;
-	/** 新版市场的分组 id(同一皮肤各磨损一组);没有为 '' */
-	groupId: string;
-}
-
-export interface SearchParams {
-	query: string;
-	/** 只搜这个游戏;不传搜全部 */
-	appid?: number;
-	/** 带账号 cookie 时在售价按该账号钱包币种显示 */
-	cookies?: readonly string[];
-	userAgent?: string;
-	count?: number;
 }
 
 export interface WebSessionParams {
@@ -237,27 +212,6 @@ export function parseListingUrl(input: unknown): MarketTarget {
 		throw new Error('这是新版市场的分组链接(同一皮肤的各磨损都在一组),定位不到具体物品,请按名字搜索后选择');
 	}
 	return {appid, marketHashName};
-}
-
-const ICON_BASE = 'https://community.cloudflare.steamstatic.com/economy/image/';
-
-/** search/render?norender=1 的结果 → MarketSearchItem;丢掉缺 appid / 英文名的 */
-export function parseSearchResults(json: any): MarketSearchItem[] {
-	const results: any[] = Array.isArray(json?.results) ? json.results : [];
-	return results.map(result => {
-		const description = result?.asset_description || {};
-		const marketHashName = String(result?.hash_name || description.market_hash_name || '');
-		return {
-			appid: Number(description.appid) || 0,
-			marketHashName,
-			name: String(result?.name || description.market_name || marketHashName),
-			appName: String(result?.app_name || ''),
-			iconUrl: description.icon_url ? `${ICON_BASE}${description.icon_url}/62fx62f` : '',
-			sellListings: finiteOrNull(result?.sell_listings),
-			sellPriceText: String(result?.sell_price_text || ''),
-			groupId: String(description.market_bucket_group_id || '')
-		};
-	}).filter(item => item.appid > 0 && item.marketHashName);
 }
 
 const ENTITIES: Readonly<Record<string, string>> = {amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' '};
@@ -559,43 +513,9 @@ export function createMarketClient(options: MarketClientOptions = {}) {
 		}).filter(order => order.buyOrderId);
 	}
 
-	function sessionHeaders(params: {cookies?: readonly string[]; userAgent?: string}, accept: string): Record<string, string> {
-		const headers: Record<string, string> = {'User-Agent': params.userAgent || 'Mozilla/5.0', Accept: accept, Referer: COMMUNITY + '/market/'};
-		const cookies = (params.cookies ?? []).filter(Boolean);
-		if (cookies.length) {
-			headers.Cookie = cookies.join('; ');
-		}
-		return headers;
-	}
-
-	/** 按名字搜市场(中文或英文),按热门排序;Steam 没给结果(限流、断网)时抛错 */
-	async function searchItems(params: SearchParams): Promise<MarketSearchItem[]> {
-		const url = new URL(COMMUNITY + '/market/search/render/');
-		url.searchParams.set('query', params.query);
-		url.searchParams.set('start', '0');
-		url.searchParams.set('count', String(params.count ?? 20));
-		url.searchParams.set('search_descriptions', '0');
-		url.searchParams.set('sort_column', 'popular');
-		url.searchParams.set('sort_dir', 'desc');
-		if (params.appid) {
-			url.searchParams.set('appid', String(params.appid));
-		}
-		url.searchParams.set('norender', '1');
-		url.searchParams.set('l', 'schinese');
-		const res = await http(url, {headers: sessionHeaders(params, 'application/json')});
-		if (res.status === 429) {
-			throw new Error('Steam 限流了(429),稍后再试');
-		}
-		const {json} = await readJson(res);
-		if (!res.ok || !json || !json.success) {
-			throw new Error(`Steam 没返回搜索结果(HTTP ${res.status})`);
-		}
-		return parseSearchResults(json);
-	}
-
 	/** 分组链接 → 分组名(页面标题去掉「 - Steam Community Market」,如「AK-47 | Redline」) */
-	async function fetchGroupName(params: {appid: number; groupId: string; cookies?: readonly string[]; userAgent?: string}): Promise<string> {
-		const res = await http(listingUrl(params.appid, params.groupId), {headers: sessionHeaders(params, 'text/html')});
+	async function fetchGroupName(params: {appid: number; groupId: string; userAgent?: string}): Promise<string> {
+		const res = await http(listingUrl(params.appid, params.groupId), {headers: {'User-Agent': params.userAgent || 'Mozilla/5.0', Accept: 'text/html'}});
 		if (!res.ok) {
 			throw new Error(`HTTP ${res.status}`);
 		}
@@ -608,7 +528,7 @@ export function createMarketClient(options: MarketClientOptions = {}) {
 		return name;
 	}
 
-	return {fetchMarketContext, createBuyOrder, cancelBuyOrder, fetchMyBuyOrders, searchItems, fetchGroupName};
+	return {fetchMarketContext, createBuyOrder, cancelBuyOrder, fetchMyBuyOrders, fetchGroupName};
 }
 
 export type MarketClient = ReturnType<typeof createMarketClient>;

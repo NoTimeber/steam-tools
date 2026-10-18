@@ -309,11 +309,11 @@ const uu = createUuService({
 	inspect: {url: config.uu.inspectUrl, key: config.uu.inspectKey}
 });
 
-// CS2 饰品中英文名词库(随包 app/data/cs2-names-zh.json.gz,第一次用到才读):C5 扫货、市场求购搜索兜底共用
+// CS2 饰品中英文名词库(随包 app/data/cs2-names-zh.json.gz,第一次用到才读):C5 扫货、市场求购搜商品共用
 const itemNames = loadNameDb(join(config.appDir, 'data', 'cs2-names-zh.json.gz'));
 
 // 市场求购:账本 data/market-buyorders.json 只记本工具挂出的求购;item_nameid 先查缓存 data/market-nameids.json,
-// 再查随程序打包的社区库 app/services/nameid-db/;按名字搜商品走 Steam 市场搜索,搜不成退回中文名词库
+// 再查随程序打包的社区库 app/services/nameid-db/;按名字搜商品搜这份词库
 const market = createMarketService({
 	findAttempt,
 	cookiesFor: profiles.cookiesFor,

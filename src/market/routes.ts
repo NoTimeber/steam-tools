@@ -16,7 +16,7 @@ export function marketRoutes(router: Router, {market, listAccounts}: MarketRoute
 		res.json({success: true, accounts: listAccounts()});
 	});
 
-	// 按名字搜商品(中文或英文,也认商品链接)。query: { q, appid?, accountId? } → { items, source: 'steam'|'local', error? }
+	// 按名字搜商品(本地 CS2 中英文名词库,也认商品链接)。query: { q } → { items: [{appid, marketHashName, zh}] }
 	router.get('/api/market/search', spreadRoute(req => market.search(req.query), '搜索商品失败'));
 
 	// 行情参考。query: { accountId|account, url | (appid, marketHashName), itemNameId? }
