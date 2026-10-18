@@ -434,3 +434,83 @@ test('代理的登录速率限制:掉线重连排着队时 steam-user 自己重�
 	assert.equal(client.logOnCalls.length, 1, '不再 logOn');
 	assert.equal(attempt.status, 'web_session');
 });
+
+test('先用 refreshToken 登:失效了扔掉它、改用账密(令牌码现生成);被顶号这类账号层面的错误不换;没有账密的失败就是失败', t => {
+	const {manager, last, tick} = setup(t);
+	const attempt = manager.createAttempt({accountName: 'alice', sharedSecret: 'aaaa1111'});
+	manager.startPreferredLogon(attempt, 'RT-OLD', {accountName: 'alice', password: 'pw', twoFactorCode: 'STALE'});
+	const client = last();
+	assert.deepEqual(client.logOnCalls[0], {refreshToken: 'RT-OLD', machineName: 'DESKTOP-TEST'});
+	assert.ok(attempt.logs.some(entry => /用保存的 refreshToken 登录\(失效再用账密\)/.test(entry.message)));
+	client.emit('error', {eresult: 5, message: 'InvalidPassword'});
+	assert.equal(attempt.status, 'connecting', '不判失败,转去用账密');
+	tick(100);
+	assert.deepEqual(client.logOnCalls[1], {accountName: 'alice', password: 'pw', machineName: 'DESKTOP-TEST'}, '预先生成的令牌码已过期,不带');
+	let code = '';
+	client.emit('steamGuard', null, (value: string) => {
+		code = value;
+	}, false);
+	assert.equal(code, 'CAAAA', '令牌码由 shared_secret 现生成');
+	client.succeed();
+	assert.equal(attempt.status, 'web_session');
+
+	const kicked = manager.createAttempt({accountName: 'bob'});
+	manager.startPreferredLogon(kicked, 'RT-B', {accountName: 'bob', password: 'pw-b'});
+	last().emit('error', {eresult: LOGGED_IN_ELSEWHERE, message: 'LoggedInElsewhere'});
+	assert.equal(kicked.status, 'failed');
+	tick(100);
+	assert.equal(last().logOnCalls.length, 1, '被顶号不换账密,免得抢号');
+
+	const tokenOnly = manager.createAttempt({accountName: 'carol'});
+	manager.startPreferredLogon(tokenOnly, 'RT-C', null);
+	last().emit('error', {eresult: 5, message: 'InvalidPassword'});
+	assert.equal(tokenOnly.status, 'failed');
+});
+
+test('掉线重连:手里有 refreshToken(账密登录后 Steam 发的)就用它,不用账密;它失效了再退回账密', t => {
+	const {manager, last, tick} = setup(t, {timing: {loginTimeoutMs: 600_000}});
+	const attempt = loginWithPassword(manager);
+	const client = last();
+	client.succeed();
+	client.emit('disconnected', 3, 'NoConnection');
+	tick(5000);
+	manager.reconnectTick();
+	tick(100);
+	assert.deepEqual(client.logOnCalls[1], {refreshToken: 'RT-76561190000000001', machineName: 'DESKTOP-TEST'});
+	client.emit('error', {eresult: 15, message: 'AccessDenied'});
+	tick(100);
+	assert.deepEqual(client.logOnCalls[2], {accountName: 'alice', password: 'pw', machineName: 'DESKTOP-TEST'});
+	assert.equal(attempt.hasRefreshToken, false, '失效的 refreshToken 扔掉');
+	client.succeed();
+	assert.equal(attempt.status, 'web_session');
+	assert.equal(attempt.refreshToken, 'RT-76561190000000001', '账密登录后 Steam 又发了新的,下次重连接着先用它');
+});
+
+test('在线期间定时刷新网页 cookie:到点 webLogOn 一次(不重新登录),新 cookie 照常保存并排下一次;不在线的不刷', t => {
+	const {manager, last, tick, sessions} = setup(t, {timing: {loginTimeoutMs: 600_000, webSessionRefreshMs: 10_000, webSessionRefreshJitterMs: 0}});
+	const attempt = loginWithPassword(manager);
+	const client = last();
+	client.succeed();
+	assert.equal(client.webLogOnCalls, 1);
+	tick(9_000);
+	manager.webSessionTick();
+	assert.equal(client.webLogOnCalls, 1, '没到点');
+	tick(1_000);
+	manager.webSessionTick();
+	assert.equal(client.webLogOnCalls, 2);
+	assert.equal(client.logOnCalls.length, 1, '不重新登录');
+	assert.match(attempt.logs.at(-1)?.message ?? '', /定时刷新网页 cookie/);
+	manager.webSessionTick();
+	assert.equal(client.webLogOnCalls, 2, '刚刷过不重复');
+
+	client.emit('webSession', 'sessionid-2', ['steamLoginSecure=new', 'sessionid=sessionid-2']);
+	assert.deepEqual(sessions.get('alice')?.cookies, ['steamLoginSecure=new', 'sessionid=sessionid-2']);
+	tick(10_000);
+	manager.webSessionTick();
+	assert.equal(client.webLogOnCalls, 3);
+
+	client.emit('disconnected', 3, 'NoConnection');
+	tick(20_000);
+	manager.webSessionTick();
+	assert.equal(client.webLogOnCalls, 3, '掉线了不刷');
+});

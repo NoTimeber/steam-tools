@@ -166,7 +166,8 @@ describe('Steam 会话', () => {
 			assert.equal(logons[1]?.details?.password, '<pw-good>');
 			const byName = await attemptsByName(client);
 			assert.ok(byName.bravo?.[0]?.logs.some(l => /refreshToken 登录失败/.test(l.message)));
-			assert.ok(byName.alpha?.[0]?.logs.some(l => /服务重启后自动恢复登录\(refreshToken\)/.test(l.message)));
+			assert.ok(byName.alpha?.[0]?.logs.some(l => /服务重启后自动恢复登录/.test(l.message)));
+			assert.ok(byName.alpha?.[0]?.logs.some(l => /用保存的 refreshToken 登录/.test(l.message)));
 		});
 
 		test('删除 alpha 后不再自动恢复', async () => {

@@ -191,6 +191,7 @@ function fakeSessions() {
 			return attempt;
 		},
 		startLogon: (attempt: Attempt, details: unknown) => void calls.push(['startLogon', attempt.id, details]),
+		startPreferredLogon: (attempt: Attempt, refreshToken: string, passwordDetails: unknown) => void calls.push(['preferred', attempt.id, refreshToken, passwordDetails]),
 		submitGuardCode: (attempt: Attempt, code: string) => void calls.push(['guard', attempt.id, code]),
 		logout: (attempt: Attempt) => void calls.push(['logout', attempt.id]),
 		removeAccounts: (names: readonly string[], ids: readonly string[]) => ({removedAttempts: names.length + ids.length, sessionKeys: ['alpha', 'gone']}),
@@ -226,30 +227,40 @@ function service(accounts: unknown[] = [], files: Record<string, unknown> = {}, 
 	return {svc, sessions, accountStore, groupStore, ...w};
 }
 
-test('密码登录:没传密码用名单里的;maFile 的 shared_secret 自动生成令牌;在线时复用,force 才重登', () => {
+test('登录:有存下的 refreshToken 先用它(账密作后备,不预先生成令牌);在线时复用,force 才重登;请求里带了密码或验证码按账密登', () => {
 	const {svc, sessions} = service([{accountName: 'alpha', password: 'pw-list', remember: false}], {}, {alpha: {shared_secret: 'SS', identity_secret: 'IS'}});
 	const first = svc.login({accountName: ' alpha '});
 	assert.equal(first.reused, undefined);
 	assert.deepEqual(sessions.calls[0], ['create', {
 		accountName: 'alpha', remember: false, sharedSecret: 'SS', identitySecret: 'IS', hasMaFile: true, country: '', hasWallet: false, currency: null, currencyISO: '', balance: null
 	}]);
-	assert.deepEqual(sessions.calls[1], ['startLogon', 'att-1', {accountName: 'alpha', password: 'pw-list', twoFactorCode: 'C-SS'}]);
+	assert.deepEqual(sessions.calls[1], ['preferred', 'att-1', 'RT-saved', {accountName: 'alpha', password: 'pw-list', twoFactorCode: undefined}]);
 	assert.deepEqual(first.attempt, {id: 'att-1', status: 'created', logs: [
-		'info:已从本地 maFile 载入 shared_secret', 'info:已从本地 maFile 载入 identity_secret（用于发货确认）', 'info:已使用 shared_secret 生成移动令牌验证码'
+		'info:已从本地 maFile 载入 shared_secret', 'info:已从本地 maFile 载入 identity_secret（用于发货确认）'
 	]});
 
 	(sessions.attempts.get('att-1') as Attempt).status = 'web_session';
 	assert.equal(svc.login({accountName: 'alpha'}).reused, true);
 	assert.equal(svc.login({accountName: 'alpha', force: true, twoFactorCode: '99999', password: 'pw-body'}).attempt.id, 'att-2');
-	assert.deepEqual(sessions.calls.at(-1), ['startLogon', 'att-2', {accountName: 'alpha', password: 'pw-body', twoFactorCode: '99999'}]);
+	assert.deepEqual(sessions.calls.at(-1), ['preferred', 'att-2', '', {accountName: 'alpha', password: 'pw-body', twoFactorCode: '99999'}]);
 	assert.throws(() => svc.login({accountName: 'nobody'}), (err: Error & {statusCode?: number}) => err.statusCode === 400);
+});
+
+test('登录:没存 refreshToken 的按账密登(shared_secret 预先生成令牌);名单里没密码但有 refreshToken 的也能登', () => {
+	const noToken = service([{accountName: 'bravo', password: 'pw-b'}], {}, {bravo: {shared_secret: 'SB'}});
+	noToken.svc.login({accountName: 'bravo'});
+	assert.deepEqual(noToken.sessions.calls.at(-1), ['preferred', 'att-1', '', {accountName: 'bravo', password: 'pw-b', twoFactorCode: 'C-SB'}]);
+
+	const tokenOnly = service([{accountName: 'alpha'}]);
+	tokenOnly.svc.login({accountName: 'alpha'});
+	assert.deepEqual(tokenOnly.sessions.calls.at(-1), ['preferred', 'att-1', 'RT-saved', null]);
 });
 
 test('令牌生成失败只记 warn,照样登录;refreshToken 登录', () => {
 	const {svc, sessions} = service([{accountName: 'echo', password: 'pw', sharedSecret: 'BAD'}]);
 	const res = svc.login({accountName: 'echo'});
 	assert.ok((res.attempt as unknown as {logs: string[]}).logs.includes('warn:shared_secret 无法生成验证码: bad secret'));
-	assert.deepEqual(sessions.calls.at(-1), ['startLogon', 'att-1', {accountName: 'echo', password: 'pw', twoFactorCode: undefined}]);
+	assert.deepEqual(sessions.calls.at(-1), ['preferred', 'att-1', '', {accountName: 'echo', password: 'pw', twoFactorCode: undefined}]);
 
 	svc.loginWithRefreshToken({accountName: 'echo', refreshToken: ' RT ', remember: 1});
 	assert.deepEqual(sessions.calls.at(-1), ['startLogon', 'att-2', {refreshToken: 'RT'}]);

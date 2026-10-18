@@ -3,7 +3,10 @@
 //   - 同一账号只保留一个会话:新建会话时先拆掉旧的(登出旧客户端、移出会话表),
 //     不再出现两个客户端同时登录同一账号互相顶号;
 //   - 登录意图持久化 + 重启自动恢复:登录成功记为"应在线",手动登出/删除/致命错误时清除;
-//     服务启动后按意图逐个恢复(优先 refreshToken,失败再用密码)。
+//     服务启动后按意图逐个恢复;
+//   - 尽量少用账密:手动登录、重启恢复、掉线重连都先用 refreshToken,它失效了才用账密(账密留作后备);
+//   - 在线期间定时重新取网页 cookie(webLogOn,客户端用手里的 refreshToken 换,不用账密、不重新登录),
+//     免得长时间在线后 cookie 过期。
 // Steam 客户端(steam-user)、GC 模块、推送等都由调用方注入,单元测试里用假客户端。
 
 import type {EventEmitter} from 'node:events';
@@ -104,8 +107,10 @@ export interface Attempt {
 	reconnectAttempts?: number;
 	nextReconnectAt?: number;
 	reconnectGaveUp?: boolean;
-	/** 用 refreshToken 自动恢复失败时改用的密码登录参数 */
-	restoreFallback?: LogonDetails | null;
+	/** 用 refreshToken 登录失败时改用的账密登录参数(会话存在期间一直留着,之后的重连还要用) */
+	passwordFallback?: LogonDetails | null;
+	/** 到这个时间(毫秒)定时重新取网页 cookie;拿到 WebSession 时排好 */
+	webSessionRefreshAt?: number;
 	/** 已被新会话替换或随账号删除:不再推送、不再重连 */
 	disposed?: boolean;
 	[extra: string]: unknown;
@@ -140,6 +145,10 @@ export interface SessionManagerTiming {
 	reconnectBackoffBaseMs: number;
 	reconnectBackoffCapMs: number;
 	restoreIntervalMs: number;
+	/** 在线期间多久重新取一次网页 cookie */
+	webSessionRefreshMs: number;
+	/** 再加一个 0 到这么多的随机时长,同时登录的账号别挤在一起刷新 */
+	webSessionRefreshJitterMs: number;
 }
 
 export interface SessionManagerOptions {
@@ -181,8 +190,13 @@ const DEFAULT_TIMING: SessionManagerTiming = {
 	reconnectMaxAttempts: 6,
 	reconnectBackoffBaseMs: 60000,
 	reconnectBackoffCapMs: 10 * 60000,
-	restoreIntervalMs: 3000
+	restoreIntervalMs: 3000,
+	webSessionRefreshMs: 12 * 3600_000,
+	webSessionRefreshJitterMs: 30 * 60_000
 };
+
+/** EResult.InvalidPassword:refreshToken 失效时 Steam 也可能回它,换账密能救,不算「账号层面」的致命错误 */
+const INVALID_PASSWORD = 5;
 
 // 仍在登录中或在线的状态:同一账号处于这些状态时,再次登录直接复用,不新建客户端
 const ACTIVE_STATUSES = new Set(['created', 'connecting', 'guard_required', 'logged_on', 'web_session_pending', 'web_session']);
@@ -489,6 +503,20 @@ export function createSessionManager(options: SessionManagerOptions) {
 		});
 	}
 
+	/**
+	 * 尽量少用账密:有 refreshToken 先用它登(不用密码、不要令牌码),它失效了再用账密(passwordDetails);
+	 * 没有 refreshToken 就直接用账密。账密留在会话上,之后掉线重连时 refreshToken 失效也能退回去
+	 */
+	function startPreferredLogon(attempt: Attempt, refreshToken: string, passwordDetails: LogonDetails | null): void {
+		attempt.passwordFallback = passwordDetails;
+		if (refreshToken) {
+			addLog(attempt, 'info', passwordDetails ? '用保存的 refreshToken 登录(失效再用账密)' : '用保存的 refreshToken 登录');
+			startLogon(attempt, {refreshToken});
+		} else if (passwordDetails) {
+			startLogon(attempt, passwordDetails);
+		}
+	}
+
 	// 登录看门狗:启动后若在超时内没拿到 WebSession(也没在等验证码),判定卡住并重试。
 	function armLoginWatchdog(attempt: Attempt): void {
 		clearLoginWatchdog(attempt);
@@ -518,10 +546,31 @@ export function createSessionManager(options: SessionManagerOptions) {
 		}
 	}
 
-	// 复用同一个 client 重新 logOn(避免重建客户端/重复挂事件)。一次性验证码会过期,重试时去掉,
-	// 由 sharedSecret 自动重生成;若无 sharedSecret 则会再次进入"需要验证码"等待用户输入。
+	/**
+	 * 重试 / 掉线重连用的凭据:手里有 refreshToken(登录后 Steam 发的、自动续期换的,或者这次就是用它登的)就用它,
+	 * 原来是账密登录的话账密留作后备;没有才用账密(一次性验证码会过期,去掉,由 sharedSecret 重新生成,
+	 * 没有 sharedSecret 会再次进入「需要验证码」等用户输入)
+	 */
+	function retryDetailsFor(attempt: Attempt): LogonDetails | null {
+		const current = attempt.loginDetails;
+		if (!current) {
+			return null;
+		}
+		const refreshToken = attempt.refreshToken || current.refreshToken || '';
+		if (refreshToken) {
+			if (current.password) {
+				attempt.passwordFallback = current;
+			}
+			return {refreshToken};
+		}
+		const details: LogonDetails = {...current};
+		delete details.twoFactorCode;
+		return details;
+	}
+
+	// 复用同一个 client 重新 logOn(避免重建客户端/重复挂事件)。
 	function retryLogon(attempt: Attempt): void {
-		const details = attempt.loginDetails;
+		const details = retryDetailsFor(attempt);
 		if (!details || !attempt.client) {
 			attempt.status = 'failed';
 			emit(attempt);
@@ -539,13 +588,12 @@ export function createSessionManager(options: SessionManagerOptions) {
 				return;   // 期间被手动登出/删除/替换
 			}
 			const client = attempt.client;
+			attempt.loginDetails = details;
 			whenLogonAllowed(attempt, client, () => {
 				const fingerprint = getFingerprintSafe(attempt.accountName);
-				const retryDetails: LogonDetails = {...details};
-				delete retryDetails.twoFactorCode;   // 一次性验证码已过期,丢弃
 				armLoginWatchdog(attempt);
 				try {
-					client.logOn(buildLogOnDetails(retryDetails, fingerprint));
+					client.logOn(buildLogOnDetails(details, fingerprint));
 				} catch (err) {
 					clearLoginWatchdog(attempt);
 					attempt.status = 'failed';
@@ -706,6 +754,27 @@ export function createSessionManager(options: SessionManagerOptions) {
 		}
 	}
 
+	// ===== 在线期间定时刷新网页 cookie =====
+	// 网页 cookie(steamLoginSecure 里的访问令牌)有效期短,只在登录 / 重连时取一次的话,长时间在线的账号会过期。
+	// 到点就让客户端 webLogOn 换一份新的(它用手里的 refreshToken 换,不用账密、不重新登录);新 cookie 到了照常保存。
+
+	function webSessionTick(): void {
+		const now = Date.now();
+		for (const attempt of attempts.values()) {
+			if (attempt.disposed || !attempt.client || attempt.status !== 'web_session' || !attempt.webSessionRefreshAt || now < attempt.webSessionRefreshAt) {
+				continue;
+			}
+			// 先排好下一次:这次没回应(webSession 事件没来)的话,过一个周期再试
+			attempt.webSessionRefreshAt = now + timing.webSessionRefreshMs;
+			addLog(attempt, 'info', '定时刷新网页 cookie');
+			try {
+				attempt.client.webLogOn();
+			} catch (err) {
+				addLog(attempt, 'warn', '定时刷新网页 cookie 失败: ' + errorMessage(err));
+			}
+		}
+	}
+
 	// ===== steam-user 事件 =====
 
 	function attachSteamEvents(attempt: Attempt, client: SteamClient): void {
@@ -812,7 +881,7 @@ export function createSessionManager(options: SessionManagerOptions) {
 			attempt.nextReconnectAt = 0;
 			attempt.reconnectBlocked = false;
 			attempt.reconnectGaveUp = false;
-			attempt.restoreFallback = null;
+			attempt.webSessionRefreshAt = Date.now() + timing.webSessionRefreshMs + Math.floor(Math.random() * timing.webSessionRefreshJitterMs);
 			attempt.status = 'web_session';
 			attempt.webSessionID = sessionID || '';   // 商店结算需要的 sessionid(CSRF)
 			attempt.cookies = Array.isArray(cookies) ? cookies : [];
@@ -852,12 +921,15 @@ export function createSessionManager(options: SessionManagerOptions) {
 			if (attempt.disposed) {
 				return;
 			}
-			// 自动恢复时 refreshToken 失效:改用密码登录一次
-			if (!attempt.hadSession && attempt.restoreFallback && attempt.loginDetails && attempt.loginDetails.refreshToken) {
-				const fallback = attempt.restoreFallback;
-				attempt.restoreFallback = null;
-				addLog(attempt, 'warn', `refreshToken 登录失败(${formatSteamError(attempt, err)}),改用密码登录`);
-				attempt.loginDetails = fallback;
+			// 正在用 refreshToken 登录时失败(过期、被撤销):扔掉这个 refreshToken,改用账密登录。
+			// 被顶号、会话被替换、封禁这类账号层面的错误不换,免得和你在别处的登录抢号
+			const eresult = err && err.eresult;
+			const accountLevel = isFatalEResult(eresult) && eresult !== INVALID_PASSWORD;
+			if (attempt.status === 'connecting' && attempt.loginDetails?.refreshToken && attempt.passwordFallback && !accountLevel) {
+				addLog(attempt, 'warn', `refreshToken 登录失败(${formatSteamError(attempt, err)}),改用账密登录`);
+				attempt.refreshToken = '';
+				attempt.hasRefreshToken = false;
+				attempt.loginDetails = attempt.passwordFallback;
 				attempt.loginRetries = 0;
 				retryLogon(attempt);
 				return;
@@ -917,9 +989,8 @@ export function createSessionManager(options: SessionManagerOptions) {
 			return null;
 		}
 		const attempt = createAttempt({...credentials.profile, accountName});
-		addLog(attempt, 'info', `服务重启后自动恢复登录(${credentials.refreshToken ? 'refreshToken' : '密码'})`);
-		attempt.restoreFallback = credentials.refreshToken ? passwordDetails : null;
-		startLogon(attempt, credentials.refreshToken ? {refreshToken: credentials.refreshToken} : (passwordDetails as LogonDetails));
+		addLog(attempt, 'info', '服务重启后自动恢复登录');
+		startPreferredLogon(attempt, credentials.refreshToken, passwordDetails);
 		return attempt;
 	}
 
@@ -927,7 +998,10 @@ export function createSessionManager(options: SessionManagerOptions) {
 
 	function start(): void {
 		if (!reconnectTimer) {
-			reconnectTimer = setInterval(reconnectTick, timing.reconnectIntervalMs);
+			reconnectTimer = setInterval(() => {
+				reconnectTick();
+				webSessionTick();
+			}, timing.reconnectIntervalMs);
 			reconnectTimer.unref?.();
 		}
 	}
@@ -964,6 +1038,7 @@ export function createSessionManager(options: SessionManagerOptions) {
 		activeAttemptFor,
 		createAttempt,
 		startLogon,
+		startPreferredLogon,
 		passwordLogonDetails,
 		submitGuardCode,
 		logout,
@@ -974,6 +1049,7 @@ export function createSessionManager(options: SessionManagerOptions) {
 		publicAttempt,
 		formatSteamError,
 		reconnectTick,
+		webSessionTick,
 		restoreAll,
 		start,
 		shutdown

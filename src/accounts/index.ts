@@ -40,7 +40,7 @@ interface Totp {
 	time(offset?: number): number;
 }
 
-type Sessions = Pick<SessionManager, 'attempts' | 'list' | 'activeAttemptFor' | 'createAttempt' | 'startLogon' | 'submitGuardCode'
+type Sessions = Pick<SessionManager, 'attempts' | 'list' | 'activeAttemptFor' | 'createAttempt' | 'startLogon' | 'startPreferredLogon' | 'submitGuardCode'
 	| 'logout' | 'removeAccounts' | 'saveSession' | 'addLog' | 'emit' | 'publicAttempt'>;
 
 export interface AccountServiceOptions {
@@ -262,7 +262,8 @@ export function createAccountService(options: AccountServiceOptions) {
 	// ===== 登录 / 会话控制 =====
 
 	/**
-	 * 密码登录。浏览器不持有密码/shared_secret,没传就用名单里存的。
+	 * 登录。尽量少用账密:有上次存下的 refreshToken 就先用它(不用密码、不要令牌码),它失效了再用账密;
+	 * 请求里直接带了密码或验证码的按账密登。浏览器不持有密码/shared_secret,没传就用名单里存的。
 	 * 同一账号已在登录中或在线时直接返回现有会话(force=true 强制重登),不新建客户端互相顶号。
 	 */
 	function login(body: Record<string, unknown>): {attempt: PublicAttempt; reused?: true} {
@@ -275,8 +276,10 @@ export function createAccountService(options: AccountServiceOptions) {
 		let twoFactorCode = String(body.twoFactorCode || '').trim();
 		// 没传 remember 按名单里的设置(默认记住):记住才保存 refreshToken,重启后才能免密恢复
 		const remember = body.remember !== undefined ? !!body.remember : !(stored && stored.remember === false);
+		const saved = accountName && !body.password && !twoFactorCode ? store.sessions.get(safeName(accountName)) : null;
+		const refreshToken = saved && saved.refreshToken ? String(saved.refreshToken) : '';
 
-		if (!accountName || !password) {
+		if (!accountName || (!password && !refreshToken)) {
 			throw accountError(400, '账号和密码不能为空');
 		}
 		const existing = body.force ? null : sessions.activeAttemptFor(accountName);
@@ -292,7 +295,8 @@ export function createAccountService(options: AccountServiceOptions) {
 		if (!body.identitySecret && local.identitySecret) {
 			sessions.addLog(attempt, 'info', '已从本地 maFile 载入 identity_secret（用于发货确认）');
 		}
-		if (!twoFactorCode && sharedSecret) {
+		// 先用 refreshToken 登时不预先生成令牌码:退回账密时会由 shared_secret 现生成(预先生成的到那时可能已过期)
+		if (!refreshToken && !twoFactorCode && sharedSecret) {
 			try {
 				twoFactorCode = totp().generateAuthCode(sharedSecret);
 				sessions.addLog(attempt, 'info', '已使用 shared_secret 生成移动令牌验证码');
@@ -300,7 +304,8 @@ export function createAccountService(options: AccountServiceOptions) {
 				sessions.addLog(attempt, 'warn', 'shared_secret 无法生成验证码: ' + errorText(err));
 			}
 		}
-		sessions.startLogon(attempt, {accountName, password, twoFactorCode: twoFactorCode || undefined});
+		const passwordDetails = password ? {accountName, password, twoFactorCode: twoFactorCode || undefined} : null;
+		sessions.startPreferredLogon(attempt, refreshToken, passwordDetails);
 		return {attempt: sessions.publicAttempt(attempt)};
 	}
 
