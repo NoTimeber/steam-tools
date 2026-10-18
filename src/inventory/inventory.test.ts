@@ -49,10 +49,11 @@ test('社区库存:按 classid_instanceid 配描述;标签取本地化名;GC 里
 	const items = normalizeCommunityInventoryPage({
 		assets: [{assetid: '1', classid: 'a', instanceid: '0'}, {assetid: '2', classid: 'b', instanceid: '0', amount: '3'}, {id: '3', classid: 'zz', instanceid: '0'}],
 		descriptions: [
-			{classid: 'a', instanceid: '0', name: '红线', market_hash_name: 'Redline', tradable: 1, icon_url: 'x', tags: [{category: 'Type', localized_tag_name: '步枪'}, {category_name: 'Rarity', name: '保密'}]},
+			{classid: 'a', instanceid: '0', name: '红线', market_hash_name: 'Redline', tradable: 1, icon_url: 'x', tags: [{category: 'Type', localized_tag_name: '步枪'}, {category_name: 'Rarity', name: '保密', color: 'D32CE6'}]},
 			{classid: 'b', instanceid: '0', market_name: '钥匙', tradable: 0, marketable: 0, type: 'Key'}
 		]
-	}, new Map([['1', {tradable_after: new Date('2026-10-20T00:00:00Z')}]]), now);
+	}, new Map([['1', {tradable_after: new Date('2026-10-20T00:00:00Z'), paint_wear: 0.25, paint_seed: 661}]]), now);
+	assert.deepEqual(items.map(i => [i.rarityColor, i.paintWear, i.paintSeed]), [['#d32ce6', 0.25, 661], ['', null, null], ['', null, null]], '稀有度颜色取标签的;磨损只有 GC 里有');
 	assert.deepEqual(items.map(i => [i.assetid, i.name, i.type, i.rarity, i.tradable, i.marketable, i.tradableAfter, i.amount]), [
 		['1', '红线', '步枪', '保密', false, true, '2026-10-20T00:00:00.000Z', 1],
 		['2', '钥匙', 'Key', '', false, false, '', 3],

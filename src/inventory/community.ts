@@ -22,6 +22,11 @@ export interface InventoryItem {
 	tradable: boolean;
 	marketable: boolean | null;
 	tradableAfter: string;
+	/** 稀有度颜色(社区库存 Rarity 标签带的,如 #d32ce6);GC 来源没有,前端按稀有度名补 */
+	rarityColor?: string;
+	/** 磨损值、图案模板:只有 GC 里有这件物品时才有 */
+	paintWear?: number | null;
+	paintSeed?: number | null;
 	amount: number;
 	position: number;
 	source: 'community' | 'gc';
@@ -60,11 +65,22 @@ interface Tag {
 	localized_tag_name?: string;
 	name?: string;
 	internal_name?: string;
+	color?: string;
 }
 
 function pickTag(tags: Tag[], category: string): string {
 	const tag = tags.find(item => item && (item.category === category || item.category_name === category));
 	return tag ? (tag.localized_tag_name || tag.name || tag.internal_name || '') : '';
+}
+
+function tagColor(tags: Tag[], category: string): string {
+	const tag = tags.find(item => item && (item.category === category || item.category_name === category));
+	const color = String(tag && tag.color || '').trim();
+	return /^[0-9a-f]{6}$/i.test(color) ? `#${color.toLowerCase()}` : '';
+}
+
+function finiteOrNull(value: unknown): number | null {
+	return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
 // 中文库存(l=schinese)里的日期写成「2026年10月25日 (7:00:00) GMT」,Date 解析不了;要带时刻才认(没时刻按 0 点算会提前显示可交易)
@@ -136,6 +152,9 @@ export function normalizeCommunityInventoryPage(payload: any, gcItemsByAssetId: 
 			category: String(pickTag(tags, 'Category') || ''),
 			rarity: String(pickTag(tags, 'Rarity') || ''),
 			exterior: String(pickTag(tags, 'Exterior') || ''),
+			rarityColor: tagColor(tags, 'Rarity'),
+			paintWear: finiteOrNull(gcItem && gcItem.paint_wear),
+			paintSeed: finiteOrNull(gcItem && gcItem.paint_seed),
 			iconUrl: description.icon_url ? `${ICON_BASE}${description.icon_url}/96fx96f` : '',
 			tradable: tradableAfter ? new Date(tradableAfter).getTime() <= now : description.tradable !== 0,
 			marketable: description.marketable !== 0,

@@ -115,6 +115,7 @@ describe('GC', () => {
 		const [rifle, key] = inventory.items;
 		assert.deepEqual([rifle.assetid, rifle.name, rifle.type, rifle.rarity, rifle.exterior, rifle.tradable, rifle.marketable], ['101', 'AK-47 | 红线 (久经沙场)', '步枪', '保密', '久经沙场', true, true]);
 		assert.ok(rifle.iconUrl.endsWith('/economy/image/ak/96fx96f'));
+		assert.equal(rifle.rarityColor, '#d32ce6');
 		assert.deepEqual([key.tradable, key.tradableAfter], [false, new Date('Feb 03, 2099 07:00:00 GMT').toISOString()]);
 		const requests = server.steamEvents().filter(e => e.event === 'inventoryRequest');
 		assert.deepEqual(requests.map(e => [e.query?.l, e.query?.count, e.query?.start_assetid]), [['schinese', '2000', undefined], ['schinese', '2000', '102']]);

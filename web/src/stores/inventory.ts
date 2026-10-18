@@ -4,7 +4,7 @@
 import {computed, reactive} from 'vue';
 import {api, errorText} from '../api/http.ts';
 import type {PublicAttempt} from '../api/types.ts';
-import type {InventoryItem} from '../lib/inventory.ts';
+import type {InventoryItem, InventorySort, TradeFilter} from '../lib/inventory.ts';
 import {accounts, mergeAttempt} from './accounts.ts';
 import type {AccountRow} from './accounts.ts';
 import {addLog} from './logs.ts';
@@ -21,6 +21,42 @@ export const inventory = reactive({
 	loading: false,
 	categoryFilter: 'all'
 });
+
+const VIEW_KEY = 'steam-tools.inventory-view';
+
+function savedView(): Partial<{mode: InventoryMode; layout: InventoryLayout; pageSize: number}> {
+	try {
+		return JSON.parse(localStorage.getItem(VIEW_KEY) || '{}') || {};
+	} catch {
+		return {};
+	}
+}
+
+export type InventoryMode = 'single' | 'stack';
+export type InventoryLayout = 'grid' | 'list';
+export const PAGE_SIZES = [30, 60, 120] as const;
+
+const initialView = savedView();
+
+/** 页面上的筛选和显示方式;逐件/堆叠、网格/列表、每页条数记在本机 */
+export const inventoryView = reactive({
+	mode: (initialView.mode === 'stack' ? 'stack' : 'single') as InventoryMode,
+	layout: (initialView.layout === 'list' ? 'list' : 'grid') as InventoryLayout,
+	pageSize: (PAGE_SIZES as readonly number[]).includes(Number(initialView.pageSize)) ? Number(initialView.pageSize) : 60,
+	page: 1,
+	search: '',
+	trade: 'all' as TradeFilter,
+	rarity: '',
+	sort: 'default' as InventorySort
+});
+
+export function saveInventoryView(): void {
+	try {
+		localStorage.setItem(VIEW_KEY, JSON.stringify({mode: inventoryView.mode, layout: inventoryView.layout, pageSize: inventoryView.pageSize}));
+	} catch {
+		// 本机存不了就算了
+	}
+}
 
 let version = 0;
 

@@ -24,7 +24,7 @@
 // 7. 假 Steam 商店结算(store / api / checkout.steampowered.com 上买游戏用到的那几个端点),有状态:
 //    每个账号钱包 10.00 美元、已拥有的包,见 fakeStore();商品可用 FAKE_STORE_PACKAGES 追加。
 //    购买记录页(store.steampowered.com/account/history/ + AjaxLoadMoreHistory):每个账号 37 条,每页 15 条,见 historyRow()。
-// 8. 假社区库存(steamcommunity.com/inventory/<steamID>/730/2):两页共 3 件;FAKE_INVENTORY_FILE 可设成私密(403),见 fakeInventory()。
+// 8. 假社区库存(steamcommunity.com/inventory/<steamID>/730/2):两页共 3 件;FAKE_INVENTORY_FILE 可设成私密(403)或整个换掉(assets + descriptions,演示服务用),见 fakeInventory()。
 //    交易报价隐私设置页(steamcommunity.com/profiles/<steamID>/tradeoffers/privacy):带会话 cookie 时给出这个账号的
 //    交易链接(partner = SteamID 低 32 位),没 cookie 时 302 去登录页,见 fakeTradeUrlPage()。
 // 9. 假 C5GAME 开放平台(openapi.c5game.com),有状态:余额、在售(64 位 id)、批量购买 / 快速购买、订单详情,
@@ -447,6 +447,9 @@ function fakeMarket(url, init) {
 	const scenario = marketScenario();
 	record({event: 'marketRequest', method: (init && init.method) || 'GET', path: url.pathname, query: Object.fromEntries(url.searchParams), owner, form, referer: headers.referer || ''});
 	const json = value => new Response(JSON.stringify(value), {status: 200, headers: {'content-type': 'application/json'}});
+	if (Array.isArray(scenario.assets) && Array.isArray(scenario.descriptions)) {
+		return json({success: 1, total_inventory_count: scenario.assets.length, assets: scenario.assets, descriptions: scenario.descriptions});
+	}
 	if (url.pathname.startsWith('/market/listings/')) {
 		const name = decodeURIComponent(url.pathname.split('/')[4] || '');
 		// 新版分组页(真实的有好几 MB,标题在开头)
@@ -603,6 +606,9 @@ function fakeStore(url, init) {
 	const input = rawInput ? JSON.parse(rawInput) : null;
 	const where = url.hostname + url.pathname;
 	const json = value => new Response(JSON.stringify(value), {status: 200, headers: {'content-type': 'application/json'}});
+	if (Array.isArray(scenario.assets) && Array.isArray(scenario.descriptions)) {
+		return json({success: 1, total_inventory_count: scenario.assets.length, assets: scenario.assets, descriptions: scenario.descriptions});
+	}
 	const packages = storePackages();
 	const tokenOk = !!owner && url.searchParams.get('access_token') === 'WT-' + owner;
 
@@ -752,7 +758,7 @@ function fakeStore(url, init) {
 
 // ===== 假社区库存 =====
 // steamcommunity.com/inventory/<steamID>/730/2:两页共 3 件(第一页 2 件,带 more_items / last_assetid)。
-// FAKE_INVENTORY_FILE 里写 {"private": true} 时回 403(和库存设为私密时一样),测试随时改这个文件。
+// FAKE_INVENTORY_FILE 里写 {"private": true} 时回 403(和库存设为私密时一样),写了 assets + descriptions 就一页回这些;测试随时改这个文件。
 function fakeInventory(url, init) {
 	const headers = Object.fromEntries(Object.entries((init && init.headers) || {}).map(([key, value]) => [key.toLowerCase(), String(value)]));
 	const owner = cookieValue(headers.cookie, 'steamLoginSecure');
@@ -765,9 +771,12 @@ function fakeInventory(url, init) {
 		return new Response('Forbidden', {status: 403});
 	}
 	const json = value => new Response(JSON.stringify(value), {status: 200, headers: {'content-type': 'application/json'}});
+	if (Array.isArray(scenario.assets) && Array.isArray(scenario.descriptions)) {
+		return json({success: 1, total_inventory_count: scenario.assets.length, assets: scenario.assets, descriptions: scenario.descriptions});
+	}
 	const rifle = {
 		classid: '1', instanceid: '0', name: 'AK-47 | 红线 (久经沙场)', market_hash_name: 'AK-47 | Redline (Field-Tested)', tradable: 1, marketable: 1, icon_url: 'ak',
-		tags: [{category: 'Type', internal_name: 'CSGO_Type_Rifle', localized_tag_name: '步枪'}, {category: 'Rarity', internal_name: 'Rarity_Legendary_Weapon', localized_tag_name: '保密'}, {category: 'Exterior', internal_name: 'WearCategory2', localized_tag_name: '久经沙场'}]
+		tags: [{category: 'Type', internal_name: 'CSGO_Type_Rifle', localized_tag_name: '步枪'}, {category: 'Rarity', internal_name: 'Rarity_Legendary_Weapon', localized_tag_name: '保密', color: 'd32ce6'}, {category: 'Exterior', internal_name: 'WearCategory2', localized_tag_name: '久经沙场'}]
 	};
 	const key = {
 		classid: '2', instanceid: '0', name: '武器箱钥匙', market_hash_name: 'CS:GO Case Key', tradable: 0, marketable: 0,

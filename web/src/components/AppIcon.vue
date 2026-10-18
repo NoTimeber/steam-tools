@@ -47,7 +47,12 @@ const ICONS = {
 	power: '<path d="M12 3v9"/><path d="M18.4 6.6a9 9 0 1 1-12.8 0"/>',
 	clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
 	check: '<path d="m5 12 5 5L20 7"/>',
-	alert: '<path d="M12 3 2 20h20z"/><path d="M12 10v4M12 17h.01"/>'
+	alert: '<path d="M12 3 2 20h20z"/><path d="M12 10v4M12 17h.01"/>',
+	grid: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
+	list: '<path d="M9 6h12M9 12h12M9 18h12"/><circle cx="4.5" cy="6" r="1"/><circle cx="4.5" cy="12" r="1"/><circle cx="4.5" cy="18" r="1"/>',
+	refresh: '<path d="M20 11a8 8 0 0 0-14.6-4.5L4 8"/><path d="M4 3v5h5"/><path d="M4 13a8 8 0 0 0 14.6 4.5L20 16"/><path d="M20 21v-5h-5"/>',
+	external: '<path d="M14 4h6v6M20 4l-9 9"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>',
+	info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/>'
 } as const;
 
 export type IconName = keyof typeof ICONS;
