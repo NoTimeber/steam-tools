@@ -92,10 +92,6 @@ export interface Config {
 	updaterDir: string;
 	/** 检测代理时查出口 IP 的地址(只用它);空为默认的 ipinfo.io(不行再 api.ipify.org)。PROXY_TEST_URL */
 	proxyTestUrl: string;
-	/** 检测代理时打开的 Steam 社区市场页(看工具台的市场、库存请求会不会被 429);空为默认的市场页。PROXY_STEAM_TEST_URL */
-	proxySteamTestUrl: string;
-	/** 检测代理时打开的 Steam 社区首页(打不开、403 / 429 算被 Steam 封禁);空为默认的社区首页。PROXY_STEAM_HOME_URL */
-	proxySteamHomeUrl: string;
 }
 
 /** 数字型环境变量:没给或不是数字用缺省值,再夹到下限 */
@@ -179,8 +175,6 @@ export function loadConfig(env: Env, dirs: ConfigDirs): Config {
 		},
 		updateRepo: String(env.UPDATE_CHECK || '1') === '0' ? '' : (env.GITHUB_REPO || '').trim() || 'NoTimeber/steam-tools',
 		updaterDir: env.UPDATER_DIR ? resolve(env.UPDATER_DIR) : join(appRoot, 'updater'),
-		proxyTestUrl: (env.PROXY_TEST_URL || '').trim(),
-		proxySteamTestUrl: (env.PROXY_STEAM_TEST_URL || '').trim(),
-		proxySteamHomeUrl: (env.PROXY_STEAM_HOME_URL || '').trim()
+		proxyTestUrl: (env.PROXY_TEST_URL || '').trim()
 	};
 }

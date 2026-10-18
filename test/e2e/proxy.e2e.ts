@@ -76,17 +76,6 @@ describe('Steam 代理池', () => {
 	before(async () => {
 		proxyServer = http.createServer((req, res) => {
 			plain.push({url: String(req.url), auth: String(req.headers['proxy-authorization'] ?? '')});
-			// 「Steam 社区市场」回 429,模拟工具台的市场请求被拒;社区首页正常
-			if (String(req.url).startsWith('http://steam.example.test/market/')) {
-				res.writeHead(429);
-				res.end('Too Many Requests');
-				return;
-			}
-			if (String(req.url).startsWith('http://steam.example.test/')) {
-				res.writeHead(200, {'content-type': 'text/html'});
-				res.end('<html></html>');
-				return;
-			}
 			res.writeHead(200, {'content-type': 'application/json'});
 			res.end(JSON.stringify({ip: '203.0.113.9', country: 'us'}));
 		});
@@ -103,9 +92,7 @@ describe('Steam 代理池', () => {
 		writeFileSync(join(appRoot, 'data', 'config', 'accounts.json'), JSON.stringify([{accountName: 'hotel', password: 'pw-good'}]));
 		server = await startServer({appRoot, env: {
 			APP_PASSWORD: password,
-			PROXY_TEST_URL: 'http://ip.example.test/',
-			PROXY_STEAM_HOME_URL: 'http://steam.example.test/',
-			PROXY_STEAM_TEST_URL: 'http://steam.example.test/market/'
+			PROXY_TEST_URL: 'http://ip.example.test/'
 		}});
 		client = new Client(server.baseUrl);
 		await client.login(password);
@@ -137,7 +124,7 @@ describe('Steam 代理池', () => {
 		assert.ok(!body.includes('e2e%3Apass') && !body.includes('e2e:pass'), '密码不下发');
 	});
 
-	test('检测:后台经代理查出口 IP,再打开 Steam 社区首页和市场页;代理认证按解码后的密码带', async () => {
+	test('检测:后台经代理查出口 IP,只看连不连得通(不打开 Steam 页面);代理认证按解码后的密码带', async () => {
 		const res = await client.post('/api/proxies/test', {ids: [proxyId]});
 		assert.equal(res.status, 200, res.text);
 		assert.equal(res.json.proxies.proxies[0].status, 'checking');
@@ -147,14 +134,13 @@ describe('Steam 代理池', () => {
 			await sleep(50);
 			proxy = (await proxies()).proxies[0];
 		}
-		assert.deepEqual([proxy.status, proxy.check.ip, proxy.check.country, proxy.check.market, proxy.check.samples], ['healthy', '203.0.113.9', 'US', 429, 1]);
-		assert.deepEqual(plain.slice(-3), [
-			{url: 'http://ip.example.test/', auth: basic('e2e-user')},
-			{url: 'http://steam.example.test/', auth: basic('e2e-user')},
-			{url: 'http://steam.example.test/market/', auth: basic('e2e-user')}
-		]);
+		assert.deepEqual([proxy.status, proxy.check.ip, proxy.check.country, proxy.check.samples, proxy.check.error], ['healthy', '203.0.113.9', 'US', 1, '']);
+		assert.equal('market' in proxy.check, false);
+		const checkRequests = plain.filter(request => request.url !== 'http://ip.example.test/');
+		assert.deepEqual(checkRequests, [], '检测只查出口 IP,不再打开 Steam 页面');
+		assert.deepEqual(plain.at(-1), {url: 'http://ip.example.test/', auth: basic('e2e-user')});
 		const usage = (await client.get('/api/proxies/usage?days=1')).json.usage;
-		assert.ok(usage.byKind.some((item: {kind: string; requests: number}) => item.kind === 'check' && item.requests >= 3), JSON.stringify(usage.byKind));
+		assert.ok(usage.byKind.some((item: {kind: string; requests: number}) => item.kind === 'check' && item.requests >= 1), JSON.stringify(usage.byKind));
 		assert.equal(usage.byProxy[0].proxyId, proxyId);
 
 		const draft = await client.post('/api/proxies/test-draft', {id: proxyId, password: ''});

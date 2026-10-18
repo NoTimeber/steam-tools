@@ -181,9 +181,7 @@ const proxy = createProxyService({
 			|| String(store.sessions.get(safeName(account.accountName))?.steamID || '') === steamId);
 		return stored?.accountName ?? '';
 	},
-	testUrl: config.proxyTestUrl || undefined,
-	steamTestUrl: config.proxySteamTestUrl || undefined,
-	steamHomeUrl: config.proxySteamHomeUrl || undefined
+	testUrl: config.proxyTestUrl || undefined
 });
 useCommunityProxy(cookies => proxy.proxyForCookies(cookies));
 

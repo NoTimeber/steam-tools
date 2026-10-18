@@ -24,9 +24,8 @@ export type TagType = 'default' | 'info' | 'success' | 'warning' | 'error';
 export const STATUS_META: Record<ProxyStatus, {label: string; type: TagType; tip: string}> = {
 	untested: {label: '未测试', type: 'default', tip: '还没检测过,登录时照样会用'},
 	checking: {label: '检查中', type: 'info', tip: '正在检测'},
-	healthy: {label: '健康', type: 'success', tip: '上次检测连得上,Steam 也打得开'},
-	unreachable: {label: '无法访问', type: 'error', tip: '连不上这个代理'},
-	blocked: {label: 'Steam 已封禁', type: 'error', tip: '连得上,但 Steam 拒绝了'}
+	healthy: {label: '健康', type: 'success', tip: '上次检测连得通'},
+	unreachable: {label: '无法访问', type: 'error', tip: '连不上这个代理'}
 };
 
 export const STATUS_OPTIONS = (Object.keys(STATUS_META) as ProxyStatus[]).map(value => ({value, label: STATUS_META[value].label}));
@@ -118,33 +117,13 @@ export function uniqueIpText(check: ProxyCheck | null): string {
 	return check && check.samples ? `${check.samples} 次中有 ${check.ips.length} 个` : '—';
 }
 
-/**
- * 市场页的检测结果,只在有问题时回一句(状态列的小标签)。429 不一定是这个 IP 被限流:实测 Steam 对机房代理 IP 上的
- * 非浏览器请求(工具台的请求就是)市场、库存接口一律回 429,同一个 IP 用浏览器开却正常
- */
-export function marketNote(check: ProxyCheck | null): {text: string; tip: string} | null {
-	if (!check || check.status === 'unreachable') {
-		return null;
-	}
-	if (check.market === 429) {
-		return {text: '市场 429', tip: 'Steam 社区市场回 429:经这个代理,工具台的市场、库存请求会被拒(IP 被限流,或 Steam 不放行机房代理上的非浏览器请求);登录、商店、手机确认不受影响'};
-	}
-	if (!check.market) {
-		return {text: '市场打不开', tip: '经这个代理打不开 Steam 社区市场页,市场、库存请求可能用不了'};
-	}
-	if (check.market >= 400) {
-		return {text: `市场 ${check.market}`, tip: `Steam 社区市场回 HTTP ${check.market}`};
-	}
-	return null;
-}
-
 // ===== 表格:统计、筛选 =====
 
 export function proxyStats(proxies: readonly PublicProxy[]) {
 	return {
 		total: proxies.length,
 		healthy: proxies.filter(proxy => proxy.status === 'healthy').length,
-		failing: proxies.filter(proxy => proxy.status === 'unreachable' || proxy.status === 'blocked').length,
+		failing: proxies.filter(proxy => proxy.status === 'unreachable').length,
 		untested: proxies.filter(proxy => proxy.status === 'untested').length,
 		enabled: proxies.filter(proxy => proxy.enabled).length
 	};

@@ -21,8 +21,8 @@ export type ProxyKind = 'static' | 'rotating';
 
 export const PROXY_KINDS: readonly ProxyKind[] = ['static', 'rotating'];
 
-/** 检测结论:健康(连得上、Steam 也打得开)、无法访问(连不上代理)、Steam 已封禁(连得上,Steam 拒绝) */
-export type ProxyCheckStatus = 'healthy' | 'unreachable' | 'blocked';
+/** 检测结论:健康(连得上)、无法访问(连不上代理) */
+export type ProxyCheckStatus = 'healthy' | 'unreachable';
 
 /** 上次检测的结果 */
 export interface ProxyCheck {
@@ -37,8 +37,6 @@ export interface ProxyCheck {
 	ips: string[];
 	/** 采样成功了几次 */
 	samples: number;
-	/** 经这个代理打开 Steam 社区市场页的 HTTP 状态,0 为打不开;429 是工具台的市场、库存请求会被拒 */
-	market: number;
 	/** 没通过时的原因 */
 	error: string;
 	/** 毫秒时间戳 */
@@ -117,7 +115,9 @@ function checkOf(raw: unknown): ProxyCheck | null {
 		return null;
 	}
 	const value = raw as Partial<ProxyCheck>;
-	const status = value.status === 'healthy' || value.status === 'unreachable' || value.status === 'blocked' ? value.status : null;
+	// 以前的「Steam 已封禁」(blocked)是连得上、Steam 页面打不开;现在只看连通,算健康
+	const stored = String(value.status || '');
+	const status = stored === 'healthy' || stored === 'blocked' ? 'healthy' : stored === 'unreachable' ? 'unreachable' : null;
 	if (!status) {
 		return null;
 	}
@@ -128,8 +128,7 @@ function checkOf(raw: unknown): ProxyCheck | null {
 		country: String(value.country || ''),
 		ips: strings(value.ips),
 		samples: count(value.samples),
-		market: count(value.market),
-		error: String(value.error || ''),
+		error: status === 'healthy' ? '' : String(value.error || ''),
 		checkedAt: count(value.checkedAt)
 	};
 }

@@ -12,7 +12,7 @@ import GroupChip from '../../components/GroupChip.vue';
 import {withTip} from '../../components/tip.ts';
 import {
 	NO_GROUP, PROTOCOL_OPTIONS, PROXY_KIND_OPTIONS, STATUS_META, STATUS_OPTIONS, accountsAssignedTo, accountsPinnedTo, activeProxyFilterCount, emptyProxyFilters,
-	isSingleIpRotating, marketNote, matchesProxy, proxyKindLabel, proxyStats, sortProxies, timeAgo, uniqueIpText
+	isSingleIpRotating, matchesProxy, proxyKindLabel, proxyStats, sortProxies, timeAgo, uniqueIpText
 } from '../../lib/proxy.ts';
 import type {ProxyFilters, ProxySortKey} from '../../lib/proxy.ts';
 import {bulkProxies, proxy, testProxies} from '../../stores/proxy.ts';
@@ -197,10 +197,6 @@ function statusCell(row: PublicProxy) {
 		default: () => meta.label,
 		icon: () => h(AppIcon, {name: row.status === 'healthy' ? 'check' : row.status === 'checking' ? 'radio' : row.status === 'untested' ? 'clock' : 'alert', size: 13})
 	}), tip)];
-	const note = row.status === 'checking' ? null : marketNote(row.check);
-	if (note) {
-		parts.push(withTip(h(NTag, {size: 'small', bordered: false, type: 'warning'}, () => note.text), note.tip));
-	}
 	if (isSingleIpRotating(row)) {
 		parts.push(withTip(h('span', {class: 'warn-icon'}, [h(AppIcon, {name: 'alert', size: 15})]),
 			`标为轮换,但 ${row.check!.samples} 次检测都是同一个 IP:提供商可能是按时间间隔换 IP,建议设登录速率限制`));
@@ -358,7 +354,7 @@ const scrollX = computed(() => columns.value.reduce((sum, column) => sum + (('wi
 		<div class="stat">
 			<div class="stat-label"><AppIcon name="alert" :size="16" />异常</div>
 			<div class="stat-value">{{ stats.failing }}</div>
-			<div class="stat-sub" :class="stats.failing ? 'danger' : 'muted'">无法访问或被 Steam 封禁</div>
+			<div class="stat-sub" :class="stats.failing ? 'danger' : 'muted'">连不上代理</div>
 		</div>
 		<div class="stat">
 			<div class="stat-label"><AppIcon name="clock" :size="16" />未测试</div>

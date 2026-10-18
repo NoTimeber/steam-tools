@@ -104,7 +104,7 @@ test('账号用哪些代理:没绑定的用代理池(启用的、没被账号单
 });
 
 test('分配:尽量分散到不同代理,健康或没测过的优先;每个账号一直用分到的,停用了才重新挑;重启后重新分', () => {
-	const unhealthy = {status: 'unreachable' as const, latencyMs: 0, ip: '', country: '', ips: [], samples: 0, market: 0, error: 'x', checkedAt: 1};
+	const unhealthy = {status: 'unreachable' as const, latencyMs: 0, ip: '', country: '', ips: [], samples: 0, error: 'x', checkedAt: 1};
 	const {service, store} = harness({proxies: [P('a'), P('b'), P('dead', {check: unhealthy})]});
 	assert.equal(service.proxyFor('alpha'), url('a'));
 	assert.equal(service.proxyFor('bravo'), url('b'), '挑账号最少的');
@@ -197,7 +197,7 @@ test('新建 / 修改代理:按各项校验,下发不带密码;密码留空保�
 
 	const id = proxy.id;
 	service.bindAccounts({accountNames: ['x'], mode: 'bind', proxyIds: [id]});
-	store.save({...store.saved(), proxies: store.saved().proxies.map(item => ({...item, check: {status: 'healthy', latencyMs: 1, ip: 'x', country: '', ips: ['x'], samples: 1, market: 200, error: '', checkedAt: 1}}))});
+	store.save({...store.saved(), proxies: store.saved().proxies.map(item => ({...item, check: {status: 'healthy', latencyMs: 1, ip: 'x', country: '', ips: ['x'], samples: 1, error: '', checkedAt: 1}}))});
 	const reloaded = createProxyService({store, accountForSteamId: () => '', createProxyFetch: () => fetch});
 	reloaded.updateProxy({id, password: '', notes: '改了备注'});
 	assert.deepEqual([store.saved().proxies[0]!.password, store.saved().proxies[0]!.check?.status], ['secret', 'healthy'], '密码留空保留;只改备注检测结果还在');
@@ -302,7 +302,7 @@ test('代理组和绑定:账号绑定代理组、账户分组关联代理组(和
 	assert.throws(() => service.distributeProxies({accountNames: ['alpha'], proxyIds: []}), status(400, /至少一个代理/));
 });
 
-test('检测:后台跑(先是「检查中」),回出口 IP、国家、延迟;轮换代理采样几次看换没换 IP;连不上、407、Steam 拒绝分别标出;测的时候改了连接方式结果不算', async () => {
+test('检测:后台跑(先是「检查中」),只看连不连得通:回出口 IP、国家、延迟,不打开 Steam 页面;轮换代理采样几次看换没换 IP;连不上、407 分别标出;测的时候改了连接方式结果不算', async () => {
 	let clock = 1000;
 	let rotation = 0;
 	const seen: string[] = [];
@@ -312,16 +312,13 @@ test('检测:后台跑(先是「检查中」),回出口 IP、国家、延迟;轮
 			P('r', {type: 'rotating'}),
 			P('w', {host: 'p.webshare.io', type: 'rotating', username: 'u-rotate', password: 'pw', poolSize: 5}),
 			P('dead'),
-			P('auth'),
-			P('blocked')
+			P('auth')
 		]
 	}, {
 		now: () => (clock += 50),
 		checkConcurrency: 1,
 		checkSaveDelayMs: 0,
 		testUrl: 'http://ip.test/',
-		steamHomeUrl: 'http://home.test/',
-		steamTestUrl: 'http://market.test/',
 		random: (() => {
 			const picks = [0, 0, 0.5, 0.99];
 			let call = 0;
@@ -341,9 +338,6 @@ test('检测:后台跑(先是「检查中」),回出口 IP、国家、延迟;轮
 				const ip = proxyUrl.includes('r.example') ? `198.51.100.${++rotation}` : proxyUrl.includes('webshare') ? `192.0.2.${/u-(\d+)/.exec(proxyUrl)![1]}` : '203.0.113.5';
 				return new Response(JSON.stringify({ip, country: 'us'}));
 			}
-			if (target === 'http://home.test/') {
-				return new Response('', {status: proxyUrl.includes('blocked') ? 403 : 200});
-			}
 			return new Response('Too Many Requests', {status: 429});
 		}) as unknown as typeof fetch
 	});
@@ -351,16 +345,15 @@ test('检测:后台跑(先是「检查中」),回出口 IP、国家、延迟;轮
 	assert.ok(started.proxies.every(proxy => proxy.status === 'checking'));
 	await settle(service);
 	const byId = Object.fromEntries(service.state().proxies.map(proxy => [proxy.id, proxy]));
-	assert.deepEqual([byId.s!.status, byId.s!.check?.ip, byId.s!.check?.country, byId.s!.check?.samples, byId.s!.check?.ips, byId.s!.check?.market, byId.s!.check?.latencyMs],
-		['healthy', '203.0.113.5', 'US', 1, ['203.0.113.5'], 429, 50]);
+	assert.deepEqual([byId.s!.status, byId.s!.check?.ip, byId.s!.check?.country, byId.s!.check?.samples, byId.s!.check?.ips, byId.s!.check?.latencyMs, byId.s!.check?.error],
+		['healthy', '203.0.113.5', 'US', 1, ['203.0.113.5'], 50, '']);
 	assert.deepEqual([byId.r!.check?.samples, byId.r!.check?.ips.length], [3, 3], '轮换:每次新开连接,3 次 3 个 IP');
 	assert.deepEqual([byId.w!.check?.samples, byId.w!.check?.ips.length], [3, 3], '按账号固定 IP 的挑 3 个不同编号');
 	assert.deepEqual([byId.dead!.status, byId.dead!.check?.error], ['unreachable', '代理不通: 通过代理请求失败: connect ECONNREFUSED']);
 	assert.deepEqual([byId.auth!.status, byId.auth!.check?.error], ['unreachable', '代理账号或密码不对(HTTP 407)']);
-	assert.deepEqual([byId.blocked!.status, byId.blocked!.check?.error], ['blocked', 'Steam 社区回 HTTP 403']);
 	assert.equal(store.saved().proxies.find(proxy => proxy.id === 's')!.check?.status, 'healthy', '结果存盘');
 	assert.ok(seen.every(line => line.includes(' false ')), '检测每次新开连接');
-	assert.ok(seen.filter(line => line.includes('home.test') || line.includes('market.test')).every(line => line.endsWith(' manual')), 'Steam 页面不跟随跳转');
+	assert.ok(seen.every(line => line.includes(' http://ip.test/ ')), '只查出口 IP,不打开 Steam 页面');
 	assert.ok(usage.some(entry => entry.kind === 'check' && entry.account === ''), '检测的流量也记上');
 
 	service.test({ids: ['s']});

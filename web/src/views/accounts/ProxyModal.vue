@@ -52,7 +52,7 @@ const groupOptions = computed(() => proxy.data.groups.map(group => ({
 /** 「每个账号分一个」一键选:启用着、没被别的账号单独绑定、上次检测没失败的代理 */
 function pickFree(): void {
 	const pinned = pinnedProxyIds({...proxy.data, accounts: Object.fromEntries(Object.entries(proxy.data.accounts).filter(([key]) => !props.accountNames.some(name => name.toLowerCase() === key)))});
-	form.proxyIds = proxy.data.proxies.filter(item => item.enabled && !pinned.has(item.id) && item.status !== 'unreachable' && item.status !== 'blocked').map(item => item.id);
+	form.proxyIds = proxy.data.proxies.filter(item => item.enabled && !pinned.has(item.id) && item.status !== 'unreachable').map(item => item.id);
 }
 
 const modeHelp = computed(() => {

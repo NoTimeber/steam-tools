@@ -24,7 +24,7 @@ import {buildProxyUrl, createProxyFetch, fillProxyTemplate, isProxyTemplate, mas
 import type {ProxyFetchOptions, ProxyProtocol} from '../core/proxy.ts';
 import {GROUP_COLORS, newStoredProxy, PROXY_KINDS} from '../store/proxies.ts';
 import type {AccountBinding, ProxyCheck, ProxyConfig, ProxyGroup, ProxyKind, ProxyStore, StoredProxy} from '../store/proxies.ts';
-import {checkProxy, DEFAULT_IP_URLS, DEFAULT_STEAM_HOME_URL, DEFAULT_STEAM_MARKET_URL} from './check.ts';
+import {checkProxy, DEFAULT_IP_URLS} from './check.ts';
 import {parseProxyList} from './import.ts';
 import type {ProxyLineError} from './import.ts';
 import {createLoginLimiter} from './login-limit.ts';
@@ -122,10 +122,6 @@ export interface ProxyServiceOptions {
 	createProxyFetch?: (proxyUrl: string, options?: ProxyFetchOptions) => typeof fetch;
 	/** 检测时查出口 IP 的地址(只用它);不传按 ipinfo → ipify */
 	testUrl?: string;
-	/** 检测时打开的 Steam 社区市场页 */
-	steamTestUrl?: string;
-	/** 检测时打开的 Steam 社区首页 */
-	steamHomeUrl?: string;
 	now?: () => number;
 	/** 挑代理、编号用的随机数(测试注入) */
 	random?: () => number;
@@ -909,8 +905,6 @@ export function createProxyService(options: ProxyServiceOptions) {
 	const checkOptions = {
 		makeFetch,
 		ipUrls: options.testUrl ? [options.testUrl] : DEFAULT_IP_URLS,
-		steamHomeUrl: options.steamHomeUrl ?? DEFAULT_STEAM_HOME_URL,
-		steamMarketUrl: options.steamTestUrl ?? DEFAULT_STEAM_MARKET_URL,
 		now
 	};
 
@@ -957,7 +951,7 @@ export function createProxyService(options: ProxyServiceOptions) {
 				try {
 					check = await runCheck(proxy);
 				} catch (err) {
-					check = {status: 'unreachable', latencyMs: 0, ip: '', country: '', ips: [], samples: 0, market: 0, error: errorText(err), checkedAt: now()};
+					check = {status: 'unreachable', latencyMs: 0, ip: '', country: '', ips: [], samples: 0, error: errorText(err), checkedAt: now()};
 				}
 				checking.delete(proxy.id);
 				const latest = proxyById(proxy.id);

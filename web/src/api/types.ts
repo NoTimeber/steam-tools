@@ -152,12 +152,12 @@ export type ProxyProtocol = 'http' | 'https';
 /** 代理类型:静态(一个固定出口 IP)、轮换(一个入口,提供商换出口 IP) */
 export type ProxyKind = 'static' | 'rotating';
 
-/** 代理状态:未测试、检查中、健康、无法访问、Steam 已封禁 */
-export type ProxyStatus = 'untested' | 'checking' | 'healthy' | 'unreachable' | 'blocked';
+/** 代理状态:未测试、检查中、健康(连得通)、无法访问 */
+export type ProxyStatus = 'untested' | 'checking' | 'healthy' | 'unreachable';
 
 /** 上次检测的结果(src/proxy/check.ts) */
 export interface ProxyCheck {
-	status: 'healthy' | 'unreachable' | 'blocked';
+	status: 'healthy' | 'unreachable';
 	latencyMs: number;
 	ip: string;
 	/** 两位国家代码,查不到为 '' */
@@ -165,8 +165,6 @@ export interface ProxyCheck {
 	/** 采样到的不同出口 IP */
 	ips: string[];
 	samples: number;
-	/** Steam 社区市场页的 HTTP 状态,0 为打不开;429 是市场、库存请求会被拒 */
-	market: number;
 	error: string;
 	/** 毫秒时间戳 */
 	checkedAt: number;

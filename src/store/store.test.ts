@@ -124,7 +124,7 @@ test('代理池:没存过是空的;加密存取(代理密码不明文落盘);指
 	const proxy = {
 		id: 'p1', protocol: 'http', host: 'p.example.io', port: 80, type: 'rotating', username: 'user-rotate', password: 'PROXY-PLAINTEXT',
 		poolSize: 100, loginsPerMinute: 5, enabled: true, notes: '备注', groupIds: ['g1', 'gone'], createdAt: 1700000000000,
-		check: {status: 'healthy', latencyMs: 300, ip: '203.0.113.1', country: 'US', ips: ['203.0.113.1'], samples: 3, market: 429, error: '', checkedAt: 1700000001000}
+		check: {status: 'healthy', latencyMs: 300, ip: '203.0.113.1', country: 'US', ips: ['203.0.113.1'], samples: 3, error: '', checkedAt: 1700000001000}
 	} as const;
 	store.proxies.save({
 		proxies: [structuredClone(proxy) as never],
@@ -139,6 +139,12 @@ test('代理池:没存过是空的;加密存取(代理密码不明文落盘);指
 		accountGroups: {ag1: ['g1']}
 	});
 	assert.ok(!dbBytes(dir).includes('PROXY-PLAINTEXT'), '代理密码不能明文落盘');
+
+	// 以前的检测结果:「Steam 已封禁」(连得上、Steam 页面打不开)现在只看连通,算健康;市场页的状态码不要了
+	store.proxies.save({...store.proxies.load(), proxies: [{...structuredClone(proxy), check: {
+		status: 'blocked', latencyMs: 300, ip: '203.0.113.1', country: 'US', ips: ['203.0.113.1'], samples: 1, market: 429, error: 'Steam 社区回 HTTP 403', checkedAt: 1
+	}} as never]});
+	assert.deepEqual(store.proxies.load().proxies[0]?.check, {status: 'healthy', latencyMs: 300, ip: '203.0.113.1', country: 'US', ips: ['203.0.113.1'], samples: 1, error: '', checkedAt: 1});
 	store.close();
 });
 

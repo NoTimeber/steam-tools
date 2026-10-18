@@ -3,12 +3,12 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import type {ProxyCheck, ProxyUsageReport, PublicProxy, PublicProxyState} from '../api/types.ts';
 import {
-	accountProxyView, accountsUsingGroup, activeProxyFilterCount, busiestDay, emptyProxyFilters, formatBytes, isSingleIpRotating, marketNote, matchesProxy,
+	accountProxyView, accountsUsingGroup, activeProxyFilterCount, busiestDay, emptyProxyFilters, formatBytes, isSingleIpRotating, matchesProxy,
 	poolProxies, proxyStats, sortProxies, splitProxyUrl, timeAgo, uniqueIpText, usageByGroup
 } from './proxy.ts';
 
 const check = (fields: Partial<ProxyCheck> = {}): ProxyCheck => ({
-	status: 'healthy', latencyMs: 300, ip: '203.0.113.1', country: 'US', ips: ['203.0.113.1'], samples: 1, market: 200, error: '', checkedAt: 1, ...fields
+	status: 'healthy', latencyMs: 300, ip: '203.0.113.1', country: 'US', ips: ['203.0.113.1'], samples: 1, error: '', checkedAt: 1, ...fields
 });
 
 const proxy = (id: string, fields: Partial<PublicProxy> = {}): PublicProxy => ({
@@ -25,29 +25,25 @@ test('字节数按 1000 进,时间显示多久以前', () => {
 		['刚刚', '2 分钟前', '21 小时前', '1 天前', '1 周前', '—']);
 });
 
-test('检测结果:不同 IP、轮换但只有一个 IP、市场页有问题才标', () => {
+test('检测结果:不同 IP、轮换但只有一个 IP', () => {
 	assert.equal(uniqueIpText(check({samples: 3, ips: ['a', 'b', 'c']})), '3 次中有 3 个');
 	assert.equal(uniqueIpText(null), '—');
 	assert.ok(isSingleIpRotating(proxy('r', {type: 'rotating', check: check({samples: 3, ips: ['a']})})));
 	assert.ok(!isSingleIpRotating(proxy('r', {type: 'rotating', check: check({samples: 3, ips: ['a', 'b']})})));
 	assert.ok(!isSingleIpRotating(proxy('s', {check: check({samples: 3, ips: ['a']})})), '静态的本来就一个 IP');
-	assert.equal(marketNote(check({market: 429}))?.text, '市场 429');
-	assert.equal(marketNote(check({market: 0}))?.text, '市场打不开');
-	assert.equal(marketNote(check({market: 200})), null);
-	assert.equal(marketNote(check({status: 'unreachable', market: 0})), null, '连不上的不用再说市场');
 });
 
 test('统计、筛选、搜索、排序', () => {
 	const list = [
 		proxy('a', {status: 'healthy', check: check({latencyMs: 700}), groupIds: ['g1']}),
-		proxy('b', {status: 'blocked', type: 'rotating', check: check({status: 'blocked', samples: 3, ips: ['x'], latencyMs: 200}), enabled: false}),
+		proxy('b', {status: 'healthy', type: 'rotating', check: check({samples: 3, ips: ['x'], latencyMs: 200}), enabled: false}),
 		proxy('c', {status: 'unreachable', protocol: 'https', check: check({status: 'unreachable'}), notes: '备用'}),
 		proxy('d')
 	];
-	assert.deepEqual(proxyStats(list), {total: 4, healthy: 1, failing: 2, untested: 1, enabled: 3});
+	assert.deepEqual(proxyStats(list), {total: 4, healthy: 2, failing: 1, untested: 1, enabled: 3});
 	const groups = new Map([['g1', '开箱']]);
 	const pick = (filters: Partial<ReturnType<typeof emptyProxyFilters>>, search = '') => list.filter(item => matchesProxy(item, {...emptyProxyFilters(), ...filters}, search, groups)).map(item => item.id);
-	assert.deepEqual(pick({status: 'blocked'}), ['b']);
+	assert.deepEqual(pick({status: 'unreachable'}), ['c']);
 	assert.deepEqual(pick({protocol: 'https'}), ['c']);
 	assert.deepEqual(pick({group: 'g1'}), ['a']);
 	assert.deepEqual(pick({group: '-'}), ['b', 'c', 'd']);

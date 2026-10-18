@@ -9,7 +9,7 @@ import type {ProxyCheck, ProxyUsageReport} from '../../api/types.ts';
 import AppIcon from '../../components/AppIcon.vue';
 import GroupChip from '../../components/GroupChip.vue';
 import {
-	PROTOCOL_OPTIONS, PROXY_KIND_OPTIONS, STATUS_META, USAGE_KIND_LABEL, accountsAssignedTo, accountsPinnedTo, formatBytes, marketNote, percent, splitProxyUrl,
+	PROTOCOL_OPTIONS, PROXY_KIND_OPTIONS, STATUS_META, USAGE_KIND_LABEL, accountsAssignedTo, accountsPinnedTo, formatBytes, percent, splitProxyUrl,
 	timeAgo, totalBytes, uniqueIpText
 } from '../../lib/proxy.ts';
 import {createProxy, emptyProxyForm, fetchUsage, proxy, testDraft, testProxies, updateProxy} from '../../stores/proxy.ts';
@@ -100,9 +100,8 @@ const resultView = computed(() => {
 	if (c.status === 'unreachable') {
 		return {type: 'error' as const, text: `${meta.label}:${c.error}`};
 	}
-	const note = marketNote(c);
-	const parts = [`${meta.label}`, `${c.ip}${c.country ? ` ${c.country}` : ''}`, `${c.latencyMs} ms`, c.samples > 1 ? `不同 IP ${uniqueIpText(c)}` : '', note?.text ?? ''];
-	return {type: c.status === 'blocked' ? 'error' as const : note ? 'warning' as const : 'success' as const, text: parts.filter(Boolean).join(' · ') + (c.status === 'blocked' ? `(${c.error})` : '')};
+	const parts = [`${meta.label}`, `${c.ip}${c.country ? ` ${c.country}` : ''}`, `${c.latencyMs} ms`, c.samples > 1 ? `不同 IP ${uniqueIpText(c)}` : ''];
+	return {type: 'success' as const, text: parts.filter(Boolean).join(' · ')};
 });
 
 // ===== 右边:检测、用量、账号 =====
@@ -250,8 +249,6 @@ function recheck(): Promise<void> {
 						<dd>{{ current.check.status === 'unreachable' ? '—' : `${current.check.latencyMs} ms` }}</dd>
 						<dt>不同 IP</dt>
 						<dd>{{ uniqueIpText(current.check) }}</dd>
-						<dt>Steam 市场</dt>
-						<dd :class="{warn: !!marketNote(current.check)}">{{ marketNote(current.check)?.text ?? (current.check.market ? `HTTP ${current.check.market}` : '—') }}</dd>
 						<dt>上次检查</dt>
 						<dd>{{ timeAgo(current.check.checkedAt) }}</dd>
 					</template>
