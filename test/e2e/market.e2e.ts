@@ -114,6 +114,15 @@ describe('市场求购', () => {
 		const redline = await search('红线 久经');
 		assert.ok(redline.some(item => item.marketHashName === AK && item.zh === 'AK-47 | 红线 (久经沙场)'), JSON.stringify(redline));
 		assert.deepEqual(await search('Brand New Unreleased Case'), [{appid: 730, marketHashName: 'Brand New Unreleased Case', zh: null}]);
+
+		// TF2:随包的 nameid 库里的英文名,钥匙带中文名;查行情用库里的 item_nameid(钥匙是 1)
+		const tf2Key = {appid: 440, marketHashName: 'Mann Co. Supply Crate Key', zh: '曼恩公司补给箱钥匙'};
+		assert.deepEqual(await search('Mann Co. Supply Crate Key'), [tf2Key]);
+		assert.deepEqual((await search('曼恩'))[0], tf2Key);
+		const keyContext = await client.get(`/api/market/context?accountId=${encodeURIComponent(alpha.attemptId)}&appid=440&marketHashName=${encodeURIComponent(tf2Key.marketHashName)}`);
+		assert.equal(keyContext.status, 200, keyContext.text);
+		assert.deepEqual([keyContext.json.context.appid, keyContext.json.context.itemNameId, keyContext.json.context.highestBuyOrderCents], [440, '1', 120]);
+		assert.equal(marketCalls('/market/itemordershistogram').at(-1)?.query?.item_nameid, '1');
 		assert.deepEqual(await search(AK_URL), [{appid: 730, marketHashName: AK, zh: 'AK-47 | 红线 (久经沙场)'}]);
 
 		const group = await search('https://steamcommunity.com/market/listings/730/G1807209A023004');
@@ -136,7 +145,7 @@ describe('市场求购', () => {
 			appid: 730, marketHashName: AK, currency: 1, itemNameId: AK_NAMEID, itemName: '',
 			highestBuyOrderCents: 120, lowestSellOrderCents: 150, lowestPrice: '$1.50', medianPrice: '$1.40', volume: '321', currencyISO: 'USD'
 		});
-		const histogram = marketCalls('/market/itemordershistogram')[0];
+		const histogram = marketCalls('/market/itemordershistogram').at(-1);
 		assert.equal(histogram?.query?.item_nameid, AK_NAMEID);
 		assert.equal(histogram?.query?.currency, '1');
 		const cache = JSON.parse(readFileSync(join(server.dataDir, 'market-nameids.json'), 'utf8'));

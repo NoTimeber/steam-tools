@@ -307,7 +307,7 @@ const ordersEmpty = computed(() => (market.visibleIds
 							:loading="itemSearch.loading"
 							:render-label="renderItemOption"
 							:consistent-menu-width="false"
-							placeholder="搜商品:输中文或英文名,如 千瓦、红线 久经、Kilowatt;也能粘贴商品链接"
+							placeholder="搜商品:输中文或英文名,如 千瓦、红线 久经、Mann Co. Key;也能粘贴商品链接"
 							@search="onSearch"
 							@update:value="onPick"
 						>
@@ -317,12 +317,12 @@ const ordersEmpty = computed(() => (market.visibleIds
 						</NSelect>
 						<NButton :loading="market.contextLoading" :disabled="!market.item" @click="queryContext">查行情</NButton>
 					</div>
-					<p class="hint muted">在本地词库(CS2 饰品中英文名)里搜,从下拉里选具体哪一件(磨损、StatTrak、纪念品各算一件);选中后自动去 Steam 查最高求购价 / 最低在售价辅助定价(需先选一个账户)。其它游戏粘贴带英文名的商品链接。</p>
+					<p class="hint muted">在本地词库(CS2 饰品中英文名、TF2 物品英文名)里搜,从下拉里选具体哪一件(磨损、StatTrak、纪念品各算一件);选中后自动去 Steam 查最高求购价 / 最低在售价辅助定价(需先选一个账户)。其它游戏粘贴带英文名的商品链接。</p>
 
 					<div v-if="market.context" class="context">
 						<div class="context-name">
 							<span>{{ market.item?.zh || market.context.itemName || market.context.marketHashName }}</span>
-							<span v-if="market.item?.zh" class="muted item-sub">{{ market.context.marketHashName }}</span>
+							<span v-if="market.item && (market.item.zh || market.item.appid !== 730)" class="muted item-sub">{{ itemSubText(market.item) }}</span>
 						</div>
 						<NSpace :size="6">
 							<NTag type="success" :bordered="false">最高求购 <strong>{{ formatCentsIn(market.context.highestBuyOrderCents, market.context.currency, market.context.currencyISO) }}</strong></NTag>

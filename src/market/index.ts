@@ -16,6 +16,12 @@ import {createNameIdResolver} from './nameids.ts';
 export {parseListingUrl};
 export type {BuyOrderRecord, MarketContext};
 
+const CS2 = 730;
+const TF2 = 440;
+/** 搜商品一次最多给几条;两个游戏都有结果时 TF2 至少留几个位置 */
+const SEARCH_LIMIT = 30;
+const TF2_MIN_SLOTS = 10;
+
 /** 求购单要手机确认时,带 confirmation 重发 createbuyorder 最多几次、间隔多久(确认生效可能稍有延迟) */
 const RESEND_ATTEMPTS = 4;
 const RESEND_GAP_MS = 1500;
@@ -153,7 +159,7 @@ export interface MarketServiceOptions {
 	readJson(file: string): unknown;
 	writeJson(file: string, value: unknown): void;
 	writeText(file: string, text: string): void;
-	/** CS2 中英文名词库:搜商品就搜它 */
+	/** CS2 中英文名词库:搜商品用(TF2 搜社区 nameid 库的英文名) */
 	names?: Pick<NameDb, 'search' | 'zh'>;
 	client?: MarketClient;
 	confirmer?: BuyOrderConfirmer;
@@ -190,19 +196,59 @@ export function createMarketService(options: MarketServiceOptions) {
 
 	// ===== 搜商品 =====
 
-	/** 词库里搜(中文或英文,空格分开的几个词都要出现);rawName:输的像英文全名又不在词库里(新出的饰品),附一个按原文用的选项 */
-	function searchNames(text: string, rawName: boolean): MarketSearchItem[] {
-		const found: MarketSearchItem[] = (options.names?.search(text, 30) ?? []).map(match => ({appid: 730, marketHashName: match.name, zh: match.zh}));
+	/** TF2 没有中文名词库,只给常用的几样配上中文名(和国区市场一致),输中文也能搜到 */
+	const TF2_ZH: Readonly<Record<string, string>> = {'Mann Co. Supply Crate Key': '曼恩公司补给箱钥匙'};
+
+	/** TF2:在社区 nameid 库的英文名(和上面几样的中文名)里搜,规则同 CS2 词库:每个词都要出现,完全一致、开头一致、名字短的排前面 */
+	async function searchTf2(text: string, limit: number): Promise<MarketSearchItem[]> {
+		const q = text.toLowerCase();
+		const words = q.split(/\s+/).filter(Boolean);
+		if (!words.length) {
+			return [];
+		}
+		const rank = (en: string, zh: string) => (en === q || zh === q ? 0 : en.startsWith(q) || (!!zh && zh.startsWith(q)) ? 1 : 2);
+		return (await nameIds.names(TF2))
+			.map(name => ({name, en: name.toLowerCase(), zh: TF2_ZH[name] ?? ''}))
+			.filter(entry => words.every(word => entry.en.includes(word) || entry.zh.includes(word)))
+			.map(entry => ({entry, rank: rank(entry.en, entry.zh)}))
+			.sort((a, b) => a.rank - b.rank || a.entry.name.length - b.entry.name.length || (a.entry.name < b.entry.name ? -1 : 1))
+			.slice(0, limit)
+			.map(({entry}) => ({appid: TF2, marketHashName: entry.name, zh: entry.zh || null}));
+	}
+
+	/**
+	 * 词库里搜(中文或英文,空格分开的几个词都要出现):CS2 搜中英文名词库,TF2 搜社区 nameid 库的英文名。
+	 * 两个游戏都有结果时 TF2 至少留 TF2_MIN_SLOTS 个位置(免得被 CS2 挤掉);和输入完全一致的排最前。
+	 * rawName:输的像英文全名又哪都没有(新出的 CS2 饰品),附一个按原文用的选项
+	 */
+	async function searchNames(text: string, rawName: boolean, games: readonly number[] = [CS2, TF2]): Promise<MarketSearchItem[]> {
+		const cs2: MarketSearchItem[] = games.includes(CS2)
+			? (options.names?.search(text, SEARCH_LIMIT) ?? []).map(match => ({appid: CS2, marketHashName: match.name, zh: match.zh}))
+			: [];
+		const tf2 = games.includes(TF2) ? await searchTf2(text, SEARCH_LIMIT) : [];
+		const tf2Slots = Math.min(tf2.length, Math.max(TF2_MIN_SLOTS, SEARCH_LIMIT - cs2.length));
+		const merged = [...cs2.slice(0, SEARCH_LIMIT - tf2Slots), ...tf2.slice(0, tf2Slots)];
+		const q = text.toLowerCase();
+		const isExact = (item: MarketSearchItem) => item.marketHashName.toLowerCase() === q || item.zh === text;
+		const found = [...merged.filter(isExact), ...merged.filter(item => !isExact(item))];
 		if (rawName && !/[㐀-鿿]/.test(text) && text.length >= 3 && !found.some(item => item.marketHashName === text)) {
-			found.push({appid: 730, marketHashName: text, zh: null});
+			found.push({appid: CS2, marketHashName: text, zh: null});
 		}
 		return found;
 	}
 
+	/** 粘贴的老链接那一件的中文名 */
+	function zhOf(appid: number, marketHashName: string): string | null {
+		if (appid === CS2) {
+			return options.names?.zh(marketHashName) ?? null;
+		}
+		return appid === TF2 ? TF2_ZH[marketHashName] ?? null : null;
+	}
+
 	/**
-	 * 按名字搜商品:只搜随包的 CS2 中英文名词库,选中后再去 Steam 查行情(盘口按 item_nameid 查,不受影响)。
+	 * 按名字搜商品:只搜随包的词库(CS2 中英文名、TF2 英文名),选中后再去 Steam 查行情(盘口按 item_nameid 查,不受影响)。
 	 * 不用 Steam 的 market/search/render:它对机房 / 代理 IP 上的请求一律 429。
-	 * 也认粘贴的链接:老的英文名链接就是那一件(其它游戏也行);新版分组链接读分组页标题拿分组名,再在词库里搜。
+	 * 也认粘贴的链接:老的英文名链接就是那一件(其它游戏也行);新版分组链接读分组页标题拿分组名,再在这个游戏的词库里搜。
 	 */
 	async function search(query: SearchQuery): Promise<MarketSearchResult> {
 		const text = String(query.q ?? '').trim().slice(0, 300);
@@ -211,17 +257,16 @@ export function createMarketService(options: MarketServiceOptions) {
 		}
 		const link = matchListingUrl(text);
 		if (!link) {
-			return {items: searchNames(text, true)};
+			return {items: await searchNames(text, true)};
 		}
 		if (!Number.isInteger(link.appid) || link.appid <= 0 || !link.segment) {
 			throw marketError(400, '链接中缺少有效的 appid 或物品名');
 		}
 		if (!isGroupId(link.segment)) {
-			const zh = link.appid === 730 ? options.names?.zh(link.segment) ?? null : null;
-			return {items: [{appid: link.appid, marketHashName: link.segment, zh}]};
+			return {items: [{appid: link.appid, marketHashName: link.segment, zh: zhOf(link.appid, link.segment)}]};
 		}
-		if (link.appid !== 730) {
-			throw marketError(400, '词库里只有 CS2 的物品,其它游戏的新版分组链接认不出是哪一件,请粘贴带英文名的商品链接');
+		if (link.appid !== CS2 && link.appid !== TF2) {
+			throw marketError(400, '词库里只有 CS2、TF2 的物品,其它游戏的新版分组链接认不出是哪一件,请粘贴带英文名的商品链接');
 		}
 		let groupName: string;
 		try {
@@ -229,7 +274,7 @@ export function createMarketService(options: MarketServiceOptions) {
 		} catch (err) {
 			throw marketError(502, `这是新版市场的分组链接,读取分组名失败(${errorText(err) || '网络错误'}),请直接输名字搜`);
 		}
-		return {items: searchNames(groupName, false)};
+		return {items: await searchNames(groupName, false, [link.appid])};
 	}
 
 	// ===== 行情参考 =====

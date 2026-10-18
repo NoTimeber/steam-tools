@@ -40,12 +40,16 @@ export function itemLabel(item: MarketItem): string {
 	return item.zh || item.marketHashName;
 }
 
-/** 名字后面的小字:有中文时是英文名;没有时说明是怎么来的 */
+/** CS2 以外的游戏在下拉里标出来 */
+const GAME_LABELS: Readonly<Record<number, string>> = {440: 'TF2'};
+
+/** 名字后面的小字:有中文时是英文名;CS2 以外标上游戏;CS2 词库里没有的说明按英文名使用 */
 export function itemSubText(item: MarketItem): string {
-	if (item.zh) {
-		return item.marketHashName;
+	if (item.appid !== 730) {
+		const game = GAME_LABELS[item.appid] ?? `其它游戏(appid ${item.appid})`;
+		return item.zh ? `${item.marketHashName} · ${game}` : game;
 	}
-	return item.appid === 730 ? '词库里没有,按英文名使用(要和 Steam 英文名完全一致)' : `其它游戏(appid ${item.appid})`;
+	return item.zh ? item.marketHashName : '词库里没有,按英文名使用(要和 Steam 英文名完全一致)';
 }
 
 /** 本工具挂出的求购单(src/market/ledger.ts 的 BuyOrderRecord) */

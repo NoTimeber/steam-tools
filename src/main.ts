@@ -313,7 +313,7 @@ const uu = createUuService({
 const itemNames = loadNameDb(join(config.appDir, 'data', 'cs2-names-zh.json.gz'));
 
 // 市场求购:账本 data/market-buyorders.json 只记本工具挂出的求购;item_nameid 先查缓存 data/market-nameids.json,
-// 再查随程序打包的社区库 app/services/nameid-db/;按名字搜商品搜这份词库
+// 再查随程序打包的社区库 app/services/nameid-db/;按名字搜商品:CS2 搜这份词库,TF2 搜 nameid 库的英文名
 const market = createMarketService({
 	findAttempt,
 	cookiesFor: profiles.cookiesFor,

@@ -118,18 +118,30 @@ export function createNameIdResolver(options: NameIdOptions) {
 		return map;
 	}
 
-	/** 查社区库;不是 CS2/TF2 或库里没有返回空串。每个游戏只加载一次(并发的查询共用同一次加载) */
-	async function fromDb(appid: number, marketHashName: string): Promise<string> {
+	/** 某个游戏的社区库;不是 CS2/TF2 为 null。每个游戏只加载一次(并发的查询共用同一次加载) */
+	function db(appid: number): Promise<NameIdMap> | null {
 		const game = DB_GAME_BY_APPID[Number(appid)];
 		if (!game) {
-			return '';
+			return null;
 		}
 		let pending = dbCache.get(game);
 		if (!pending) {
 			pending = loadDb(game);
 			dbCache.set(game, pending);
 		}
-		return digits((await pending)[marketHashName]);
+		return pending;
+	}
+
+	/** 查社区库;不是 CS2/TF2 或库里没有返回空串 */
+	async function fromDb(appid: number, marketHashName: string): Promise<string> {
+		const pending = db(appid);
+		return pending ? digits((await pending)[marketHashName]) : '';
+	}
+
+	/** 社区库里这个游戏的全部物品英文名(搜商品用);不是 CS2/TF2 为空 */
+	async function names(appid: number): Promise<string[]> {
+		const pending = db(appid);
+		return pending ? Object.keys(await pending) : [];
 	}
 
 	/** 手填 → 本地缓存 → 社区库 */
@@ -137,7 +149,7 @@ export function createNameIdResolver(options: NameIdOptions) {
 		return digits(manual) || cached(appid, marketHashName) || await fromDb(appid, marketHashName);
 	}
 
-	return {cached, remember, fromDb, resolve};
+	return {cached, remember, fromDb, names, resolve};
 }
 
 export type NameIdResolver = ReturnType<typeof createNameIdResolver>;

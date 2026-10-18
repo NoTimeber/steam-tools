@@ -1,10 +1,14 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
+import {mkdtempSync, rmSync, writeFileSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
 import {createNameDb} from '../items/names.ts';
 import type {Attempt} from '../steam/session-manager.ts';
 import type {CreateBuyOrderParams, CreateBuyOrderResult, LiveBuyOrder, MarketClient, MarketContext} from './client.ts';
 import type {BuyOrderConfirmer, ConfirmBuyOrderParams} from './confirmations.ts';
 import {createMarketService, runWithConcurrency} from './index.ts';
+import type {MarketServiceOptions} from './index.ts';
 import type {BuyOrderRecord} from './ledger.ts';
 
 const URL_AK = 'https://steamcommunity.com/market/listings/730/AK-47%20%7C%20Redline%20(Field-Tested)';
@@ -40,7 +44,7 @@ interface Harness {
 	groupName: string | Error;
 }
 
-function harness(attempts: Attempt[], files: Record<string, unknown> = {}): Harness {
+function harness(attempts: Attempt[], files: Record<string, unknown> = {}, extra: Partial<MarketServiceOptions> = {}): Harness {
 	const store = new Map<string, unknown>(Object.entries(files));
 	const who = (params: {cookies?: readonly string[]}) => String(params.cookies?.[0] ?? '').replace('steamLoginSecure=', '');
 	const h = {
@@ -129,7 +133,8 @@ function harness(attempts: Attempt[], files: Record<string, unknown> = {}): Harn
 		sleep: async ms => void h.sleeps.push(ms),
 		now: () => h.clock.now,
 		randomId: () => 'rec-' + (++ids),
-		logger: {log() {}, warn() {}}
+		logger: {log() {}, warn() {}},
+		...extra
 	});
 	return h;
 }
@@ -364,4 +369,32 @@ test('搜商品:粘贴老链接就是那一件(CS2 查中文名,其它游戏照�
 		(err: StatusError) => err.statusCode === 502 && /分组链接.*HTTP 429.*直接输名字搜/.test(err.message));
 	await assert.rejects(h.service.search({q: '/market/listings/570/G1807209A023004'}), (err: StatusError) => err.statusCode === 400 && /只有 CS2/.test(err.message));
 	await assert.rejects(h.service.search({q: '/market/listings/0/x'}), (err: StatusError) => err.statusCode === 400);
+});
+
+test('搜商品:TF2 在 nameid 库的英文名里搜(钥匙有中文名);和 CS2 一起时 TF2 不会被挤掉;老链接、分组链接也认 TF2', async t => {
+	const dir = mkdtempSync(join(tmpdir(), 'market-tf2-'));
+	t.after(() => rmSync(dir, {recursive: true, force: true}));
+	const KEY = 'Mann Co. Supply Crate Key';
+	const tf2Names = {[KEY]: 1, 'Tour of Duty Ticket': 2, ...Object.fromEntries(Array.from({length: 40}, (_, i) => [`Summer Crate Key ${i}`, 100 + i]))};
+	writeFileSync(join(dir, 'TF2.json'), JSON.stringify(tf2Names));
+	const h = harness([], {}, {nameIdDbDir: dir});
+	const key = {appid: 440, marketHashName: KEY, zh: '曼恩公司补给箱钥匙'};
+
+	assert.deepEqual((await h.service.search({q: 'mann co. supply crate key'})).items[0], key, '完全一致的排最前');
+	assert.deepEqual((await h.service.search({q: '曼恩'})).items, [key], '中文名也能搜到');
+	assert.deepEqual((await h.service.search({q: KEY})).items, [key], '找到了就不附 CS2 按原文用的选项');
+	assert.deepEqual((await h.service.search({q: 'tour duty'})).items[0], {appid: 440, marketHashName: 'Tour of Duty Ticket', zh: null});
+
+	// 「key」:CS2 词库里 1 个、TF2 里 41 个,词库结果一共最多 30 个,CS2 的在前;最后是按原文用的选项
+	const keys = (await h.service.search({q: 'key'})).items;
+	assert.equal(keys.length, 31);
+	assert.deepEqual(keys.at(-1), {appid: 730, marketHashName: 'key', zh: null});
+	assert.deepEqual(keys[0], {appid: 730, marketHashName: 'Kilowatt Case Key', zh: '千瓦武器箱钥匙'});
+	assert.equal(keys.filter(item => item.appid === 440).length, 29);
+	assert.equal(keys.filter(item => item.zh != null || item.appid === 440).length, 30);
+
+	assert.deepEqual((await h.service.search({q: 'https://steamcommunity.com/market/listings/440/Mann%20Co.%20Supply%20Crate%20Key'})).items, [key]);
+	h.groupName = KEY;
+	assert.deepEqual((await h.service.search({q: '/market/listings/440/G1234567890'})).items, [key], 'TF2 的分组链接只在 TF2 里搜');
+	assert.deepEqual(h.calls, ['group 440 G1234567890']);
 });

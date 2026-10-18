@@ -20,6 +20,8 @@ test('搜商品:选项 key、显示名、名字后面的小字', () => {
 	assert.equal(itemLabel(item({marketHashName: 'Gallery Case', zh: null})), 'Gallery Case');
 	assert.match(itemSubText(item({marketHashName: 'Gallery Case', zh: null})), /词库里没有,按英文名使用/);
 	assert.equal(itemSubText(item({appid: 570, marketHashName: 'Inscribed Pauldron', zh: null})), '其它游戏(appid 570)');
+	assert.equal(itemSubText(item({appid: 440, marketHashName: 'Tour of Duty Ticket', zh: null})), 'TF2');
+	assert.equal(itemSubText(item({appid: 440, marketHashName: 'Mann Co. Supply Crate Key', zh: '曼恩公司补给箱钥匙'})), 'Mann Co. Supply Crate Key · TF2');
 });
 
 test('币种:同币种才行;混了标出来;选了一种后别的币种锁住', () => {
