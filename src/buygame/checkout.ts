@@ -21,6 +21,8 @@
 //   - 钱包给自己买不需要手机/邮箱二次确认,可以全自动。
 //   - dryRun(默认 true):跑到第 6 步(getfinalprice)就停,不扣款,用来安全验证。
 
+import {STEAM_WEB_USER_AGENT} from '../steam/user-agent.ts';
+
 const STORE = 'https://store.steampowered.com';
 const CHECKOUT = 'https://checkout.steampowered.com';
 const WEBAPI = 'https://api.steampowered.com';
@@ -166,7 +168,7 @@ export function createStoreCheckout(options: CheckoutOptions = {}) {
 
 	async function purchasePackages(params: PurchaseParams): Promise<PurchaseResult> {
 		const cookies = (params.cookies ?? []).filter(Boolean);
-		const userAgent = params.userAgent || 'Mozilla/5.0';
+		const userAgent = params.userAgent || STEAM_WEB_USER_AGENT;
 		const packageIds = (Array.isArray(params.packageIds) ? params.packageIds : [params.packageIds])
 			.map(id => Number(id))
 			.filter(id => Number.isInteger(id) && id > 0);
@@ -365,7 +367,7 @@ export function createStoreCheckout(options: CheckoutOptions = {}) {
 	/** packageid → 游戏名/价格;用账号的 cookie/UA/国家请求,拿区域价 */
 	async function resolvePackage(packageId: number, country: string, session: {cookies?: readonly string[]; userAgent?: string} = {}): Promise<PackageInfo> {
 		const cc = String(country || 'US').trim().toUpperCase() || 'US';
-		const headers: Record<string, string> = {Accept: 'application/json, text/plain, */*', 'User-Agent': session.userAgent || 'Mozilla/5.0'};
+		const headers: Record<string, string> = {Accept: 'application/json, text/plain, */*', 'User-Agent': session.userAgent || STEAM_WEB_USER_AGENT};
 		if (session.cookies?.length) {
 			headers.Cookie = session.cookies.join('; ');
 		}

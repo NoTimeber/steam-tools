@@ -6,6 +6,7 @@ import {existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSyn
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createFingerprintStore} from '../steam/fingerprint.ts';
+import {webUserAgentPool} from '../steam/user-agent.ts';
 import {readJsonFileSafe, writeJsonAtomic} from './atomic-file.ts';
 import {createAuth, parseCookies} from './auth.ts';
 import type {AuthRequest, AuthResponse} from './auth.ts';
@@ -208,20 +209,38 @@ test('版本检查:查 GitHub 最新 Release 比版本号;同时只发一个请�
 	assert.equal(urls.length, 3, '关了不发请求');
 });
 
-test('指纹:按账号名(不区分大小写)稳定复用并落盘;匿名一次性;UA 表为空时跳过 UA', t => {
+test('指纹:按账号名(不区分大小写)稳定复用并落盘;匿名一次性;UA 从新版池里挑,缓存里的老 UA 换掉', t => {
 	const dir = tempDir(t, 'fp-');
-	writeFileSync(join(dir, 'ua_cache.json'), JSON.stringify(['UA-1', '', 7]));
+	const pool = webUserAgentPool();
 	const store = createFingerprintStore({dataDir: dir});
 	const first = store.getAccountFingerprint('Alpha');
 	assert.match(first.machineName, /^(DESKTOP|LAPTOP)-[A-Z0-9]{7}$/);
 	assert.equal(first.machineIdFormat.length, 3);
-	assert.equal(first.userAgent, 'UA-1');
+	assert.ok(pool.includes(first.userAgent), first.userAgent);
 	assert.deepEqual(store.getAccountFingerprint(' alpha '), first);
 	assert.deepEqual(createFingerprintStore({dataDir: dir}).getAccountFingerprint('ALPHA'), first, '重启后从文件复用');
 	assert.notDeepEqual(store.getAccountFingerprint('').machineIdFormat, store.getAccountFingerprint('').machineIdFormat);
+	assert.ok(pool.includes(store.getAccountFingerprint('').userAgent));
 
-	const empty = tempDir(t, 'fp-empty-');
-	const warnings: string[] = [];
-	assert.equal(createFingerprintStore({dataDir: empty, log: (level, message) => void warnings.push(message)}).getAccountFingerprint('x').userAgent, '');
-	assert.equal(warnings.length, 1);
+	// 以前从 data/ua_cache.json 挑的老 Chrome UA(会被 Steam 429)、空的:换成池里的,机器名和 machineID 不动
+	const OLD = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/99.0.4844.84 Safari/537.36';
+	const old = tempDir(t, 'fp-old-');
+	writeFileSync(join(old, 'ua_cache.json'), JSON.stringify([OLD]));
+	writeFileSync(join(old, 'fingerprint_cache.json'), JSON.stringify({
+		bravo: {machineName: 'DESKTOP-OLD0001', machineIdFormat: ['a', 'b', 'c'], userAgent: OLD},
+		charlie: {machineName: 'DESKTOP-OLD0002', machineIdFormat: ['d', 'e', 'f'], userAgent: ''}
+	}));
+	const migrated = createFingerprintStore({dataDir: old});
+	const bravo = migrated.getAccountFingerprint('bravo');
+	assert.deepEqual([bravo.machineName, bravo.machineIdFormat], ['DESKTOP-OLD0001', ['a', 'b', 'c']]);
+	assert.ok(pool.includes(bravo.userAgent), bravo.userAgent);
+	assert.ok(pool.includes(migrated.getAccountFingerprint('charlie').userAgent));
+	const saved = JSON.parse(readFileSync(join(old, 'fingerprint_cache.json'), 'utf8'));
+	assert.equal(saved.bravo.userAgent, bravo.userAgent, '换好的落盘,下次不再换');
+
+	// 池可以注入;随机数决定挑哪条
+	const picks = [0, 1];
+	const fixed = createFingerprintStore({dataDir: tempDir(t, 'fp-fixed-'), userAgents: ['UA-A', 'UA-B'],
+		random: {bytes: size => Buffer.alloc(size), int: (min, max) => (max === 2 ? picks.shift()! : min)}});
+	assert.deepEqual([fixed.getAccountFingerprint('x').userAgent, fixed.getAccountFingerprint('y').userAgent], ['UA-A', 'UA-B']);
 });

@@ -2,6 +2,7 @@
 // 分页拉取(每页 2000,最多 20 页);GC 库存里有同一件物品时,用 GC 的 tradable_after 判断交易冷却(比社区的更准)。
 
 import {serializeForJson} from '../core/serialize.ts';
+import {STEAM_WEB_USER_AGENT} from '../steam/user-agent.ts';
 
 const APP_ID = 730;
 const CONTEXT_ID = 2;
@@ -185,7 +186,7 @@ async function fetchPage(steamID: string, cookieHeader: string, startAssetId: st
 			Accept: 'application/json, text/plain, */*',
 			Cookie: cookieHeader,
 			Referer: `https://steamcommunity.com/profiles/${steamID}/inventory/`,
-			'User-Agent': userAgent || 'Mozilla/5.0'
+			'User-Agent': userAgent || STEAM_WEB_USER_AGENT
 		}
 	});
 	if (!response.ok) {

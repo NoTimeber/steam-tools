@@ -182,4 +182,4 @@ git pull && docker compose -f docker-compose.yml -f compose.build.yaml up -d --b
   - UU 那边同样会看到 IP 变化。
 - **C5 扫货的 IP 白名单要填服务器的公网出口 IP。** 「按在售列表」策略用到的在售查询是内测接口，C5 官网 API 管理里没加白名单会被拒；拿不到权限就在页面设置里换「快速购买」。
 - **服务器在大陆时**，连 Steam 社区和 raw.githubusercontent.com（皮肤库、nameid 库）可能不稳定。
-- **UA 随机化依赖 `data/ua_cache.json`。** 全新部署的数据目录里没有这个文件，日志会提示「User-Agent 随机化已跳过」；从本地迁移数据时会一并带过去。
+- **网页请求的 User-Agent 是程序自己生成的。** 每个账号从「新版 Chrome × Windows / Mac」里挑一条(目前只用实测放行的 Chrome 150)，固定记在 `data/fingerprint_cache.json`；`data/ua_cache.json` 不再使用（里面是老版本 Chrome，Steam 会对这种请求回 429）。以前存下的老 UA 会在账号下次登录时自动换掉。以后这批 UA 过时了，改环境变量 `STEAM_WEB_USER_AGENT`（填一条新的 Chrome UA），账号池会跟着它的版本号走。

@@ -6,6 +6,10 @@ import {createSessionManager, safeName} from './session-manager.ts';
 import type {Attempt, Fingerprint, RestoreCredentials, SessionManagerOptions} from './session-manager.ts';
 import type {SteamSession, SteamSessionStore} from '../store/steam-sessions.ts';
 import type {LoginIntentStore} from '../store/login-intents.ts';
+import {webUserAgentPool} from './user-agent.ts';
+
+/** 账号指纹给的 UA(池里的一条,不会被换掉) */
+const POOL_UA = webUserAgentPool()[1]!;
 
 const LOGGED_IN_ELSEWHERE = 6;
 
@@ -77,7 +81,7 @@ function setup(t: TestContext, overrides: Partial<SessionManagerOptions> = {}, i
 	const changes: Attempt[] = [];
 	const sessions = fakeSessions();
 	const intents = fakeIntents(intentsInitial);
-	const fingerprint: Fingerprint = {machineName: 'DESKTOP-TEST', machineIdFormat: null, userAgent: 'UA/1'};
+	const fingerprint: Fingerprint = {machineName: 'DESKTOP-TEST', machineIdFormat: null, userAgent: POOL_UA};
 	const manager = createSessionManager({
 		createClient: () => {
 			const client = new FakeClient();
@@ -117,7 +121,7 @@ test('密码登录成功:状态流转、保存 session、记下登录意图', t 
 	const client = last();
 	assert.equal(attempt.status, 'connecting');
 	assert.deepEqual(client.logOnCalls[0], {accountName: 'alice', password: 'pw', twoFactorCode: 'ONE-TIME', machineName: 'DESKTOP-TEST'});
-	assert.equal(attempt.userAgent, 'UA/1');
+	assert.equal(attempt.userAgent, POOL_UA);
 
 	client.emit('debug', 'some noisy line');
 	const changesBeforeDebug = changes.length;

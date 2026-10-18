@@ -4,6 +4,8 @@
 // browserid / Steam_Language / steamCountry,带上这些再请求一次才返回 200。fetch 跨重定向不带 Set-Cookie,
 // 所以这里手动跟随重定向并累积 cookie;同一个会话之后的请求(翻页的 POST)也带上累积的 cookie。
 
+import {STEAM_WEB_USER_AGENT} from '../steam/user-agent.ts';
+
 const MAX_REDIRECTS = 5;
 const DEFAULT_TIMEOUT_MS = 9000;
 
@@ -40,7 +42,7 @@ export function createStoreSession(options: StoreSessionOptions) {
 	};
 	options.cookies.forEach(putCookie);
 	const cookieHeader = () => Array.from(jar.entries()).map(([key, value]) => `${key}=${value}`).join('; ');
-	const userAgent = options.userAgent || 'Mozilla/5.0';
+	const userAgent = options.userAgent || STEAM_WEB_USER_AGENT;
 
 	/** 发请求;跟随重定向(跳到登录页报错),非 2xx 报错。label 是报错里对这个页面的称呼 */
 	async function send(url: string, init: {method: 'GET' | 'POST'; headers: Record<string, string>; body?: string}, label: string): Promise<Response> {

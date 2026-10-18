@@ -13,6 +13,7 @@ import type {LoginIntentStore} from '../store/login-intents.ts';
 import {normalizeGame} from './games.ts';
 import {normalizeCountryCode} from './currencies.ts';
 import {patchCmFallback} from './cm-fallback.ts';
+import {webUserAgentFor} from './user-agent.ts';
 
 export interface SteamClient extends EventEmitter {
 	steamID: {getSteamID64(): string} | null;
@@ -455,7 +456,8 @@ export function createSessionManager(options: SessionManagerOptions) {
 			return;
 		}
 		const fingerprint = getFingerprintSafe(attempt.accountName);
-		attempt.userAgent = fingerprint.userAgent || '';    // 供自有 web 请求(取库存等)复用同一 UA
+		// 供自有 web 请求(市场、库存、商店)复用同一 UA;指纹取不到或是老 Chrome 的,换成够新的默认 UA(老 UA 会被 Steam 429)
+		attempt.userAgent = webUserAgentFor(fingerprint.userAgent);
 
 		const client = options.createClient(fingerprint, attempt.accountName);
 		withCmFallback(attempt, client);

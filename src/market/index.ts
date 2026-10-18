@@ -3,7 +3,6 @@
 
 import {randomUUID} from 'node:crypto';
 import type {NameDb} from '../items/names.ts';
-import {STEAM_WEB_USER_AGENT} from '../steam/community.ts';
 import {currencyIdToIso} from '../steam/currencies.ts';
 import type {Attempt} from '../steam/session-manager.ts';
 import {createMarketClient, isGroupId, matchListingUrl, parseListingUrl} from './client.ts';
@@ -254,7 +253,7 @@ export function createMarketService(options: MarketServiceOptions) {
 				...target,
 				itemNameId,
 				cookies: options.cookiesFor(attempt),
-				userAgent: STEAM_WEB_USER_AGENT,
+				userAgent: attempt.userAgent,
 				currency: attempt.currency,
 				country: attempt.country || attempt.loginGeoCountry || 'US'
 			});
@@ -366,7 +365,7 @@ export function createMarketService(options: MarketServiceOptions) {
 			const createParams: CreateBuyOrderParams = {
 				cookies,
 				sessionid: attempt.webSessionID,
-				userAgent: STEAM_WEB_USER_AGENT,
+				userAgent: attempt.userAgent,
 				appid: job.target.appid,
 				marketHashName: job.target.marketHashName,
 				currency: attempt.currency,
@@ -475,7 +474,7 @@ export function createMarketService(options: MarketServiceOptions) {
 			throw marketError(409, '账号没有可用的 WebSession cookies,请重新登录');
 		}
 		try {
-			await client.cancelBuyOrder({cookies, sessionid: attempt.webSessionID, userAgent: STEAM_WEB_USER_AGENT, buyOrderId});
+			await client.cancelBuyOrder({cookies, sessionid: attempt.webSessionID, userAgent: attempt.userAgent, buyOrderId});
 		} catch (err) {
 			throw marketError(502, errorText(err) || '撤销失败');
 		}
@@ -506,7 +505,7 @@ export function createMarketService(options: MarketServiceOptions) {
 				return {account: name, ok: false, error: '无可用 cookie(请重新登录)'};
 			}
 			try {
-				const orders = await client.fetchMyBuyOrders({cookies, sessionid: attempt.webSessionID, userAgent: STEAM_WEB_USER_AGENT});
+				const orders = await client.fetchMyBuyOrders({cookies, sessionid: attempt.webSessionID, userAgent: attempt.userAgent});
 				return {account: name, ok: true, count: orders.length, orders};
 			} catch (err) {
 				return {account: name, ok: false, error: errorText(err) || '读取失败'};

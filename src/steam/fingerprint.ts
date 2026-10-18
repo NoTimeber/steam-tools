@@ -4,14 +4,16 @@
 //   - machineID:覆盖 steam-user 的 machineIdFormat(3 个随机盐 → SHA1),去掉库默认
 //     'SteamUser Hash BB3 {account_name}' 的固定特征,每账号唯一且稳定;
 //   - machineName:仿 Windows 默认计算机名(DESKTOP-XXXXXXX / LAPTOP-XXXXXXX,共 15 字符);
-//   - userAgent:从 data/ua_cache.json 随机选一条,只用于对 Steam 网页/社区的 HTTP 请求
-//     (登录走 CM 二进制协议不发 UA,GC 不走 HTTP)。
+//   - userAgent:从新版 Chrome 的 UA 池(./user-agent.ts,最新几个大版本 × Windows / Mac)随机挑一条,只用于对 Steam
+//     网页/社区的 HTTP 请求(登录走 CM 二进制协议不发 UA,GC 不走 HTTP)。老 Chrome UA 会被 Steam 429,
+//     所以缓存里不在当前池里的(以前 data/ua_cache.json 那批最高 Chrome/99 的、空的)下次用到时重新挑。
 // 第一次生成后写进 data/fingerprint_cache.json,之后按账号名(不区分大小写)复用。
 
 import {randomBytes, randomInt} from 'node:crypto';
 import {readFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {writeJsonAtomic} from '../core/atomic-file.ts';
+import {isCurrentWebUserAgent, webUserAgentPool} from './user-agent.ts';
 
 export interface Fingerprint {
 	machineName: string;
@@ -38,6 +40,8 @@ const MACHINE_NAME_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
 export interface FingerprintOptions {
 	dataDir: string;
 	log?: (level: 'warn', message: string) => void;
+	/** UA 池;默认 webUserAgentPool() */
+	userAgents?: readonly string[];
 	random?: {bytes(size: number): Buffer; int(min: number, max: number): number};
 	writeJson?: (file: string, value: unknown) => void;
 }
@@ -47,20 +51,8 @@ export function createFingerprintStore(options: FingerprintOptions) {
 	const random = options.random ?? {bytes: randomBytes, int: randomInt};
 	const write = options.writeJson ?? ((file: string, value: unknown) => writeJsonAtomic(file, value));
 	const cacheFile = join(options.dataDir, 'fingerprint_cache.json');
-	const uaFile = join(options.dataDir, 'ua_cache.json');
 	const cache = (readJson(cacheFile, {}) || {}) as Record<string, CacheEntry>;
-	let uaList: string[] | null = null;   // 第一次用到才读
-
-	function userAgents(): string[] {
-		if (!uaList) {
-			const raw = readJson(uaFile, null);
-			uaList = Array.isArray(raw) ? raw.filter((item): item is string => typeof item === 'string' && !!item.trim()) : [];
-			if (!uaList.length) {
-				log('warn', 'data/ua_cache.json 为空或不存在,User-Agent 随机化已跳过');
-			}
-		}
-		return uaList;
-	}
+	const userAgents = options.userAgents?.length ? options.userAgents : webUserAgentPool();
 
 	const token = () => random.bytes(16).toString('hex');
 
@@ -74,8 +66,7 @@ export function createFingerprintStore(options: FingerprintOptions) {
 	}
 
 	function pickUserAgent(): string {
-		const list = userAgents();
-		return list.length ? list[random.int(0, list.length)] as string : '';
+		return userAgents[random.int(0, userAgents.length)] as string;
 	}
 
 	/** 没有账号名(匿名)时给一次性的随机指纹,不缓存 */
@@ -98,12 +89,9 @@ export function createFingerprintStore(options: FingerprintOptions) {
 			entry.machineName = machineName();
 			changed = true;
 		}
-		if (typeof entry.userAgent !== 'string' || !entry.userAgent) {
-			const ua = pickUserAgent();
-			if (ua) {
-				entry.userAgent = ua;
-				changed = true;
-			}
+		if (!isCurrentWebUserAgent(entry.userAgent, userAgents)) {
+			entry.userAgent = pickUserAgent();
+			changed = true;
 		}
 		if (changed) {
 			cache[key] = entry;
@@ -116,7 +104,7 @@ export function createFingerprintStore(options: FingerprintOptions) {
 		return {
 			machineName: entry.machineName as string,
 			machineIdFormat: (entry.machineIdFormat as string[]).slice(),
-			userAgent: (entry.userAgent as string) || ''
+			userAgent: entry.userAgent as string
 		};
 	}
 

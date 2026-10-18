@@ -19,14 +19,14 @@
 //     price_total / quantity。price_total 是总价的最小货币单位(分)= 每件分价 × 数量;currency 必须等于账号钱包币种。
 //   - 必须带 Referer = 该商品的上架页,否则 Steam 会拒。
 //   - sessionid 既在 Cookie 里、又要作为表单字段一起带(CSRF)。
-//   - User-Agent 用 STEAM_WEB_USER_AGENT(够新的 Chrome),不要用账号指纹里的 attempt.userAgent(最高 Chrome/99):
-//     Steam 对「非浏览器 HTTP 栈 + 老 Chrome UA」的市场请求回 429(2026-10 实测 priceoverview 每次都 429、
-//     换成 Chrome/150 就是 200;用户挂单 429 也是它),和换不换代理无关。见 src/steam/community.ts。
+//   - User-Agent 必须是够新的 Chrome:Steam 对「非浏览器 HTTP 栈 + 老 Chrome UA」的市场请求回 429(2026-10 实测
+//     priceoverview 老 UA 每次都 429、Chrome/150 就是 200;用户挂单 429 也是它),和换不换代理无关。
+//     调用方传会话的 UA(登录时从新版 UA 池里挑的,见 src/steam/user-agent.ts),没传用 STEAM_WEB_USER_AGENT。
 //   - item_nameid 没有独立 API。Steam 2025/2026 把商品页改成了 React SSR,HTML 里多半已经没有
 //     Market_LoadOrderSpread( <id> ),所以 nameid 主要靠调用方传(本地缓存 / 社区 nameid 库,见 ./nameids.ts)。
 //     行情只是参考,抓不到不影响挂单。
 
-import {STEAM_WEB_USER_AGENT} from '../steam/community.ts';
+import {STEAM_WEB_USER_AGENT} from '../steam/user-agent.ts';
 
 const COMMUNITY = 'https://steamcommunity.com';
 

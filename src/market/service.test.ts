@@ -1,7 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {createNameDb} from '../items/names.ts';
-import {STEAM_WEB_USER_AGENT} from '../steam/community.ts';
 import type {Attempt} from '../steam/session-manager.ts';
 import type {CreateBuyOrderParams, CreateBuyOrderResult, LiveBuyOrder, MarketClient, MarketContext} from './client.ts';
 import type {BuyOrderConfirmer, ConfirmBuyOrderParams} from './confirmations.ts';
@@ -159,8 +158,8 @@ test('挂求购:不用确认的直接成交,记账本;按 id/账号名去重', a
 		{account: 'bravo', attemptId: 'b1', ok: true, buyOrderId: 'BO-bravo', recordId: 'rec-2'}
 	]});
 	assert.deepEqual(h.createParams[0], {
-		// UA 用够新的 Chrome,不用账号指纹里的老 UA(attempt.userAgent 是 'UA'):老 Chrome UA 的市场请求会被 429
-		cookies: ['steamLoginSecure=alpha'], sessionid: 'sid-alpha', userAgent: STEAM_WEB_USER_AGENT, appid: 730, marketHashName: AK, currency: 1, priceTotalCents: 300, quantity: 2
+		// UA 用会话的(登录时已从新版 UA 池里挑好,见 src/steam/session-manager.ts)
+		cookies: ['steamLoginSecure=alpha'], sessionid: 'sid-alpha', userAgent: 'UA', appid: 730, marketHashName: AK, currency: 1, priceTotalCents: 300, quantity: 2
 	});
 	assert.deepEqual(ledgerOf(h).map(r => [r.id, r.account, r.buyOrderId, r.status, r.itemName, r.pricePerItemCents, r.priceTotalCents, r.currencyISO]), [
 		['rec-2', 'bravo', 'BO-bravo', 'active', '红线', 150, 300, 'USD'],
