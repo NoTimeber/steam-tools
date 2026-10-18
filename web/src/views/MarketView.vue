@@ -1,19 +1,20 @@
 <script setup lang="ts">
-// 市场求购:左边挂求购单(多账号限同币种、行情参考、固定数量或按余额挂满),右边「我的求购单」(对账、撤销)。
-import {computed, h, onMounted, onUnmounted} from 'vue';
-import {NButton, NCard, NCheckbox, NDataTable, NInput, NInputNumber, NSelect, NSpace, NTag, NTooltip, useDialog, useMessage} from 'naive-ui';
+// 市场求购:左边挂求购单(多账号限同币种、按名字搜商品、行情参考、固定数量或按余额挂满),右边「我的求购单」(对账、撤销)。
+import {computed, h, onMounted, onUnmounted, reactive} from 'vue';
+import type {VNodeChild} from 'vue';
+import {NButton, NCard, NCheckbox, NDataTable, NInputNumber, NSelect, NSpace, NTag, NTooltip, useDialog, useMessage} from 'naive-ui';
 import {withTip} from '../components/tip.ts';
 import type {DataTableColumns, SelectOption} from 'naive-ui';
 import {errorText} from '../api/http.ts';
 import {formatBalance} from '../lib/accounts.ts';
 import {
-	clampMarketConcurrency, currencyPrefix, formatCentsIn, lockedOut, placeConfirmText, placeSummary, quantityText, selectAllSameCurrency,
-	suggestedPrice, syncSummaryText
+	clampMarketConcurrency, currencyPrefix, formatCentsIn, itemKey, listingText, lockedOut, placeConfirmText, placeSummary, quantityText,
+	searchNote, selectAllSameCurrency, suggestedPrice, syncSummaryText
 } from '../lib/market.ts';
-import type {BuyOrder} from '../lib/market.ts';
+import type {BuyOrder, MarketItem, MarketSearch} from '../lib/market.ts';
 import {
-	cancelOrder, currency, enterMarket, fetchContext, leaveMarket, market, maxPreview, placeOrders, refreshAccounts, selectedAccounts,
-	syncOrders, visibleOrders
+	cancelOrder, currency, enterMarket, fetchContext, leaveMarket, market, maxPreview, pickItem, placeOrders, refreshAccounts, searchItems,
+	selectedAccounts, syncOrders, visibleOrders
 } from '../stores/market.ts';
 
 const message = useMessage();
@@ -49,15 +50,79 @@ function setSelected(names: string[]): void {
 	market.selected = names;
 }
 
-// ===== 行情 =====
-function onUrlInput(value: string): void {
-	market.url = value;
-	market.context = null;
+// ===== 搜商品:输中文或英文名(或粘贴商品链接),停 300 毫秒后向后端搜,从下拉里选具体哪一件 =====
+const itemSearch = reactive({query: '', loading: false, result: null as MarketSearch | null});
+let searchSeq = 0;
+let searchTimer: number | undefined;
+
+const itemOptions = computed<SelectOption[]>(() => {
+	const items = itemSearch.result?.items ?? [];
+	const picked = market.item;
+	const list = picked && !items.some(item => itemKey(item) === itemKey(picked)) ? [picked, ...items] : items;
+	return list.map(item => ({value: itemKey(item), label: item.name, item}));
+});
+
+function onSearch(query: string): void {
+	window.clearTimeout(searchTimer);
+	const q = query.trim();
+	itemSearch.query = q;
+	const seq = ++searchSeq;
+	if (!q) {
+		itemSearch.result = null;
+		itemSearch.loading = false;
+		return;
+	}
+	itemSearch.loading = true;
+	searchTimer = window.setTimeout(async () => {
+		try {
+			const result = await searchItems(q);
+			if (seq === searchSeq) {
+				itemSearch.result = result;
+			}
+		} catch (err) {
+			if (seq === searchSeq) {
+				itemSearch.result = null;
+				message.error('搜索商品失败:' + errorText(err));
+			}
+		} finally {
+			if (seq === searchSeq) {
+				itemSearch.loading = false;
+			}
+		}
+	}, 300);
 }
 
+/** 选中就自动查行情(选了账户才查) */
+function onPick(value: string | null, option: SelectOption | null): void {
+	pickItem(value && option ? option.item as MarketItem : null);
+	if (market.item && selectedAccounts.value.length) {
+		queryContext();
+	}
+}
+
+/** 下拉每一行:图标、中文名 + 英文名,右边在售数和最低价。下拉菜单挂在 body 下,样式见文件末尾不带 scoped 的那段 */
+function renderItemOption(option: SelectOption): VNodeChild {
+	const item = option.item as MarketItem;
+	const listing = listingText(item);
+	const sub = [item.marketHashName !== item.name ? item.marketHashName : '', item.appid !== 730 ? item.appName : ''].filter(Boolean).join(' · ');
+	return h('div', {class: 'market-option'}, [
+		item.iconUrl ? h('img', {class: 'market-option-icon', src: item.iconUrl, alt: '', loading: 'lazy'}) : null,
+		h('span', {class: 'market-option-name'}, [item.name, sub ? h('span', {class: 'muted market-option-sub'}, sub) : null]),
+		listing ? h('span', {class: item.sellListings ? 'market-option-listing' : 'muted market-option-listing'}, listing) : null
+	]);
+}
+
+const itemNote = computed(() => (itemSearch.loading ? '' : searchNote(itemSearch.result)));
+
+const itemEmpty = computed(() => {
+	if (!itemSearch.query) return '输中文或英文名搜索,也可以粘贴商品链接';
+	return itemSearch.loading ? '搜索中…' : '没搜到,换个关键词试试(多个词用空格分开)';
+});
+
+// ===== 行情 =====
 async function queryContext(): Promise<void> {
-	if (!market.url.trim()) {
-		message.warning('请先粘贴商品链接');
+	if (!market.item) {
+		message.warning('请先搜索并选择商品');
 		return;
 	}
 	if (!selectedAccounts.value.length) {
@@ -98,7 +163,7 @@ const totalText = computed(() => {
 });
 
 const canPlace = computed(() => !market.placing && selectedAccounts.value.length > 0 && !currency.value.mixed && currency.value.currency != null
-	&& validPrice.value && quantityOk.value && !!market.url.trim());
+	&& validPrice.value && quantityOk.value && !!market.item);
 
 function place(): void {
 	if (!canPlace.value) {
@@ -106,7 +171,8 @@ function place(): void {
 	}
 	const text = placeConfirmText({
 		accounts: selectedAccounts.value.length,
-		itemName: market.context?.itemName || '',
+		// 确认框里带上英文名,一眼看清是哪一件(哪个磨损、是不是 StatTrak)
+		itemName: market.item && market.item.name !== market.item.marketHashName ? `${market.item.name}(${market.item.marketHashName})` : market.item?.name || '',
 		concurrency: clampMarketConcurrency(market.concurrency),
 		prefix: currencyPrefix(currency.value.currency, currency.value.currencyISO),
 		pricePerItem: Number(market.price),
@@ -238,15 +304,38 @@ const ordersEmpty = computed(() => (market.visibleIds
 						<NButton size="small" quaternary :disabled="!market.selected.length" @click="setSelected([])">清空选择</NButton>
 					</div>
 
-					<label class="field-label">商品链接</label>
-					<div class="url-row">
-						<NInput :value="market.url" placeholder="粘贴 https://steamcommunity.com/market/listings/730/..." @update:value="onUrlInput" @keyup.enter="queryContext" />
-						<NButton :loading="market.contextLoading" @click="queryContext">查行情</NButton>
+					<label class="field-label">商品</label>
+					<div class="item-row">
+						<NSelect
+							filterable
+							remote
+							clearable
+							:value="market.item ? itemKey(market.item) : null"
+							:options="itemOptions"
+							:loading="itemSearch.loading"
+							:render-label="renderItemOption"
+							:consistent-menu-width="false"
+							placeholder="搜商品:输中文或英文名,如 千瓦、红线 久经、Kilowatt"
+							@search="onSearch"
+							@update:value="onPick"
+						>
+							<template #empty>
+								<span class="muted">{{ itemEmpty }}</span>
+							</template>
+							<template v-if="itemNote" #action>
+								<span :class="itemSearch.result?.source === 'local' ? 'warn-text' : 'muted'" class="item-note">{{ itemNote }}</span>
+							</template>
+						</NSelect>
+						<NButton :loading="market.contextLoading" :disabled="!market.item" @click="queryContext">查行情</NButton>
 					</div>
-					<p class="hint muted">从商品页地址栏直接复制即可。「查行情」看当前最高求购价 / 最低在售价,辅助定价(选填,需先选一个账户)。</p>
+					<p class="hint muted">从下拉里选具体哪一件(磨损、StatTrak、纪念品各算一件);也可以粘贴商品链接。选中后自动查当前最高求购价 / 最低在售价辅助定价(需先选一个账户)。</p>
 
 					<div v-if="market.context" class="context">
-						<div class="context-name">{{ market.context.itemName || market.context.marketHashName }}</div>
+						<div class="context-name">
+							<img v-if="market.item?.iconUrl" class="context-icon" :src="market.item.iconUrl" alt="" />
+							<span>{{ market.item?.name || market.context.itemName || market.context.marketHashName }}</span>
+							<span v-if="market.item && market.item.name !== market.context.marketHashName" class="muted item-sub">{{ market.context.marketHashName }}</span>
+						</div>
 						<NSpace :size="6">
 							<NTag type="success" :bordered="false">最高求购 <strong>{{ formatCentsIn(market.context.highestBuyOrderCents, market.context.currency, market.context.currencyISO) }}</strong></NTag>
 							<NTag type="warning" :bordered="false">最低在售 <strong>{{ market.context.lowestSellOrderCents != null ? formatCentsIn(market.context.lowestSellOrderCents, market.context.currency, market.context.currencyISO) : (market.context.lowestPrice || '—') }}</strong></NTag>
@@ -361,10 +450,18 @@ const ordersEmpty = computed(() => (market.visibleIds
 	align-items: center;
 }
 
-.url-row {
+.item-row {
 	display: grid;
 	grid-template-columns: minmax(0, 1fr) auto;
 	gap: 6px;
+}
+
+.item-note {
+	font-size: 12px;
+}
+
+.warn-text {
+	color: var(--warn);
 }
 
 .hint {
@@ -382,7 +479,22 @@ const ordersEmpty = computed(() => (market.visibleIds
 }
 
 .context-name {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 4px 8px;
 	font-weight: 600;
+}
+
+.context-icon {
+	width: 36px;
+	height: 36px;
+	object-fit: contain;
+}
+
+.item-sub {
+	font-size: 12px;
+	font-weight: 400;
 }
 
 .suggest {
@@ -438,5 +550,47 @@ const ordersEmpty = computed(() => (market.visibleIds
 	.market-layout {
 		grid-template-columns: minmax(0, 1fr);
 	}
+}
+</style>
+
+<style>
+/* 搜商品下拉的选项(菜单挂在 body 下,scoped 样式管不到) */
+.market-option {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	width: 100%;
+	min-width: 0;
+}
+
+.market-option-icon {
+	flex: none;
+	width: 24px;
+	height: 24px;
+	object-fit: contain;
+}
+
+.market-option-name {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.market-option-sub {
+	margin-left: 8px;
+	font-size: 12px;
+}
+
+.market-option-listing {
+	flex: none;
+	color: var(--ok);
+	font-size: 12px;
+	white-space: nowrap;
+}
+
+.market-option-listing.muted {
+	color: var(--muted);
 }
 </style>

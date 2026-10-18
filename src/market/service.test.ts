@@ -1,7 +1,8 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
+import {createNameDb} from '../items/names.ts';
 import type {Attempt} from '../steam/session-manager.ts';
-import type {CreateBuyOrderParams, CreateBuyOrderResult, LiveBuyOrder, MarketClient, MarketContext} from './client.ts';
+import type {CreateBuyOrderParams, CreateBuyOrderResult, LiveBuyOrder, MarketClient, MarketContext, MarketSearchItem, SearchParams} from './client.ts';
 import type {BuyOrderConfirmer, ConfirmBuyOrderParams} from './confirmations.ts';
 import {createMarketService, runWithConcurrency} from './index.ts';
 import type {BuyOrderRecord} from './ledger.ts';
@@ -35,6 +36,11 @@ interface Harness {
 	createParams: CreateBuyOrderParams[];
 	sleeps: number[];
 	clock: {now: number};
+	/** searchItems 返回的结果;Error 则抛 */
+	searchResult: MarketSearchItem[] | Error;
+	searchParams: SearchParams[];
+	/** fetchGroupName 返回的分组名;Error 则抛 */
+	groupName: string | Error;
 }
 
 function harness(attempts: Attempt[], files: Record<string, unknown> = {}): Harness {
@@ -43,7 +49,8 @@ function harness(attempts: Attempt[], files: Record<string, unknown> = {}): Harn
 	const h = {
 		files: store, calls: [] as string[], create: {} as Harness['create'], mine: {} as Harness['mine'],
 		confirmError: null, listConfError: null, cancelError: null, confirmParams: [] as ConfirmBuyOrderParams[],
-		createParams: [] as CreateBuyOrderParams[], sleeps: [] as number[], clock: {now: Date.parse('2026-10-13T00:00:00Z')}
+		createParams: [] as CreateBuyOrderParams[], sleeps: [] as number[], clock: {now: Date.parse('2026-10-13T00:00:00Z')},
+		searchResult: [], searchParams: [] as SearchParams[], groupName: ''
 	} as Omit<Harness, 'service'> as Harness;
 	const cursor = new Map<string, number>();
 	const client: MarketClient = {
@@ -80,6 +87,21 @@ function harness(attempts: Attempt[], files: Record<string, unknown> = {}): Harn
 				throw mine;
 			}
 			return mine;
+		},
+		async searchItems(params) {
+			h.searchParams.push(params);
+			h.calls.push(`search ${params.query} app=${params.appid ?? ''} n=${params.count ?? ''} ${who(params)}`);
+			if (h.searchResult instanceof Error) {
+				throw h.searchResult;
+			}
+			return h.searchResult;
+		},
+		async fetchGroupName(params) {
+			h.calls.push(`group ${params.appid} ${params.groupId}`);
+			if (h.groupName instanceof Error) {
+				throw h.groupName;
+			}
+			return h.groupName;
 		}
 	};
 	const confirmer: BuyOrderConfirmer = {
@@ -107,6 +129,7 @@ function harness(attempts: Attempt[], files: Record<string, unknown> = {}): Harn
 		readJson: file => store.has(file) ? structuredClone(store.get(file)) : null,
 		writeJson: (file, value) => void store.set(file, structuredClone(value)),
 		writeText: () => {},
+		names: createNameDb({'Kilowatt Case': '千瓦武器箱', 'Kilowatt Case Key': '千瓦武器箱钥匙', [AK]: 'AK-47 | 红线 (久经沙场)'}),
 		client, confirmer,
 		fetch: (async () => {
 			throw new TypeError('offline');
@@ -313,4 +336,58 @@ test('行情:nameid 按手填 → 缓存的顺序;用账号的币种和地区;�
 
 	await assert.rejects(h.service.context({accountId: 'ghost', url: URL_AK}), (err: Error & {statusCode?: number}) => err.statusCode === 404);
 	await assert.rejects(h.service.context({accountId: 'a1', url: 'nope'}), (err: Error & {statusCode?: number}) => err.statusCode === 400);
+});
+
+const item = (marketHashName: string, extra: Partial<MarketSearchItem> = {}): MarketSearchItem => ({
+	appid: 730, marketHashName, name: marketHashName, appName: 'Counter-Strike 2', iconUrl: 'icon', sellListings: 5, sellPriceText: '$1.00', groupId: '', ...extra
+});
+
+test('搜商品:按名字搜,带上账号就用它的 cookie;和输入完全一致的排最前;空的不发请求', async () => {
+	const h = harness([attempt('alpha')]);
+	h.searchResult = [item('Kilowatt Case Key'), item('Kilowatt Case', {name: '千瓦武器箱'})];
+	assert.deepEqual(await h.service.search({q: '  '}), {items: [], source: 'steam'});
+	const anonymous = await h.service.search({q: ' kilowatt case '});
+	assert.deepEqual(anonymous.items.map(i => i.marketHashName), ['Kilowatt Case', 'Kilowatt Case Key']);
+	assert.equal(anonymous.source, 'steam');
+	await h.service.search({q: '千瓦', accountId: 'a1', appid: '730'});
+	await h.service.search({q: '千瓦', accountId: 'ghost', appid: 'x'});
+	assert.deepEqual(h.calls, ['search kilowatt case app= n=20 ', 'search 千瓦 app=730 n=20 alpha', 'search 千瓦 app= n=20 ']);
+	assert.equal(h.searchParams[1]?.userAgent, 'UA');
+});
+
+test('搜商品:粘贴老链接就是那一件(搜不到也补上,中文名查词库);新版分组链接只留这一组', async () => {
+	const h = harness([]);
+	h.searchResult = [item('AK-47 | Redline (Minimal Wear)'), item(AK, {name: 'AK 红线'})];
+	const old = await h.service.search({q: URL_AK});
+	assert.deepEqual(old.items.map(i => [i.marketHashName, i.name]), [[AK, 'AK 红线'], ['AK-47 | Redline (Minimal Wear)', 'AK-47 | Redline (Minimal Wear)']]);
+	h.searchResult = [item('AK-47 | Redline (Minimal Wear)')];
+	const missing = await h.service.search({q: URL_AK});
+	assert.deepEqual(missing.items[0], {appid: 730, marketHashName: AK, name: 'AK-47 | 红线 (久经沙场)', appName: '', iconUrl: '', sellListings: null, sellPriceText: '', groupId: ''});
+	assert.equal(missing.items.length, 2);
+
+	h.calls.length = 0;
+	h.groupName = 'AK-47 | Redline';
+	h.searchResult = [item('AWP | Redline (Field-Tested)', {groupId: 'G18072096023004'}), item(AK, {groupId: 'G1807209A023004'}), item('StatTrak™ ' + AK, {groupId: 'G1807209A023004'})];
+	const group = await h.service.search({q: 'https://steamcommunity.com/market/listings/730/G1807209A023004?l=schinese'});
+	assert.deepEqual(group.items.map(i => i.marketHashName), [AK, 'StatTrak™ ' + AK]);
+	assert.deepEqual(h.calls, ['group 730 G1807209A023004', 'search AK-47 | Redline app=730 n=30 ']);
+
+	h.groupName = new Error('HTTP 429');
+	await assert.rejects(h.service.search({q: '/market/listings/730/G1807209A023004'}),
+		(err: Error & {statusCode?: number}) => err.statusCode === 502 && /分组链接.*HTTP 429.*直接输名字搜/.test(err.message));
+	await assert.rejects(h.service.search({q: '/market/listings/0/x'}), (err: Error & {statusCode?: number}) => err.statusCode === 400);
+});
+
+test('搜商品:Steam 没搜成退回 CS2 中文名词库(标明来源和原因);别的游戏、词库也没有的报 502', async () => {
+	const h = harness([]);
+	h.searchResult = new Error('Steam 限流了(429),稍后再试');
+	const local = await h.service.search({q: '千瓦'});
+	assert.equal(local.source, 'local');
+	assert.equal(local.error, 'Steam 限流了(429),稍后再试');
+	assert.deepEqual(local.items.map(i => [i.appid, i.marketHashName, i.name, i.sellListings]), [
+		[730, 'Kilowatt Case', '千瓦武器箱', null], [730, 'Kilowatt Case Key', '千瓦武器箱钥匙', null]
+	]);
+	assert.deepEqual((await h.service.search({q: URL_AK})).items.map(i => i.marketHashName), [AK], '粘贴的老链接就给那一件');
+	await assert.rejects(h.service.search({q: '千瓦', appid: 440}), (err: Error & {statusCode?: number}) => err.statusCode === 502 && /Steam 市场搜索失败:Steam 限流了/.test(err.message));
+	await assert.rejects(h.service.search({q: '不存在'}), (err: Error & {statusCode?: number}) => err.statusCode === 502);
 });

@@ -1,4 +1,5 @@
-// 市场求购的纯逻辑(不依赖 Vue):多账号同币种约束、按余额挂满的件数、金额显示、确认和结果文案。规则照搬旧版前端。
+// 市场求购的纯逻辑(不依赖 Vue):搜商品的显示、多账号同币种约束、按余额挂满的件数、金额显示、确认和结果文案。
+// 除了搜商品(新加的),规则照搬旧版前端。
 
 import {currencySymbol} from './accounts.ts';
 import type {CookieAccount} from './buygame.ts';
@@ -18,6 +19,56 @@ export interface MarketContext {
 	lowestPrice: string;
 	medianPrice: string;
 	volume: string;
+}
+
+/** 搜商品的一条结果(src/market/client.ts 的 MarketSearchItem) */
+export interface MarketItem {
+	appid: number;
+	marketHashName: string;
+	/** 中文名(Steam 没有中文的就是英文名) */
+	name: string;
+	appName: string;
+	iconUrl: string;
+	/** 在售数量;本地词库的结果为 null */
+	sellListings: number | null;
+	/** 最低在售价,带币种符号 */
+	sellPriceText: string;
+	groupId: string;
+}
+
+/** GET /api/market/search 的结果 */
+export interface MarketSearch {
+	items: MarketItem[];
+	/** local:Steam 没搜成,用的本地 CS2 中文名词库 */
+	source: 'steam' | 'local';
+	error?: string;
+}
+
+/** 下拉选项的 value:同名物品在不同游戏里可能都有 */
+export function itemKey(item: Pick<MarketItem, 'appid' | 'marketHashName'>): string {
+	return `${item.appid}|${item.marketHashName}`;
+}
+
+/** 下拉右边:在售数量和最低在售价;本地词库的结果没有 */
+export function listingText(item: MarketItem): string {
+	if (item.sellListings == null) {
+		return '';
+	}
+	if (item.sellListings <= 0) {
+		return '暂无在售';
+	}
+	return `在售 ${item.sellListings}` + (item.sellPriceText ? ` · ${item.sellPriceText} 起` : '');
+}
+
+/** 下拉底部:结果从哪来 */
+export function searchNote(result: MarketSearch | null): string {
+	if (!result?.items.length) {
+		return '';
+	}
+	if (result.source === 'local') {
+		return `Steam 市场没搜成(${result.error || '原因未知'}),下面是本地词库里的 CS2 物品,没有价格`;
+	}
+	return '价格是 Steam 市场最低在售价,定价以「查行情」为准';
 }
 
 /** 本工具挂出的求购单(src/market/ledger.ts 的 BuyOrderRecord) */

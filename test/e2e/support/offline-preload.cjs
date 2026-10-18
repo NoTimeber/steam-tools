@@ -410,11 +410,35 @@ steamTotp.getTimeOffset = callback => {
 };
 
 // ===== 假 Steam 市场 =====
-// 场景文件(可选)形如:{needConfirmation: true, createFail: {success: 25}, filled: [<buy_orderid>...]}
+// 场景文件(可选)形如:{needConfirmation: true, createFail: {success: 25}, filled: [<buy_orderid>...], searchFail: 429}
 //   needConfirmation:挂单先回 success=22,手机确认后带 confirmation 重发才落单(和真实流程一样);
-//   createFail:挂单一律回这个;filled:这些求购单已成交,从「我的求购单」里消失。
+//   createFail:挂单一律回这个;filled:这些求购单已成交,从「我的求购单」里消失;searchFail:市场搜索回这个 HTTP 状态。
 // 账号按 cookie 里的 steamLoginSecure 区分;表单里的 sessionid 必须等于 cookie 里的(CSRF),否则回 success=15。
 const market = {seq: 0, orders: new Map(), confs: new Map()};
+
+// 市场搜索的商品(search/render 按空格分词,每个词都要出现在英文名或中文名里);分组 id 和真实 Steam 一致
+const MARKET_GROUPS = {G18A8263004: 'Kilowatt Case', G1807209A023004: 'AK-47 | Redline', G18072096023004: 'AWP | Redline'};
+const MARKET_ITEMS = [
+	{appid: 730, hash: 'Kilowatt Case', name: '千瓦武器箱', group: 'G18A8263004', listings: 763174, price: 13},
+	{appid: 730, hash: 'AK-47 | Redline (Field-Tested)', name: 'AK-47 | 红线 (久经沙场)', group: 'G1807209A023004', listings: 1250, price: 3156},
+	{appid: 730, hash: 'AK-47 | Redline (Minimal Wear)', name: 'AK-47 | 红线 (略有磨损)', group: 'G1807209A023004', listings: 0, price: 0},
+	{appid: 730, hash: 'StatTrak™ AK-47 | Redline (Field-Tested)', name: 'AK-47（StatTrak™） | 红线 (久经沙场)', group: 'G1807209A023004', listings: 300, price: 7820},
+	{appid: 730, hash: 'AWP | Redline (Field-Tested)', name: 'AWP | 红线 (久经沙场)', group: 'G18072096023004', listings: 410, price: 2290},
+	{appid: 440, hash: 'Mann Co. Supply Crate Key', name: '曼恩公司补给箱钥匙', group: '', listings: 52000, price: 249}
+];
+
+function marketSearch(query) {
+	const words = String(query.get('query') || '').toLowerCase().split(/\s+/).filter(Boolean);
+	const appid = Number(query.get('appid')) || 0;
+	const count = Number(query.get('count')) || 10;
+	const found = MARKET_ITEMS.filter(item => (!appid || item.appid === appid)
+		&& words.every(word => item.hash.toLowerCase().includes(word) || item.name.toLowerCase().includes(word)));
+	return {success: true, start: 0, pagesize: count, total_count: found.length, results: found.slice(0, count).map(item => ({
+		name: item.name, hash_name: item.hash, sell_listings: item.listings, sell_price: item.price,
+		sell_price_text: '$' + (item.price / 100).toFixed(2), app_name: item.appid === 730 ? 'Counter-Strike 2' : 'Team Fortress 2',
+		asset_description: {appid: item.appid, icon_url: '', name: item.name, market_name: item.name, market_hash_name: item.hash, market_bucket_group_id: item.group}
+	}))};
+}
 
 function marketScenario() {
 	const file = process.env.FAKE_MARKET_FILE;
@@ -446,7 +470,16 @@ function fakeMarket(url, init) {
 	const json = value => new Response(JSON.stringify(value), {status: 200, headers: {'content-type': 'application/json'}});
 	if (url.pathname.startsWith('/market/listings/')) {
 		const name = decodeURIComponent(url.pathname.split('/')[4] || '');
+		// 新版分组页(真实的有好几 MB,标题在开头)
+		if (/^G[0-9A-F]{8,}$/i.test(name)) {
+			return MARKET_GROUPS[name]
+				? new Response(`<!DOCTYPE html><html><head><title>${MARKET_GROUPS[name]} - Steam Community Market</title></head><body>${'x'.repeat(100000)}</body></html>`, {status: 200})
+				: new Response('Not Found', {status: 404});
+		}
 		return new Response(`<html><title>Steam Community Market :: Listings for ${name}</title></html>`, {status: 200});
+	}
+	if (url.pathname === '/market/search/render/') {
+		return scenario.searchFail ? new Response('Too Many Requests', {status: scenario.searchFail}) : json(marketSearch(url.searchParams));
 	}
 	if (url.pathname === '/market/itemordershistogram') {
 		return json({success: 1, highest_buy_order: '120', lowest_sell_order: '150'});

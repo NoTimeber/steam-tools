@@ -1,11 +1,11 @@
-// 市场求购(Steam 社区市场 createbuyorder):在线账号(限同币种多选)、行情参考、挂单(固定数量或按余额挂满)、
+// 市场求购(Steam 社区市场 createbuyorder):在线账号(限同币种多选)、按名字搜商品、行情参考、挂单(固定数量或按余额挂满)、
 // 我的求购单(本工具挂出的账本)的对账和撤销。
 
 import {computed, reactive} from 'vue';
 import {api, errorText} from '../api/http.ts';
 import {socket} from '../api/socket.ts';
 import {clampMarketConcurrency, perAccountMax, selectedCurrency} from '../lib/market.ts';
-import type {BuyOrder, MarketAccount, MarketContext, PlaceResult} from '../lib/market.ts';
+import type {BuyOrder, MarketAccount, MarketContext, MarketItem, MarketSearch, PlaceResult} from '../lib/market.ts';
 import {addLog} from './logs.ts';
 
 export const market = reactive({
@@ -14,7 +14,8 @@ export const market = reactive({
 	accountError: '',
 	loadingAccounts: false,
 	selected: [] as string[],
-	url: '',
+	/** 搜出来选中的商品 */
+	item: null as MarketItem | null,
 	context: null as MarketContext | null,
 	contextLoading: false,
 	price: null as number | null,
@@ -69,18 +70,38 @@ export async function loadOrders(): Promise<void> {
 	}
 }
 
+/** 按名字搜商品(中文或英文,也认商品链接);选了账号就用第一个账号搜,在售价按它的钱包币种 */
+export async function searchItems(q: string): Promise<MarketSearch> {
+	const first = selectedAccounts.value[0];
+	const data = await api.get<Partial<MarketSearch>>('/api/market/search?q=' + encodeURIComponent(q) + (first ? '&accountId=' + encodeURIComponent(first.attemptId) : ''));
+	return {items: data.items || [], source: data.source === 'local' ? 'local' : 'steam', error: data.error};
+}
+
+/** 换了商品:之前的行情作废 */
+export function pickItem(item: MarketItem | null): void {
+	market.item = item;
+	market.context = null;
+}
+
 /** 行情参考:按第一个已选账号的钱包币种查 */
 export async function fetchContext(): Promise<void> {
 	const first = selectedAccounts.value[0];
-	if (!market.url.trim() || !first) {
+	const item = market.item;
+	if (!item || !first) {
 		return;
 	}
 	market.contextLoading = true;
 	try {
-		const data = await api.get<{context?: MarketContext}>(`/api/market/context?accountId=${encodeURIComponent(first.attemptId)}&url=${encodeURIComponent(market.url.trim())}`);
-		market.context = data.context ?? null;
+		const query = new URLSearchParams({accountId: first.attemptId, appid: String(item.appid), marketHashName: item.marketHashName});
+		const data = await api.get<{context?: MarketContext}>('/api/market/context?' + query);
+		// 查的途中换了商品就不要这次的结果
+		if (market.item === item) {
+			market.context = data.context ?? null;
+		}
 	} catch (err) {
-		market.context = null;
+		if (market.item === item) {
+			market.context = null;
+		}
 		throw err;
 	} finally {
 		market.contextLoading = false;
@@ -96,9 +117,10 @@ export interface PlaceOutcome {
 export async function placeOrders(): Promise<PlaceOutcome> {
 	const payload: Record<string, unknown> = {
 		accountIds: selectedAccounts.value.map(account => account.attemptId),
-		url: market.url.trim(),
+		appid: market.item?.appid,
+		marketHashName: market.item?.marketHashName,
 		pricePerItem: Number(market.price),
-		itemName: market.context?.itemName || '',
+		itemName: market.item?.name || market.context?.itemName || '',
 		concurrency: clampMarketConcurrency(market.concurrency)
 	};
 	if (market.perAccountMax) {

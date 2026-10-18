@@ -108,7 +108,7 @@ function registerAll(overrides: {
 	return table;
 }
 
-test('路由表:拆分前 app/server.js 注册的全部保留,另加新版前端用的 /api/accounts/upsert、/api/accounts/history、账户分组、代理管理 /api/proxies/*', () => {
+test('路由表:拆分前 app/server.js 注册的全部保留,另加新版前端用的 /api/accounts/upsert、/api/accounts/history、账户分组、代理管理 /api/proxies/*、市场搜商品 /api/market/search', () => {
 	const purchaseAliases = ['purchase', 'cs2', 'tf2'].flatMap(prefix => [
 		`GET /api/${prefix}/online-accounts`,
 		`GET /api/${prefix}/items`,
@@ -127,7 +127,7 @@ test('路由表:拆分前 app/server.js 注册的全部保留,另加新版前端
 		...purchaseAliases,
 		'GET /api/purchase/tasks', 'POST /api/purchase/tasks', 'POST /api/task/cs2-purchase', 'POST /api/task/tf2-purchase',
 		'POST /api/steam-purchase/test', 'GET /api/buygame/online-accounts', 'GET /api/buygame/resolve', 'GET /api/buygame/tasks', 'POST /api/buygame/tasks',
-		'GET /api/market/online-accounts', 'GET /api/market/context', 'POST /api/market/buyorder', 'GET /api/market/buyorders',
+		'GET /api/market/online-accounts', 'GET /api/market/search', 'GET /api/market/context', 'POST /api/market/buyorder', 'GET /api/market/buyorders',
 		'POST /api/market/buyorder/cancel', 'POST /api/market/buyorders/sync',
 		'GET /api/uu/state', 'POST /api/uu/bind', 'POST /api/uu/auto', 'POST /api/uu/scan', 'GET /api/uu/orders/:account',
 		'POST /api/uu/list/auto', 'POST /api/uu/list/scan', 'POST /api/uu/poll-interval', 'POST /api/uu/login/start',

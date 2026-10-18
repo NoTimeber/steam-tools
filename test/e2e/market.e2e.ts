@@ -1,4 +1,4 @@
-// 市场求购:行情参考 → 挂求购(含手机确认)→ 刷新对账 → 撤单,走真实的服务端和 HTTP 接口。
+// 市场求购:搜商品 → 行情参考 → 挂求购(含手机确认)→ 刷新对账 → 撤单,走真实的服务端和 HTTP 接口。
 // Steam 市场和手机确认是假的(support/offline-preload.cjs 的 fakeMarket),场景写在 FAKE_MARKET_FILE 里,测试随时改。
 
 import {after, before, describe, test} from 'node:test';
@@ -103,11 +103,44 @@ describe('市场求购', () => {
 		assert.deepEqual([alpha, charlie].map(a => [a.account, a.currency, a.currencyISO, a.balance]), [['alpha', 1, 'USD', 10], ['charlie', 1, 'USD', 10]]);
 	});
 
+	test('搜商品:中文按空格分词搜,带账号 cookie;新版分组链接只留这一组;Steam 限流时退回本地中文名词库', async () => {
+		const res = await client.get(`/api/market/search?q=${encodeURIComponent('红线 久经')}&accountId=${encodeURIComponent(alpha.attemptId)}`);
+		assert.equal(res.status, 200, res.text);
+		assert.equal(res.json.source, 'steam');
+		assert.deepEqual(res.json.items.map((item: {marketHashName: string; name: string; sellPriceText: string}) => [item.marketHashName, item.name, item.sellPriceText]), [
+			[AK, 'AK-47 | 红线 (久经沙场)', '$31.56'],
+			['StatTrak™ AK-47 | Redline (Field-Tested)', 'AK-47（StatTrak™） | 红线 (久经沙场)', '$78.20'],
+			['AWP | Redline (Field-Tested)', 'AWP | 红线 (久经沙场)', '$22.90']
+		]);
+		const searched = marketCalls('/market/search/render/').at(-1);
+		assert.ok(searched?.owner, '带了账号的 cookie');
+		assert.equal(searched?.query?.l, 'schinese');
+
+		const group = await client.get('/api/market/search?q=' + encodeURIComponent('https://steamcommunity.com/market/listings/730/G1807209A023004'));
+		assert.equal(group.status, 200, group.text);
+		assert.deepEqual(group.json.items.map((item: {marketHashName: string}) => item.marketHashName),
+			[AK, 'AK-47 | Redline (Minimal Wear)', 'StatTrak™ AK-47 | Redline (Field-Tested)']);
+
+		scenario({searchFail: 429});
+		const local = await client.get('/api/market/search?q=' + encodeURIComponent('千瓦'));
+		assert.equal(local.status, 200, local.text);
+		assert.equal(local.json.source, 'local');
+		assert.match(local.json.error, /429/);
+		assert.deepEqual([local.json.items[0].marketHashName, local.json.items[0].name, local.json.items[0].sellListings], ['Kilowatt Case', '千瓦武器箱', null]);
+		const failed = await client.get('/api/market/search?q=' + encodeURIComponent('不存在的东西'));
+		assert.equal(failed.status, 502);
+		scenario({});
+	});
+
 	test('行情:nameid 从随程序打包的社区库查到,盘口和概览价按账号币种查,nameid 记进缓存', async () => {
+		const pages = () => events('marketRequest').filter(event => String(event.path).startsWith('/market/listings/')).length;
+		const pagesBefore = pages();
 		const res = await client.get(`/api/market/context?accountId=${encodeURIComponent(alpha.attemptId)}&url=${encodeURIComponent(AK_URL)}`);
 		assert.equal(res.status, 200, res.text);
+		// 有 nameid 就不抓商品页(新版页面会跳到好几 MB 的分组页),名称由页面用搜索结果里的中文名
+		assert.equal(pages(), pagesBefore);
 		assert.deepEqual(res.json.context, {
-			appid: 730, marketHashName: AK, currency: 1, itemNameId: AK_NAMEID, itemName: AK,
+			appid: 730, marketHashName: AK, currency: 1, itemNameId: AK_NAMEID, itemName: '',
 			highestBuyOrderCents: 120, lowestSellOrderCents: 150, lowestPrice: '$1.50', medianPrice: '$1.40', volume: '321', currencyISO: 'USD'
 		});
 		const histogram = marketCalls('/market/itemordershistogram')[0];
@@ -202,11 +235,12 @@ describe('市场求购', () => {
 		assert.equal(again.status, 404);
 	});
 
-	test('挂满:每个账号按钱包余额算件数(10.00 ÷ 3.00 = 3 件)', async () => {
-		const result = await place({accountIds: ['alpha'], url: AK_URL, pricePerItem: 3, perAccountMax: true});
+	test('挂满:每个账号按钱包余额算件数(10.00 ÷ 3.00 = 3 件);页面搜出来的商品按 appid + 英文名挂', async () => {
+		const result = await place({accountIds: ['alpha'], appid: 730, marketHashName: AK, pricePerItem: 3, perAccountMax: true});
 		assert.equal(result.placed, 1, JSON.stringify(result.results));
 		const last = marketCalls('/market/createbuyorder/').at(-1);
-		assert.deepEqual([last?.form?.quantity, last?.form?.price_total], ['3', '900']);
+		assert.deepEqual([last?.form?.appid, last?.form?.market_hash_name, last?.form?.quantity, last?.form?.price_total], ['730', AK, '3', '900']);
+		assert.equal(last?.referer, AK_URL);
 	});
 
 	test('Steam 拒绝时带出原因;参数不对直接 400,不发请求', async () => {

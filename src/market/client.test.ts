@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {createMarketClient, describeBuyOrderError, listingUrl, parseListingUrl} from './client.ts';
+import {createMarketClient, describeBuyOrderError, listingUrl, parseListingUrl, parseSearchResults} from './client.ts';
 
 interface Sent {
 	url: string;
@@ -36,6 +36,7 @@ test('商品链接:完整 URL 或路径都行,物品名解码一次;格式不对
 	assert.throws(() => parseListingUrl('  '), /请填写市场商品链接/);
 	assert.throws(() => parseListingUrl('https://steamcommunity.com/market/'), /链接格式不对/);
 	assert.throws(() => parseListingUrl('https://steamcommunity.com/market/listings/0/x'), /缺少有效的 appid/);
+	assert.throws(() => parseListingUrl('https://steamcommunity.com/market/listings/730/G1807209A023004'), /新版市场的分组链接/);
 	assert.equal(listingUrl(730, 'A | B/?'), 'https://steamcommunity.com/market/listings/730/A%20%7C%20B%2F%3F');
 });
 
@@ -127,7 +128,7 @@ test('我的求购单:按 buy_orderid 标准化,丢掉没有 id 的', async () =
 	await assert.rejects(createMarketClient({fetch: failed.http}).fetchMyBuyOrders({cookies: ['a=1']}), /读取求购单失败/);
 });
 
-test('行情:商品页取名称,有 nameid 才查盘口;没有求购时最高求购是 0(前端据此建议出价 0.01)', async () => {
+test('行情:有 nameid 就不抓商品页,直接查盘口;没有求购时最高求购是 0(前端据此建议出价 0.01)', async () => {
 	const {http, sent} = fakeFetch({
 		[C + '/market/listings/']: '<title>Steam Community Market :: Listings for AK-47 | Redline</title>',
 		[C + '/market/itemordershistogram']: json({success: 1, highest_buy_order: null, lowest_sell_order: '150'}),
@@ -137,24 +138,97 @@ test('行情:商品页取名称,有 nameid 才查盘口;没有求购时最高求
 		appid: 730, marketHashName: 'AK-47 | Redline', itemNameId: 'id-42', cookies: ['a=1'], currency: 23, country: 'cn'
 	});
 	assert.deepEqual(context, {
-		appid: 730, marketHashName: 'AK-47 | Redline', currency: 23, itemNameId: '42', itemName: 'AK-47 | Redline',
+		appid: 730, marketHashName: 'AK-47 | Redline', currency: 23, itemNameId: '42', itemName: '',
 		highestBuyOrderCents: 0, lowestSellOrderCents: 150, lowestPrice: '$1.50', medianPrice: '$1.40', volume: '1,234'
 	});
-	const histogram = new URL(sent[1]?.url ?? '');
+	assert.equal(sent.length, 2);
+	const histogram = new URL(sent[0]?.url ?? '');
 	assert.deepEqual(Object.fromEntries(histogram.searchParams), {country: 'CN', language: 'english', currency: '23', item_nameid: '42', two_factor: '0'});
-	assert.equal(sent[1]?.headers.Referer, listingUrl(730, 'AK-47 | Redline'));
+	assert.equal(sent[0]?.headers.Referer, listingUrl(730, 'AK-47 | Redline'));
 });
 
 test('行情:尽力而为,哪一步断网都不抛;老页面还能抓到 nameid', async () => {
 	const {http, sent} = fakeFetch({
-		[C + '/market/listings/']: '<script>Market_LoadOrderSpread( 176096390 );</script><span id="largeiteminfo_item_name" class="x">红线 </span>',
+		[C + '/market/listings/']: '<script>Market_LoadOrderSpread( 176096390 );</script><span id="largeiteminfo_item_name" class="x">红线 &amp; 蓝 </span>',
 		[C + '/market/itemordershistogram']: 'throw'
 	});
 	const context = await createMarketClient({fetch: http}).fetchMarketContext({appid: 730, marketHashName: 'X'});
 	assert.equal(context.itemNameId, '176096390');
-	assert.equal(context.itemName, '红线');
+	assert.equal(context.itemName, '红线 & 蓝');
 	assert.equal(context.highestBuyOrderCents, null);
 	assert.equal(context.lowestPrice, '');
 	assert.equal(sent.length, 3);
 	assert.equal(sent[0]?.headers.Cookie, undefined, '没有 cookie 就不带 Cookie 头');
+});
+
+const SEARCH_JSON = {success: true, results: [
+	{name: '千瓦武器箱', hash_name: 'Kilowatt Case', sell_listings: 763174, sell_price: 13, sell_price_text: '$0.13', app_name: 'Counter-Strike 2',
+		asset_description: {appid: 730, icon_url: 'ICON', market_hash_name: 'Kilowatt Case', market_bucket_group_id: 'G18A8263004'}},
+	{name: 'Key', sell_listings: 0, asset_description: {appid: 440, market_hash_name: 'Mann Co. Supply Crate Key'}},
+	{name: '没有 appid', hash_name: 'X', asset_description: {}},
+	{name: '没有英文名', asset_description: {appid: 730}}
+]};
+
+test('搜商品:请求参数(中文、热门排序、不渲染);结果标准化,丢掉缺 appid / 英文名的', async () => {
+	const {http, sent} = fakeFetch({[C + '/market/search/render/']: json(SEARCH_JSON)});
+	const items = await createMarketClient({fetch: http}).searchItems({query: 'AK | 红线', appid: 730, cookies: ['a=1', ''], userAgent: 'UA', count: 30});
+	assert.deepEqual(items, [
+		{appid: 730, marketHashName: 'Kilowatt Case', name: '千瓦武器箱', appName: 'Counter-Strike 2',
+			iconUrl: 'https://community.cloudflare.steamstatic.com/economy/image/ICON/62fx62f', sellListings: 763174, sellPriceText: '$0.13', groupId: 'G18A8263004'},
+		{appid: 440, marketHashName: 'Mann Co. Supply Crate Key', name: 'Key', appName: '', iconUrl: '', sellListings: 0, sellPriceText: '', groupId: ''}
+	]);
+	const url = new URL(sent[0]?.url ?? '');
+	assert.deepEqual(Object.fromEntries(url.searchParams), {
+		query: 'AK | 红线', start: '0', count: '30', search_descriptions: '0', sort_column: 'popular', sort_dir: 'desc', appid: '730', norender: '1', l: 'schinese'
+	});
+	assert.equal(sent[0]?.headers.Cookie, 'a=1');
+	assert.equal(sent[0]?.headers['User-Agent'], 'UA');
+
+	const anonymous = fakeFetch({[C + '/market/search/render/']: json(SEARCH_JSON)});
+	await createMarketClient({fetch: anonymous.http}).searchItems({query: 'x'});
+	const anonymousUrl = new URL(anonymous.sent[0]?.url ?? '');
+	assert.equal(anonymousUrl.searchParams.has('appid'), false, '不传 appid 搜全部游戏');
+	assert.equal(anonymousUrl.searchParams.get('count'), '20');
+	assert.equal(anonymous.sent[0]?.headers.Cookie, undefined);
+	assert.deepEqual(parseSearchResults(null), []);
+});
+
+test('搜商品:限流、非 JSON、success=false 都报错', async () => {
+	const limited = (async () => new Response('Too Many Requests', {status: 429})) as typeof fetch;
+	await assert.rejects(createMarketClient({fetch: limited}).searchItems({query: 'x'}), /限流了\(429\)/);
+	const html = fakeFetch({[C + '/market/search/render/']: '<html>error</html>'});
+	await assert.rejects(createMarketClient({fetch: html.http}).searchItems({query: 'x'}), /没返回搜索结果\(HTTP 200\)/);
+	const failed = fakeFetch({[C + '/market/search/render/']: json({success: false})});
+	await assert.rejects(createMarketClient({fetch: failed.http}).searchItems({query: 'x'}), /没返回搜索结果/);
+});
+
+test('分组链接:读页面标题里的分组名(解实体、去掉站名后缀);只读到 </title>;打不开报错', async () => {
+	let pulled = 0;
+	const sentBig: Array<{url: string; headers: Record<string, string>}> = [];
+	const chunks = ['<html><head><title>Dreams &amp; Nightmares Case', ' - Steam Community Market</title></head>', ...Array.from({length: 50}, () => 'x'.repeat(100_000))];
+	const big = (async (input: string | URL, init?: RequestInit) => {
+		sentBig.push({url: String(input), headers: {...init?.headers as Record<string, string>}});
+		return new Response(new ReadableStream({
+			pull(controller) {
+				const chunk = chunks[pulled++];
+				if (chunk === undefined) {
+					controller.close();
+				} else {
+					controller.enqueue(new TextEncoder().encode(chunk));
+				}
+			}
+		}));
+	}) as typeof fetch;
+	assert.equal(await createMarketClient({fetch: big}).fetchGroupName({appid: 730, groupId: 'G18A8263004', cookies: ['a=1']}), 'Dreams & Nightmares Case');
+	assert.equal(sentBig[0]?.url, C + '/market/listings/730/G18A8263004');
+	assert.equal(sentBig[0]?.headers.Cookie, 'a=1');
+	assert.ok(pulled < 5, `读到标题就停,实际读了 ${pulled} 块`);
+
+	const zh = fakeFetch({[C + '/market/listings/']: '<title>AK-47 | 红线 - Steam 社区市场</title>'});
+	assert.equal(await createMarketClient({fetch: zh.http}).fetchGroupName({appid: 730, groupId: 'G1807209A023004'}), 'AK-47 | 红线');
+
+	const missing = (async () => new Response('Not Found', {status: 404})) as typeof fetch;
+	await assert.rejects(createMarketClient({fetch: missing}).fetchGroupName({appid: 730, groupId: 'G1'}), /HTTP 404/);
+	const blank = fakeFetch({[C + '/market/listings/']: '<html></html>'});
+	await assert.rejects(createMarketClient({fetch: blank.http}).fetchGroupName({appid: 730, groupId: 'G1'}), /没有分组名/);
 });
