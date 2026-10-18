@@ -108,5 +108,17 @@ export function createFingerprintStore(options: FingerprintOptions) {
 		};
 	}
 
-	return {getAccountFingerprint};
+	/** 只看缓存里这个账号的指纹,没有不生成(账户详情页用);UA 不在当前池里的(下次登录会换掉)给空串 */
+	function peekAccountFingerprint(accountName: unknown): {machineName: string; userAgent: string} | null {
+		const entry = cache[String(accountName || '').trim().toLowerCase()];
+		if (!entry || typeof entry !== 'object') {
+			return null;
+		}
+		return {
+			machineName: typeof entry.machineName === 'string' ? entry.machineName : '',
+			userAgent: isCurrentWebUserAgent(entry.userAgent, userAgents) ? entry.userAgent : ''
+		};
+	}
+
+	return {getAccountFingerprint, peekAccountFingerprint};
 }

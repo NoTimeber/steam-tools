@@ -53,6 +53,70 @@ export interface AccountServiceOptions {
 	/** 消费记录翻页之间的等待(测试里给立即返回的) */
 	sleep?: (ms: number) => Promise<void>;
 	logger?: Pick<Console, 'warn'>;
+	/** 账号指纹(机器名、UA),只读缓存、没有不生成;不传详情里就不显示 */
+	fingerprintOf?: (accountName: string) => {machineName: string; userAgent: string} | null;
+}
+
+/** 账户详情里的一条日志 */
+export interface AccountDetailLog {
+	level: string;
+	time: string;
+	message: string;
+	at?: number;
+}
+
+/** 账户详情页的数据(GET /api/accounts/detail);不含任何密钥、cookie、refreshToken 本身 */
+export interface AccountDetail {
+	accountName: string;
+	remember: boolean;
+	hasPassword: boolean;
+	hasSharedSecret: boolean;
+	hasMaFile: boolean;
+	hasIdentitySecret: boolean;
+	steamID: string;
+	personaName: string;
+	/** 商店国家 / 登录时 Steam 看到的国家 */
+	country: string;
+	loginGeoCountry: string;
+	hasWallet: boolean;
+	currency: number | null;
+	currencyISO: string;
+	balance: number | null;
+	session: {
+		attemptId: string;
+		status: string;
+		/** 有没有存下 refreshToken(能免密登录) */
+		hasRefreshToken: boolean;
+		/** refreshToken 的过期时间(毫秒,从令牌里读);读不出为 null */
+		refreshTokenExpiresAt: number | null;
+		/** 会话库里上次保存的时间(ISO) */
+		savedAt: string;
+		cookieCount: number;
+		/** 上次拿到网页 cookie / 下次定时刷新(毫秒);不在线为 null */
+		webSessionAt: number | null;
+		nextCookieRefreshAt: number | null;
+		/** 登录时 Steam 看到的出口 IP */
+		publicIP: string;
+		machineName: string;
+		userAgent: string;
+	};
+	gc: {cs2: boolean; tf2: boolean; inventoryCount: number};
+	/** 这次会话的日志(不含 debug),旧的在前 */
+	logs: AccountDetailLog[];
+}
+
+/** JWT(refreshToken)里的过期时间(毫秒);不是 JWT 或没有 exp 为 null */
+export function jwtExpiresAt(token: string): number | null {
+	const payload = String(token || '').split('.')[1];
+	if (!payload) {
+		return null;
+	}
+	try {
+		const exp = Number(JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')).exp);
+		return Number.isFinite(exp) && exp > 0 ? exp * 1000 : null;
+	} catch {
+		return null;
+	}
 }
 
 type PublicAttempt = ReturnType<Sessions['publicAttempt']>;
@@ -507,7 +571,61 @@ export function createAccountService(options: AccountServiceOptions) {
 		};
 	}
 
+	// ===== 账户详情 =====
+
+	/**
+	 * 账户详情页的数据:名单、本地资料、会话库里存的会话、内存里的会话、账号指纹拼在一起。
+	 * 不含任何密钥 / cookie / refreshToken 本身,只给「有没有」和 refreshToken 的过期时间
+	 */
+	function detail(query: {accountName?: unknown}): AccountDetail {
+		const stored = findStoredAccount(store.accounts, String(query.accountName || '').trim());
+		if (!stored) {
+			throw accountError(404, '账户不存在');
+		}
+		const name = stored.accountName;
+		const local = profiles.local(name);
+		const saved = store.sessions.get(safeName(name));
+		const attempt = findAttemptByKey(sessions.attempts, name);
+		// 登录、重启恢复用的是会话库里存的;maFile 里带的(SDA 导出的 Session)也算
+		const refreshToken = String(attempt?.refreshToken || (saved && saved.refreshToken) || local.refreshToken || '');
+		const fingerprint = options.fingerprintOf?.(name) ?? null;
+		const online = attempt?.status === 'web_session';
+		const wallet = attempt && attempt.hasWallet != null ? attempt : local;
+		return {
+			accountName: name,
+			remember: stored.remember !== false,
+			hasPassword: !!stored.password,
+			hasSharedSecret: !!(local.sharedSecret || stored.sharedSecret),
+			hasMaFile: local.hasMaFile,
+			hasIdentitySecret: !!(attempt?.identitySecret || local.identitySecret),
+			steamID: String(attempt?.steamID || local.steamID || stored.steamID || ''),
+			personaName: String(attempt?.personaName || ''),
+			country: String(attempt?.country || local.country || stored.country || ''),
+			loginGeoCountry: String(attempt?.loginGeoCountry || ''),
+			hasWallet: !!wallet.hasWallet,
+			currency: wallet.currency ?? null,
+			currencyISO: String(wallet.currencyISO || ''),
+			balance: wallet.balance ?? null,
+			session: {
+				attemptId: attempt?.id ?? '',
+				status: attempt?.status ?? '',
+				hasRefreshToken: !!refreshToken,
+				refreshTokenExpiresAt: jwtExpiresAt(refreshToken),
+				savedAt: saved && typeof saved.updatedAt === 'string' ? saved.updatedAt : '',
+				cookieCount: Array.isArray(attempt?.cookies) ? attempt.cookies.length : 0,
+				webSessionAt: online ? attempt.webSessionAt ?? null : null,
+				nextCookieRefreshAt: online ? attempt.webSessionRefreshAt ?? null : null,
+				publicIP: String(attempt?.publicIP || ''),
+				machineName: fingerprint?.machineName ?? '',
+				userAgent: String(attempt?.userAgent || fingerprint?.userAgent || '')
+			},
+			gc: {cs2: !!attempt?.cs2GcConnected, tf2: !!attempt?.tf2GcConnected, inventoryCount: Number(attempt?.inventoryCount || 0)},
+			logs: (attempt?.logs ?? []).filter(entry => entry.level !== 'debug').map(entry => ({...entry}))
+		};
+	}
+
 	return {
+		detail,
 		listAccounts, saveAccounts, upsertAccounts, meta, importMaFiles, authCode, authCodes,
 		createGroup: groups.createGroup, renameGroup: groups.renameGroup, deleteGroup: groups.deleteGroup,
 		reorderGroups: groups.reorderGroups, moveToGroup: groups.moveToGroup,

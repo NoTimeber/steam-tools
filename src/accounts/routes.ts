@@ -15,6 +15,9 @@ export function accountRoutes(router: Router, {accounts, debug}: AccountRouteDep
 		res.json({success: true, attempts: accounts.listAttempts()});
 	});
 
+	// 账户详情(资料、钱包、会话、指纹、这次会话的完整日志;不含任何密钥)。query: { accountName }
+	router.get('/api/accounts/detail', keyedRoute('detail', req => accounts.detail(req.query), '读取账户详情失败'));
+
 	// 账户名单:多浏览器/多设备共享(加密库)。
 	// initialized 表示服务端是否写过名单——前端据此决定首次升级时是否把本地名单迁移上来,
 	// 避免"已删除账号"被某个仍有旧 localStorage 的浏览器重新推回。

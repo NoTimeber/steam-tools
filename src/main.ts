@@ -279,7 +279,10 @@ const findAttempt = (key: unknown) => findAttemptByKey(attempts, key);
 const cookieFlowAccounts = () => listCookieFlowAccounts(attempts.values(), profiles.cookiesFor);
 
 // 账号与登录路由的逻辑;拿到 WebSession 后查真实账户国家也在这里
-const accounts = createAccountService({store, sessions, profiles, fetch: proxy.fetch});
+const accounts = createAccountService({
+	store, sessions, profiles, fetch: proxy.fetch,
+	fingerprintOf: accountName => fingerprints.peekAccountFingerprint(accountName)
+});
 
 // ===== 业务模块 =====
 // GC 内购下单时要响应 Steam 的钱包扣款授权请求(steam-user 本身不处理这条消息)

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import {
 	ALL_ACCOUNTS, NO_GROUP, accountsCsv, activeFilterCount, collapseAttemptStatus, emptyFilters, formatBalance, lastErrorMessage, matchNameList,
 	matchesFilters, matchesGroupFilter, matchesSearch, moveGroupId, padSeq, parseAccountText, parseNameList, resolveSeqRange, sortAccounts,
-	walletTotals
+	walletTotals, formatDateTime, fromNow, groupLogsByDay, logLevel
 } from './accounts.ts';
 import type {FilterableAccount} from './accounts.ts';
 
@@ -151,4 +151,37 @@ test('按序号勾选:单侧、颠倒、越界', () => {
 test('登录失败原因:取最近一条 error 日志', () => {
 	assert.equal(lastErrorMessage([{level: 'error', message: 'old'}, {level: 'info', message: 'x'}, {level: 'error', message: 'InvalidPassword'}, {level: 'info', message: 'y'}]), 'InvalidPassword');
 	assert.equal(lastErrorMessage(undefined), '');
+});
+
+test('账户详情:相对时间(前 / 后)、完整时间、日志按天分组(新的在前)、日志级别', () => {
+	const now = new Date(2026, 9, 18, 12, 0, 0).getTime();
+	assert.equal(fromNow(null, now), '—');
+	assert.equal(fromNow(now - 30_000, now), '刚刚');
+	assert.equal(fromNow(now + 30_000, now), '马上');
+	assert.equal(fromNow(now - 3 * 3600_000, now), '3 小时前');
+	assert.equal(fromNow(now + 11 * 3600_000 + 59 * 60_000, now), '11 小时后');
+	assert.equal(fromNow(now + 180 * 86400_000, now), '6 个月后');
+	assert.equal(fromNow(now - 400 * 86400_000, now), '1 年前');
+	assert.equal(formatDateTime(new Date(2026, 9, 18, 9, 5, 7).getTime()), '2026-10-18 09:05:07');
+	assert.equal(formatDateTime(0), '—');
+
+	const at = (month: number, day: number, hour: number) => new Date(2026, month - 1, day, hour).getTime();
+	const logs = [
+		{message: 'old', at: new Date(2025, 11, 31, 23).getTime()},
+		{message: 'oct16', at: at(10, 16, 8)},
+		{message: 'y1', at: at(10, 17, 9)},
+		{message: 'y2', at: at(10, 17, 10)},
+		{message: 't1', at: at(10, 18, 11)},
+		{message: 'nodate'}
+	];
+	assert.deepEqual(groupLogsByDay(logs, now).map(day => [day.label, day.entries.map(entry => entry.message)]), [
+		['今天', ['t1']], ['昨天', ['y2', 'y1']], ['10月16日', ['oct16']], ['2025年12月31日', ['old']], ['时间未知', ['nodate']]
+	]);
+	assert.deepEqual(groupLogsByDay([], now), []);
+
+	assert.deepEqual(logLevel('error'), {label: '错误', type: 'error'});
+	assert.deepEqual(logLevel('warn'), {label: '警告', type: 'warning'});
+	assert.deepEqual(logLevel('success'), {label: '成功', type: 'success'});
+	assert.deepEqual(logLevel('info'), {label: '信息', type: 'default'});
+	assert.deepEqual(logLevel('trace'), {label: 'trace', type: 'default'});
 });

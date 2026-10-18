@@ -338,3 +338,89 @@ export function lastErrorMessage(logs: ReadonlyArray<{level: string; message: st
 	}
 	return '';
 }
+
+// ===== 账户详情 =====
+
+const TIME_STEPS: ReadonlyArray<[number, string]> = [[60, '分钟'], [3600, '小时'], [86400, '天'], [2592000, '个月'], [31536000, '年']];
+
+/** 相对时间:过去的「3 小时前」,将来的「6 个月后」;一分钟以内「刚刚」/「马上」;没有时间「—」 */
+export function fromNow(time: number | null | undefined, now: number = Date.now()): string {
+	if (!time) {
+		return '—';
+	}
+	const diff = Math.round((time - now) / 1000);
+	const seconds = Math.abs(diff);
+	if (seconds < 60) {
+		return diff <= 0 ? '刚刚' : '马上';
+	}
+	let label = '';
+	for (const [size, unit] of TIME_STEPS) {
+		if (seconds >= size) {
+			label = `${Math.floor(seconds / size)} ${unit}`;
+		}
+	}
+	return label + (diff < 0 ? '前' : '后');
+}
+
+const pad2 = (value: number) => String(value).padStart(2, '0');
+
+function dayKey(time: number): string {
+	const date = new Date(time);
+	return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+}
+
+/** 完整时间:2026-10-18 09:30:05 */
+export function formatDateTime(time: number | null | undefined): string {
+	if (!time) {
+		return '—';
+	}
+	const date = new Date(time);
+	return `${dayKey(time)} ${pad2(date.getHours())}:${pad2(date.getMinutes())}:${pad2(date.getSeconds())}`;
+}
+
+export interface LogDay<T> {
+	key: string;
+	label: string;
+	entries: T[];
+}
+
+/** 日志按天分组,新的在前:今天 / 昨天 / 10月16日(不是今年的带年份);没有时间的放最后「时间未知」 */
+export function groupLogsByDay<T extends {at?: number}>(logs: readonly T[], now: number = Date.now()): Array<LogDay<T>> {
+	const today = dayKey(now);
+	const yesterday = dayKey(now - 86_400_000);
+	const thisYear = new Date(now).getFullYear();
+	const groups = new Map<string, LogDay<T>>();
+	for (const entry of [...logs].reverse()) {
+		const key = entry.at ? dayKey(entry.at) : '';
+		let group = groups.get(key);
+		if (!group) {
+			let label = '时间未知';
+			if (entry.at) {
+				const date = new Date(entry.at);
+				const monthDay = `${date.getMonth() + 1}月${date.getDate()}日`;
+				label = key === today ? '今天' : key === yesterday ? '昨天' : date.getFullYear() === thisYear ? monthDay : `${date.getFullYear()}年${monthDay}`;
+			}
+			group = {key, label, entries: []};
+			groups.set(key, group);
+		}
+		group.entries.push(entry);
+	}
+	const list = [...groups.values()];
+	return [...list.filter(group => group.key), ...list.filter(group => !group.key)];
+}
+
+/** 日志级别的叫法和标签颜色 */
+export function logLevel(level: string): {label: string; type: 'success' | 'info' | 'warning' | 'error' | 'default'} {
+	switch (level) {
+		case 'success':
+			return {label: '成功', type: 'success'};
+		case 'warn':
+			return {label: '警告', type: 'warning'};
+		case 'error':
+			return {label: '错误', type: 'error'};
+		case 'info':
+			return {label: '信息', type: 'default'};
+		default:
+			return {label: level, type: 'default'};
+	}
+}

@@ -7,7 +7,7 @@ import {normalizeStoredAccount} from '../store/accounts.ts';
 import type {AccountStore, StoredAccount} from '../store/accounts.ts';
 import {MIGRATIONS} from '../store/schema.ts';
 import {createCountryLookup} from './country.ts';
-import {createAccountService, createProfiles, resolveAccountCountry} from './index.ts';
+import {createAccountService, createProfiles, jwtExpiresAt, resolveAccountCountry} from './index.ts';
 import {findStoredAccount, mergeClientAccountSecrets, publicStoredAccount} from './profiles.ts';
 
 const COOKIES = 'cookies';
@@ -452,4 +452,46 @@ test('消费记录:只读名单里的账号;没网页会话 409;在线账号用�
 	}
 	// 测试里的 fetch 一律回 500(重试后)读取失败
 	assert.match(String(svc.getHistory('alpha')?.error), /消费记录页 HTTP 500/);
+});
+
+test('账户详情:资料、钱包、会话、GC、这次会话的日志(不含 debug)拼在一起;不带任何密钥、cookie、refreshToken', () => {
+	const exp = 1_800_000_000;
+	const token = ['header', Buffer.from(JSON.stringify({sub: '765', exp})).toString('base64url'), 'signature'].join('.');
+	const {svc, sessions} = service([{accountName: 'alpha', password: 'pw-list'}], {}, {alpha: {shared_secret: 'SHARED-SECRET-X', identity_secret: 'IDENTITY-SECRET-X'}});
+	assert.throws(() => svc.detail({accountName: 'nobody'}), (err: Error & {statusCode?: number}) => err.statusCode === 404);
+
+	const offline = svc.detail({accountName: ' ALPHA '});
+	assert.equal(offline.accountName, 'alpha');
+	assert.deepEqual([offline.hasPassword, offline.hasSharedSecret, offline.hasMaFile, offline.hasIdentitySecret], [true, true, true, true]);
+	assert.deepEqual([offline.session.status, offline.session.hasRefreshToken, offline.session.refreshTokenExpiresAt], ['', true, null], '会话库里存的 refreshToken 不是 JWT,读不出过期时间');
+	assert.deepEqual([offline.session.webSessionAt, offline.session.nextCookieRefreshAt, offline.logs], [null, null, []]);
+
+	const attempt = sessions.createAttempt({accountName: 'alpha'});
+	Object.assign(attempt, {
+		status: 'web_session', refreshToken: token, personaName: '阿尔法', steamID: '76561190000000001', country: 'US', loginGeoCountry: 'JP',
+		hasWallet: true, currency: 1, currencyISO: 'USD', balance: 12.5, cookies: ['steamLoginSecure=secret-cookie', 'sessionid=s'],
+		webSessionAt: 1000, webSessionRefreshAt: 2000, publicIP: '203.0.113.9', userAgent: 'UA-NEW', cs2GcConnected: true, inventoryCount: 3,
+		logs: [{level: 'info', time: '10:00:00', message: '已获取 WebSession cookies: 2', at: 1000}, {level: 'debug', time: '10:00:01', message: 'noisy'}]
+	});
+	const online = svc.detail({accountName: 'alpha'});
+	assert.deepEqual(online.session, {
+		attemptId: attempt.id, status: 'web_session', hasRefreshToken: true, refreshTokenExpiresAt: exp * 1000, savedAt: '', cookieCount: 2,
+		webSessionAt: 1000, nextCookieRefreshAt: 2000, publicIP: '203.0.113.9', machineName: '', userAgent: 'UA-NEW'
+	});
+	assert.deepEqual([online.personaName, online.loginGeoCountry, online.balance, online.currencyISO], ['阿尔法', 'JP', 12.5, 'USD']);
+	assert.deepEqual(online.gc, {cs2: true, tf2: false, inventoryCount: 3});
+	assert.deepEqual(online.logs.map(entry => entry.message), ['已获取 WebSession cookies: 2']);
+	const text = JSON.stringify(online);
+	for (const secret of ['pw-list', 'SHARED-SECRET-X', 'IDENTITY-SECRET-X', token, 'secret-cookie', 'RT-saved']) {
+		assert.ok(!text.includes(secret), `详情里不该有 ${secret}`);
+	}
+});
+
+test('JWT 过期时间:从中间一段读 exp;不是 JWT、没有 exp、坏的都给 null', () => {
+	const jwt = (payload: unknown) => ['h', Buffer.from(JSON.stringify(payload)).toString('base64url'), 's'].join('.');
+	assert.equal(jwtExpiresAt(jwt({exp: 1700000000})), 1700000000_000);
+	assert.equal(jwtExpiresAt(jwt({sub: 'x'})), null);
+	assert.equal(jwtExpiresAt('not-a-jwt'), null);
+	assert.equal(jwtExpiresAt('a.!!!.b'), null);
+	assert.equal(jwtExpiresAt(''), null);
 });

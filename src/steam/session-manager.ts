@@ -46,6 +46,8 @@ export interface LogEntry {
 	level: string;
 	time: string;
 	message: string;
+	/** 记下的时间(毫秒);详情页按日期分组用 */
+	at?: number;
 }
 
 export interface GuardRequest {
@@ -109,6 +111,8 @@ export interface Attempt {
 	reconnectGaveUp?: boolean;
 	/** 用 refreshToken 登录失败时改用的账密登录参数(会话存在期间一直留着,之后的重连还要用) */
 	passwordFallback?: LogonDetails | null;
+	/** 上次拿到网页 cookie 的时间(毫秒) */
+	webSessionAt?: number;
 	/** 到这个时间(毫秒)定时重新取网页 cookie;拿到 WebSession 时排好 */
 	webSessionRefreshAt?: number;
 	/** 已被新会话替换或随账号删除:不再推送、不再重连 */
@@ -228,7 +232,8 @@ export function createSessionManager(options: SessionManagerOptions) {
 	// ===== 日志与推送 =====
 
 	function addLog(attempt: Attempt, level: string, message: string): void {
-		attempt.logs.push({level, time: new Date().toLocaleTimeString('zh-CN', {hour12: false}), message});
+		const now = Date.now();
+		attempt.logs.push({level, time: new Date(now).toLocaleTimeString('zh-CN', {hour12: false}), message, at: now});
 		if (attempt.logs.length > LOG_LIMIT) {
 			attempt.logs.shift();
 		}
@@ -881,7 +886,8 @@ export function createSessionManager(options: SessionManagerOptions) {
 			attempt.nextReconnectAt = 0;
 			attempt.reconnectBlocked = false;
 			attempt.reconnectGaveUp = false;
-			attempt.webSessionRefreshAt = Date.now() + timing.webSessionRefreshMs + Math.floor(Math.random() * timing.webSessionRefreshJitterMs);
+			attempt.webSessionAt = Date.now();
+			attempt.webSessionRefreshAt = attempt.webSessionAt + timing.webSessionRefreshMs + Math.floor(Math.random() * timing.webSessionRefreshJitterMs);
 			attempt.status = 'web_session';
 			attempt.webSessionID = sessionID || '';   // 商店结算需要的 sessionid(CSRF)
 			attempt.cookies = Array.isArray(cookies) ? cookies : [];

@@ -4,7 +4,7 @@
 import {computed, reactive} from 'vue';
 import {api, errorText} from '../api/http.ts';
 import {socket} from '../api/socket.ts';
-import type {AccountGroup, AccountGroupState, AccountProfile, GameId, PublicAttempt, PublicHistory, StoredAccount} from '../api/types.ts';
+import type {AccountDetail, AccountGroup, AccountGroupState, AccountProfile, GameId, PublicAttempt, PublicHistory, StoredAccount} from '../api/types.ts';
 import {ALL_ACCOUNTS, NO_GROUP, collapseAttemptStatus, emptyFilters, lastErrorMessage, matchesFilters, matchesSearch, parseAccountText, sortAccounts} from '../lib/accounts.ts';
 import type {AccountFilters, LoginStatus, SortKey, SortOrder} from '../lib/accounts.ts';
 import {addLog} from './logs.ts';
@@ -544,4 +544,10 @@ export function connectedGame(row: AccountRow): GameId | '' {
 
 export function canUseGc(row: AccountRow): boolean {
 	return !!row.attemptId && row.status === '登录成功';
+}
+
+/** 账户详情:资料、钱包、会话、指纹、这次会话的完整日志 */
+export async function fetchAccountDetail(accountName: string): Promise<AccountDetail> {
+	const data = await api.get<{detail: AccountDetail}>('/api/accounts/detail?accountName=' + encodeURIComponent(accountName));
+	return data.detail;
 }

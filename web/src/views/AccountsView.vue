@@ -1,17 +1,23 @@
 <script setup lang="ts">
-// 账户管理:面包屑 + 大标题 + 右上角操作按钮,下面「账户」「账户分组」两个标签页(账户分组可进单个分组的编辑页)。
-// 账户列表在 accounts/AccountsTab.vue,分组在 accounts/GroupsTab.vue;这里管导入、导出、新建 / 删除分组、Steam Guard 验证码。
+// 账户管理:面包屑 + 大标题 + 右上角操作按钮,下面「账户」「账户分组」两个标签页(账户分组可进单个分组的编辑页,
+// 点账户名进账户详情页)。账户列表在 accounts/AccountsTab.vue,分组在 accounts/GroupsTab.vue,详情在 accounts/AccountDetail.vue;
+// 这里管导入、导出、新建 / 删除分组、Steam Guard 验证码,以及详情页右上角的登录 / 登出、消费记录、代理。
 import {computed, reactive, ref, watch} from 'vue';
 import {NAlert, NButton, NCard, NInput, NModal, NSpace, NTab, NTabs, useDialog, useMessage} from 'naive-ui';
 import {errorText} from '../api/http.ts';
 import AppIcon from '../components/AppIcon.vue';
 import {accountsCsv} from '../lib/accounts.ts';
 import {downloadCsv} from '../lib/csv.ts';
-import {accounts, createGroup, deleteGroup, groupName, importAccountText, importMaFiles, submitGuardCode, visibleRows} from '../stores/accounts.ts';
+import {
+	accounts, createGroup, deleteGroup, groupName, importAccountText, importMaFiles, loginAccount, logoutAccount, submitGuardCode, visibleRows
+} from '../stores/accounts.ts';
 import type {AccountRow} from '../stores/accounts.ts';
 import {refreshAuthCodes} from '../stores/authcodes.ts';
+import AccountDetail from './accounts/AccountDetail.vue';
 import AccountsTab from './accounts/AccountsTab.vue';
 import GroupsTab from './accounts/GroupsTab.vue';
+import HistoryModal from './accounts/HistoryModal.vue';
+import ProxyModal from './accounts/ProxyModal.vue';
 
 const message = useMessage();
 const dialog = useDialog();
@@ -31,9 +37,40 @@ watch(editingGroup, group => {
 function openTab(value: 'accounts' | 'groups'): void {
 	tab.value = value;
 	editingId.value = '';
+	detailName.value = '';
+}
+
+// ===== 账户详情 =====
+/** 正在看详情的账号;空是列表 */
+const detailName = ref('');
+const detailRow = computed(() => accounts.rows.find(row => row.accountName.toLowerCase() === detailName.value.toLowerCase()));
+const historyAccount = ref('');
+const proxyAccounts = ref<string[]>([]);
+const detailOnline = computed(() => detailRow.value?.status === '登录成功' || detailRow.value?.status === '登录中');
+
+// 看着的账号被删掉了就回列表
+watch(detailRow, row => {
+	if (detailName.value && !row && accounts.loaded) {
+		detailName.value = '';
+	}
+});
+
+function openDetail(accountName: string): void {
+	tab.value = 'accounts';
+	detailName.value = accountName;
+}
+
+function toggleDetailLogin(): void {
+	const row = detailRow.value;
+	if (row) {
+		void (detailOnline.value ? logoutAccount(row) : loginAccount(row));
+	}
 }
 
 const header = computed(() => {
+	if (detailName.value) {
+		return {crumbs: ['账户', detailRow.value?.accountName ?? detailName.value], title: detailRow.value?.accountName ?? detailName.value};
+	}
 	if (editingGroup.value) {
 		return {crumbs: ['账户', '账户分组', editingGroup.value.name, '编辑'], title: `编辑 ${editingGroup.value.name}`};
 	}
@@ -177,7 +214,14 @@ async function submitGuard(): Promise<void> {
 				<h1 class="page-title">{{ header.title }}</h1>
 			</div>
 			<NSpace :size="8">
-				<template v-if="editingGroup">
+				<template v-if="detailName">
+					<NButton :type="detailOnline ? 'default' : 'primary'" :disabled="!detailRow" @click="toggleDetailLogin">
+						<template #icon><AppIcon :name="detailOnline ? 'logout' : 'login'" :size="16" /></template>{{ detailOnline ? '登出' : '登录' }}
+					</NButton>
+					<NButton @click="historyAccount = detailName"><template #icon><AppIcon name="receipt" :size="16" /></template>消费记录</NButton>
+					<NButton @click="proxyAccounts = [detailName]"><template #icon><AppIcon name="globe" :size="16" /></template>代理</NButton>
+				</template>
+				<template v-else-if="editingGroup">
 					<NButton type="error" secondary @click="confirmDeleteGroup(editingGroup.id)">
 						<template #icon><AppIcon name="trash" :size="16" /></template>删除
 					</NButton>
@@ -195,7 +239,7 @@ async function submitGuard(): Promise<void> {
 			</NSpace>
 		</header>
 
-		<NTabs v-if="!editingGroup" type="line" :value="tab" class="page-tabs" @update:value="openTab">
+		<NTabs v-if="!editingGroup && !detailName" type="line" :value="tab" class="page-tabs" @update:value="openTab">
 			<NTab name="accounts"><span class="tab-label"><AppIcon name="users" :size="16" />账户</span></NTab>
 			<NTab name="groups"><span class="tab-label"><AppIcon name="folder" :size="16" />账户分组</span></NTab>
 		</NTabs>
@@ -215,7 +259,8 @@ async function submitGuard(): Promise<void> {
 
 		<NAlert v-if="accounts.error" type="error" :bordered="false">读取账户名单失败:{{ accounts.error }}</NAlert>
 
-		<AccountsTab v-if="tab === 'accounts' && !editingGroup" @new-group="openNewGroup" />
+		<AccountDetail v-if="detailName" :account-name="detailName" />
+		<AccountsTab v-else-if="tab === 'accounts' && !editingGroup" @new-group="openNewGroup" @open="openDetail" />
 		<GroupsTab v-else :editing-id="editingId" @edit="(id: string) => (editingId = id)" @delete="confirmDeleteGroup" @back="editingId = ''" />
 
 		<NModal v-model:show="importModal.open" :mask-closable="!importModal.saving">
@@ -248,6 +293,8 @@ async function submitGuard(): Promise<void> {
 				</template>
 			</NCard>
 		</NModal>
+		<HistoryModal :account-name="historyAccount" @close="historyAccount = ''" />
+		<ProxyModal :account-names="proxyAccounts" @close="proxyAccounts = []" />
 	</div>
 </template>
 

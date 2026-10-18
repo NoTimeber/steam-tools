@@ -22,7 +22,48 @@ export interface PublicAttempt {
 	inventoryCount?: number;
 	inventorySource?: string;
 	guard?: {type: 'email' | 'mobile' | string; domain?: string | null; lastCodeWrong?: boolean} | null;
-	logs?: Array<{level: string; time: string; message: string}>;
+	logs?: AttemptLog[];
+}
+
+/** 会话日志的一条;at 是记下的时间(毫秒) */
+export interface AttemptLog {
+	level: string;
+	time: string;
+	message: string;
+	at?: number;
+}
+
+/** 账户详情(src/accounts/index.ts 的 AccountDetail;不含任何密钥、cookie、refreshToken 本身) */
+export interface AccountDetail {
+	accountName: string;
+	remember: boolean;
+	hasPassword: boolean;
+	hasSharedSecret: boolean;
+	hasMaFile: boolean;
+	hasIdentitySecret: boolean;
+	steamID: string;
+	personaName: string;
+	country: string;
+	loginGeoCountry: string;
+	hasWallet: boolean;
+	currency: number | null;
+	currencyISO: string;
+	balance: number | null;
+	session: {
+		attemptId: string;
+		status: string;
+		hasRefreshToken: boolean;
+		refreshTokenExpiresAt: number | null;
+		savedAt: string;
+		cookieCount: number;
+		webSessionAt: number | null;
+		nextCookieRefreshAt: number | null;
+		publicIP: string;
+		machineName: string;
+		userAgent: string;
+	};
+	gc: {cs2: boolean; tf2: boolean; inventoryCount: number};
+	logs: AttemptLog[];
 }
 
 /** 名单里的账号(src/accounts/groups.ts 的 publicAccounts;不含密码) */

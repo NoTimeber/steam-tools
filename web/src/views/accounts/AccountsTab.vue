@@ -6,6 +6,7 @@ import {NBadge, NButton, NCheckbox, NDataTable, NDropdown, NInput, NInputNumber,
 import type {DataTableColumns, DataTableRowKey, DataTableSortState, DropdownOption} from 'naive-ui';
 import type {GameId} from '../../api/types.ts';
 import AppIcon from '../../components/AppIcon.vue';
+import {copyText} from '../../components/clipboard.ts';
 import type {IconName} from '../../components/AppIcon.vue';
 import {dropdownWithTip, withTip} from '../../components/tip.ts';
 import {ALL_ACCOUNTS, NO_GROUP, SESSION_LABEL, STATUS_TAG, activeFilterCount, currencySymbol, formatBalance, padSeq, resolveSeqRange, walletTotals} from '../../lib/accounts.ts';
@@ -21,7 +22,7 @@ import {loadProxies, proxy} from '../../stores/proxy.ts';
 import HistoryModal from './HistoryModal.vue';
 import ProxyModal from './ProxyModal.vue';
 
-const emit = defineEmits<{'new-group': [rows: AccountRow[]]}>();
+const emit = defineEmits<{'new-group': [rows: AccountRow[]]; open: [accountName: string]}>();
 const message = useMessage();
 const dialog = useDialog();
 
@@ -162,17 +163,7 @@ function onMove(key: string, rows: AccountRow[]): void {
 
 // ===== 令牌验证码 =====
 async function copyCode(code: string): Promise<void> {
-	try {
-		await navigator.clipboard.writeText(code);
-	} catch {
-		// 不是 HTTPS 时没有 clipboard,退回老办法
-		const input = document.createElement('textarea');
-		input.value = code;
-		document.body.appendChild(input);
-		input.select();
-		document.execCommand('copy');
-		input.remove();
-	}
+	await copyText(code);
 	message.success(`已复制验证码 ${code}`);
 }
 
@@ -238,7 +229,7 @@ const columns = computed<DataTableColumns<AccountRow>>(() => {
 		width: 150,
 		ellipsis: {tooltip: true},
 		...sortable('accountName'),
-		render: row => h('span', {class: 'account-name'}, row.accountName)
+		render: row => withTip(h('a', {class: 'account-name account-link', onClick: () => emit('open', row.accountName)}, row.accountName), '查看账户详情和登录日志')
 	});
 	if (show('group')) {
 		list.push({
@@ -708,6 +699,16 @@ function confirmDelete(): void {
 
 :deep(.account-name) {
 	font-weight: 500;
+}
+
+:deep(.account-link) {
+	color: var(--text);
+	cursor: pointer;
+}
+
+:deep(.account-link:hover) {
+	color: var(--accent-text);
+	text-decoration: underline;
 }
 
 :deep(.clickable) {

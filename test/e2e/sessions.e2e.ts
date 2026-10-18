@@ -158,6 +158,21 @@ describe('Steam 会话', () => {
 			assert.equal(logons[0]?.details?.password, undefined);
 		});
 
+		test('账户详情:在线、有 refreshToken、带这次会话的日志;不带密码和 refreshToken 本身', async () => {
+			const res = await client.get('/api/accounts/detail?accountName=alpha');
+			assert.equal(res.status, 200, res.text);
+			const detail = res.json.detail;
+			assert.equal(detail.accountName, 'alpha');
+			assert.equal(detail.session.status, 'web_session');
+			assert.equal(detail.session.hasRefreshToken, true);
+			assert.ok(detail.session.cookieCount > 0);
+			assert.ok(detail.session.webSessionAt > 0 && detail.session.nextCookieRefreshAt > detail.session.webSessionAt, '下次定时刷新排在拿到 cookie 之后');
+			assert.ok(detail.session.machineName, '有机器名');
+			assert.ok(detail.logs.some((entry: {message: string; at?: number}) => /用保存的 refreshToken 登录/.test(entry.message) && entry.at));
+			assert.ok(!res.text.includes('pw-good') && !res.text.includes('RT-GOOD-alpha'), '不带密码和 refreshToken');
+			assert.equal((await client.get('/api/accounts/detail?accountName=nobody')).status, 404);
+		});
+
 		test('bravo:refreshToken 失效后改用密码', async () => {
 			const logons = server.steamEvents().filter(e => e.event === 'logOn'
 				&& (e.details?.refreshToken === 'RT-EXPIRED' || e.details?.accountName === 'bravo'));
