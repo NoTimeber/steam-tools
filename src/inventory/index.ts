@@ -1,4 +1,5 @@
-// 库存(从 app/server.js 移来):库存页和终端机开箱页用。以社区库存为准,拉失败时用 GC 库存兜底。
+// 库存(从 app/server.js 移来):库存页和终端机开箱页用。以社区库存为准(只要网页登录拿到 cookie,不用连 GC);
+// 连着 GC 时用它校正交易冷却,社区拉失败时用 GC 库存兜底。
 //
 // 缓存规则:
 //   - 社区来源的快照 15 秒内直接返回;
@@ -7,7 +8,7 @@
 //   - 同一账号同时只发一次社区请求,其余调用方等同一个 Promise(库存页和终端机同时打开时不会一个拿到旧快照)。
 
 import type {Attempt} from '../steam/session-manager.ts';
-import {fetchCommunityInventory, inventoryError} from './community.ts';
+import {fetchCommunityInventory} from './community.ts';
 import type {InventoryItem, InventorySnapshot} from './community.ts';
 import {buildGcInventoryItemMap, buildGcInventorySnapshot, getGcInventoryItems} from './gc.ts';
 import type {DescribeGcItem} from './gc.ts';
@@ -71,6 +72,7 @@ export function createInventoryService(options: InventoryServiceOptions) {
 		attempt.inventoryCount = countGcItems(attempt);
 		if (!s.inventoryCache || s.inventoryCache.source === 'gc') {
 			s.inventoryCache = gcSnapshot(attempt);
+			attempt.inventorySource = 'gc';
 		}
 	}
 
@@ -80,9 +82,6 @@ export function createInventoryService(options: InventoryServiceOptions) {
 
 	async function get(attempt: Attempt, opts: {forceRefresh?: boolean} = {}): Promise<PublicInventory> {
 		const s = state(attempt);
-		if (!attempt.gcConnected) {
-			throw inventoryError(409, '当前账号尚未连接 GC');
-		}
 		const cache = s.inventoryCache;
 		const cooling = !!s.communityInvTriedAt && now() - s.communityInvTriedAt < COMMUNITY_RETRY_COOLDOWN_MS;
 		if (!opts.forceRefresh && isFresh(cache) && (cache.source === 'community' || cooling)) {

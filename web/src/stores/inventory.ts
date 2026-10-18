@@ -1,4 +1,4 @@
-// 库存:选一个已连 CS2 GC 的账号,拉 /api/inventory/:attemptId(社区库存为准,拉不到时用 GC 缓存)。
+// 库存:选一个已登录的账号,拉 /api/inventory/:attemptId(社区库存为准,不用连 GC;连着 CS2 GC 时拉不到用 GC 缓存)。
 // 状态放在模块里,切到别的页面再回来不用重新加载。
 
 import {computed, reactive} from 'vue';
@@ -24,22 +24,22 @@ export const inventory = reactive({
 
 let version = 0;
 
-/** 能看库存的账号:已登录且连着 CS2 GC */
-export const gcAccounts = computed<AccountRow[]>(() => accounts.rows.filter(row => row.cs2GcConnected && !!row.attemptId));
+/** 能看库存的账号:已登录的(要网页 cookie,不用连 GC) */
+export const inventoryAccounts = computed<AccountRow[]>(() => accounts.rows.filter(row => !!row.attemptId && row.status === '登录成功'));
 
-export const selectedAccount = computed<AccountRow | null>(() => gcAccounts.value.find(row => row.key === inventory.selectedKey) ?? null);
+export const selectedAccount = computed<AccountRow | null>(() => inventoryAccounts.value.find(row => row.key === inventory.selectedKey) ?? null);
 
 function clearLoaded(): void {
 	version++;
 	Object.assign(inventory, {loadedKey: '', items: [], source: '', fetchedAt: '', error: '', loading: false});
 }
 
-/** 选中的账号断开了 GC(或还没选)时,换成第一个能用的账号 */
+/** 选中的账号登出了(或还没选)时,换成第一个能用的账号 */
 export function ensureSelection(): AccountRow | null {
 	if (selectedAccount.value) {
 		return selectedAccount.value;
 	}
-	const first = gcAccounts.value[0] ?? null;
+	const first = inventoryAccounts.value[0] ?? null;
 	inventory.selectedKey = first?.key ?? '';
 	clearLoaded();
 	return first;

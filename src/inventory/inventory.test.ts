@@ -149,15 +149,21 @@ test('库存:社区失败用 GC 兜底并冷却 30 秒;冷却期内 GC 快照可
 	assert.equal((await h.service.get(h.attempt)).source, 'community');
 });
 
-test('库存:GC 来源的新鲜缓存不短路(还是去拉社区);没连 GC 409;GC 也是空的就把社区错误抛出去', async () => {
+test('库存:GC 来源的新鲜缓存不短路(还是去拉社区);没连 GC 也照样拉社区;GC 也是空的就把社区错误抛出去', async () => {
 	const h = harness([page(['1'])]);
 	h.service.refreshFromGc(h.attempt);
-	assert.equal(h.attempt.inventoryCount, 1);
+	assert.deepEqual([h.attempt.inventoryCount, h.attempt.inventorySource], [1, 'gc']);
 	assert.equal((await h.service.get(h.attempt)).source, 'community');
+	h.service.refreshFromGc(h.attempt);
+	assert.deepEqual([h.attempt.inventoryCount, h.attempt.inventorySource], [1, 'community'], 'GC 物品变了只更新数量,社区缓存留着');
 
-	const off = harness([]);
-	(off.attempt as {gcConnected: boolean}).gcConnected = false;
-	await assert.rejects(off.service.get(off.attempt), (err: Error & {statusCode?: number}) => err.statusCode === 409 && err.message === '当前账号尚未连接 GC');
+	const off = harness([page(['1', '2'])]);
+	Object.assign(off.attempt, {gcConnected: false, csgo: null});
+	const noGc = await off.service.get(off.attempt);
+	assert.deepEqual([noGc.source, noGc.itemCount, off.requests], ['community', 2, ['first']]);
+	const offFail = harness(['fail']);
+	Object.assign(offFail.attempt, {gcConnected: false, csgo: null});
+	await assert.rejects(offFail.service.get(offFail.attempt), (err: Error & {statusCode?: number}) => err.statusCode === 409 && err.message === 'Forbidden', '没连 GC 就没有兜底');
 
 	const empty = harness(['fail']);
 	(empty.attempt.csgo as {inventory: unknown[]}).inventory = [];
@@ -198,7 +204,7 @@ test('GC 模块:连上/断开更新连接标记;CS2 库存变化刷新快照;终
 	const tf2 = attempt.tf2 as FakeModule;
 
 	csgo.emit('connectedToGC');
-	assert.deepEqual([attempt.cs2GcConnected, attempt.tf2GcConnected, attempt.gcConnected, attempt.activeGame, attempt.inventorySource], [true, false, true, 'cs2', 'gc']);
+	assert.deepEqual([attempt.cs2GcConnected, attempt.tf2GcConnected, attempt.gcConnected, attempt.activeGame], [true, false, true, 'cs2']);
 	csgo.emit('itemAcquired');
 	csgo.emit('itemRemoved');
 	assert.deepEqual(refreshed, ['refresh', 'refresh', 'refresh']);

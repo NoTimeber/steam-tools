@@ -1,18 +1,18 @@
 <script setup lang="ts">
-// 库存管理:选一个已连 CS2 GC 的账号看库存,可按分类筛选。
+// 库存管理:选一个已登录的账号看库存(不用连 GC),可按分类筛选。
 import {computed, h, onMounted, watch} from 'vue';
 import {NButton, NDataTable, NSelect, NSpace, NTag} from 'naive-ui';
 import type {DataTableColumns, SelectOption} from 'naive-ui';
 import {formatBalance} from '../lib/accounts.ts';
 import {categoryCounts, formatInventorySource, formatTradableAt, inventoryCategoryOf, itemSubtitle} from '../lib/inventory.ts';
 import type {InventoryItem} from '../lib/inventory.ts';
-import {ensureLoaded, gcAccounts, inventory, refreshInventory, selectAccount, selectedAccount} from '../stores/inventory.ts';
+import {ensureLoaded, inventory, inventoryAccounts, refreshInventory, selectAccount, selectedAccount} from '../stores/inventory.ts';
 
 onMounted(ensureLoaded);
-// 有账号连上/断开 CS2 GC 时,选中项可能要换
-watch(() => gcAccounts.value.map(row => row.key).join(','), ensureLoaded);
+// 有账号登录/登出时,选中项可能要换
+watch(() => inventoryAccounts.value.map(row => row.key).join(','), ensureLoaded);
 
-const accountOptions = computed<SelectOption[]>(() => gcAccounts.value.map(row => ({
+const accountOptions = computed<SelectOption[]>(() => inventoryAccounts.value.map(row => ({
 	value: row.key,
 	label: `${row.accountName}(${row.country || '-'} · ${formatBalance(row)} · 物品 ${row.inventoryCount})`
 })));
@@ -35,7 +35,7 @@ function setCategory(value: string): void {
 const visibleItems = computed(() => (activeCategory.value === 'all' ? items.value : items.value.filter(item => inventoryCategoryOf(item) === activeCategory.value)));
 
 const emptyText = computed(() => {
-	if (!selectedAccount.value) return '请先在「账户管理」里连接 CS2 GC,再来这里选账户';
+	if (!selectedAccount.value) return '请先在「账户管理」里登录账号,再来这里选账户';
 	if (inventory.loading) return '正在加载库存...';
 	if (inventory.error) return inventory.error;
 	if (!loaded.value) return '点「刷新库存」开始加载';
@@ -83,7 +83,7 @@ const columns: DataTableColumns<InventoryItem> = [
 			<div>
 				<h1>库存管理</h1>
 				<div class="module-counts">
-					<span>GC在线账户:{{ gcAccounts.length }}</span>
+					<span>在线账户:{{ inventoryAccounts.length }}</span>
 					<span>物品数:{{ items.length }}</span>
 					<span>来源:{{ loaded ? formatInventorySource(inventory.source) : '-' }}</span>
 				</div>
@@ -93,8 +93,8 @@ const columns: DataTableColumns<InventoryItem> = [
 					class="account-select"
 					:value="selectedAccount?.key ?? null"
 					:options="accountOptions"
-					:disabled="!gcAccounts.length"
-					placeholder="暂无已连接 CS2 GC 的账户"
+					:disabled="!inventoryAccounts.length"
+					placeholder="暂无已登录的账户"
 					@update:value="(key: string) => selectAccount(key)"
 				/>
 				<NButton :disabled="!selectedAccount" :loading="inventory.loading" @click="refreshInventory({forceRefresh: true})">刷新库存</NButton>
@@ -105,7 +105,7 @@ const columns: DataTableColumns<InventoryItem> = [
 			<span>账号:{{ selectedAccount.accountName }}</span>
 			<span>国家:{{ selectedAccount.country || '-' }}</span>
 			<span>余额:{{ formatBalance(selectedAccount) }}</span>
-			<span>CS2 GC:已连接</span>
+			<span>CS2 GC:{{ selectedAccount.cs2GcConnected ? '已连接' : '未连接' }}</span>
 			<span>来源:{{ loaded ? formatInventorySource(inventory.source) : '-' }}</span>
 			<span>更新时间:{{ fetchedAt }}</span>
 		</div>

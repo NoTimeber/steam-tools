@@ -149,7 +149,7 @@ export async function fetchCommunityInventory(params: CommunityFetchParams, http
 		throw inventoryError(409, '当前账号缺少 SteamID，无法读取库存');
 	}
 	if (!params.cookies.length) {
-		throw inventoryError(409, '当前账号没有可用的 WebSession cookies');
+		throw inventoryError(409, '当前账号没有可用的 WebSession cookies,请重新登录');
 	}
 	const cookieHeader = params.cookies.join('; ');
 	const items: InventoryItem[] = [];

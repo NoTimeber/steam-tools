@@ -153,6 +153,15 @@ describe('GC', () => {
 		assert.equal((await client.get('/api/terminal/state?accountId=nobody')).status, 404);
 	});
 
+	test('库存不用连 GC:断开 GC 后照样拉社区库存', async () => {
+		writeFileSync(join(appRoot, 'fake-inventory.json'), JSON.stringify({}));
+		assert.equal((await client.post(`/api/gc/disconnect/${attemptId}`, {game: 'cs2'})).status, 200);
+		const res = await client.get(`/api/inventory/${attemptId}?refresh=1`);
+		assert.equal(res.status, 200, res.text.slice(0, 300));
+		assert.deepEqual([res.json.inventory.source, res.json.inventory.itemCount, res.json.attempt.cs2GcConnected], ['community', 3, false]);
+		assert.equal(res.json.attempt.inventoryCount, 3);
+	});
+
 	test('外部网络全部被拦截,只有预期内的请求', () => {
 		const blocked = server.steamEvents().filter(e => e.event === 'blockedFetch').map(e => e.url);
 		// 登录成功后会去 Steam 商店账户页查国家;终端机皮肤库用随包副本,后台联网刷新被拦;除此之外不应有任何外部请求

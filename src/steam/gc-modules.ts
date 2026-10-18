@@ -42,7 +42,6 @@ export function createGcModuleAttacher(options: GcModuleOptions) {
 			attempt.tf2GcConnected = false;
 			attempt.activeGame = 'cs2';
 			updateDefaultGcState(attempt);
-			attempt.inventorySource = 'gc';
 			inventory.refreshFromGc(attempt);
 			hookCs2(attempt);
 			events.emit(attempt);

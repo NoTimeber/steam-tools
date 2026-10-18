@@ -113,14 +113,19 @@ test('切换游戏:进 TF2 会断开 CS2 的 GC 标记,并刷新 web 会话;已�
 	assert.equal(ensureGameSession(makeAttempt({client: null}).attempt, 'cs2'), false);
 });
 
-test('断开游戏:退出游戏并清掉 GC 标记和库存缓存', () => {
-	const {attempt, client} = makeAttempt();
+test('断开游戏:退出游戏并清掉 GC 标记和 GC 来源的库存缓存;社区库存缓存留着', () => {
+	const {attempt, client} = makeAttempt({inventoryCache: {source: 'gc', itemCount: 3}, inventoryCount: 3, inventorySource: 'gc'});
 	assert.equal(disconnectGameSession(attempt, 'tf2'), true);
 	assert.deepEqual(client.played, [[]]);
 	assert.equal(attempt.cs2GcConnected, false);
 	assert.equal(attempt.inventoryCache, null);
 	assert.equal(attempt.inventoryCount, 0);
 	assert.equal(attempt.activeGame, 'tf2');
+
+	const community = {source: 'community', itemCount: 5};
+	const kept = makeAttempt({inventoryCache: community, inventoryCount: 4, inventorySource: 'gc'}).attempt;
+	disconnectGameSession(kept);
+	assert.deepEqual([kept.inventoryCache, kept.inventoryCount, kept.inventorySource], [community, 5, 'community']);
 });
 
 test('等 GC 连上:已连上立即返回;连上/报错/超时/缺模块', async (t: TestContext) => {

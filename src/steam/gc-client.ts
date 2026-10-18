@@ -142,7 +142,7 @@ export function ensureGameSession(attempt: Attempt | null | undefined, game: unk
 	return true;
 }
 
-/** 退出游戏(gamesPlayed([])),清掉 GC 连接标记和库存缓存 */
+/** 退出游戏(gamesPlayed([])),清掉 GC 连接标记和 GC 来源的库存缓存(社区库存不靠 GC,留着) */
 export function disconnectGameSession(attempt: Attempt | null | undefined, game?: unknown): boolean {
 	const client = attempt && (attempt.client as unknown as GcCapableClient | null);
 	if (!attempt || !client) {
@@ -156,11 +156,15 @@ export function disconnectGameSession(attempt: Attempt | null | undefined, game?
 	attempt.gcConnected = false;
 	attempt.cs2GcConnected = false;
 	attempt.tf2GcConnected = false;
-	attempt.inventoryCount = 0;
-	attempt.inventorySource = '';
-	attempt.inventoryCache = null;
-	attempt.communityInvTriedAt = 0;
-	attempt.inventoryInflight = null;
+	const cache = attempt.inventoryCache as {source?: string; itemCount?: number} | null;
+	if (cache && cache.source === 'community') {
+		attempt.inventoryCount = Number(cache.itemCount || 0);
+		attempt.inventorySource = 'community';
+	} else {
+		attempt.inventoryCount = 0;
+		attempt.inventorySource = '';
+		attempt.inventoryCache = null;
+	}
 	if (game) {
 		attempt.activeGame = normalizeGame(game);
 	}
