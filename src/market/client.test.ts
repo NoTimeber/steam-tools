@@ -91,6 +91,26 @@ test('挂求购:参数不对不发请求;Steam 拒绝时给出能看懂的原因
 	await assert.rejects(createMarketClient({fetch: html.http}).createBuyOrder(base), /cookie 可能已失效/);
 });
 
+test('Steam 没回 JSON:429 说是出口 IP 被限流;被带到登录页才说 cookie 失效;别的带上状态码、跳转地址、页面标题', async () => {
+	const base = {cookies: ['sessionid=s'], appid: 730, marketHashName: 'X', currency: 1, priceTotalCents: 100, quantity: 1};
+	const reply = (status: number, body: string, finalUrl = '') => createMarketClient({fetch: (async () => {
+		const res = new Response(body, {status});
+		return finalUrl ? Object.defineProperties(res, {url: {value: finalUrl}, redirected: {value: true}}) : res;
+	}) as typeof fetch});
+	await assert.rejects(reply(429, 'Too Many Requests').createBuyOrder(base), /HTTP 429 限流.*代理/);
+	await assert.rejects(reply(429, '').cancelBuyOrder({cookies: ['sessionid=s'], buyOrderId: '1'}), /HTTP 429 限流/);
+	await assert.rejects(reply(429, '').fetchMyBuyOrders({cookies: ['a=1']}), /HTTP 429 限流/);
+	await assert.rejects(reply(200, '<!DOCTYPE html><html><head><title>Sign In</title></head></html>').createBuyOrder(base), /cookie 可能已失效/);
+	await assert.rejects(reply(200, '<!DOCTYPE html><title>Steam</title>', 'https://steamcommunity.com/login/home/?goto=market').createBuyOrder(base), /cookie 可能已失效/);
+
+	// 完整的 Steam 页面导航里有「登录」,不能当成登录页
+	const errorPage = '<!DOCTYPE html>\n<html><head><title>Steam 社区 :: 错误</title></head><body><a>登录</a>' + 'x'.repeat(1000) + '</body></html>';
+	await assert.rejects(reply(200, errorPage, 'https://steamcommunity.com/market/').createBuyOrder(base),
+		/^Error: Steam 返回的不是 JSON\(HTTP 200 跳转到 https:\/\/steamcommunity\.com\/market\/ 页面「Steam 社区 :: 错误」\)$/);
+	await assert.rejects(reply(403, 'Access Denied').createBuyOrder(base), /^Error: Steam 返回的不是 JSON\(HTTP 403 Access Denied\)$/);
+	await assert.rejects(reply(502, '').createBuyOrder(base), /^Error: Steam 返回的不是 JSON\(HTTP 502\)$/);
+});
+
 test('错误文案:Steam 给了 message 就用它,未知码带上原始返回', () => {
 	assert.equal(describeBuyOrderError(16, '你已有求购'), '你已有求购(success=16)');
 	assert.equal(describeBuyOrderError(8), '参数无效(物品名或价格不正确)');

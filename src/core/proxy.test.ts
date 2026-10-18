@@ -81,8 +81,11 @@ test('走代理的 fetch:带代理认证、发绝对地址;解压、多个 Set-C
 
 		const manual = await proxyFetch('http://example.test/moved', {redirect: 'manual'});
 		assert.deepEqual([manual.status, manual.headers.get('location')], [302, '/gzip']);
+		assert.deepEqual([manual.url, manual.redirected], ['http://example.test/moved', false]);
 		const followed = await proxyFetch('http://example.test/moved');
 		assert.deepEqual(await followed.json(), {ok: true});
+		assert.deepEqual([followed.url, followed.redirected], ['http://example.test/gzip', true], '和自带的 fetch 一样带上最终地址');
+		assert.deepEqual([res.url, res.redirected], ['http://example.test/gzip', false]);
 
 		const posted = await proxyFetch('http://example.test/see-other', {method: 'POST', body: new URLSearchParams({a: '1', b: '中'})});
 		assert.equal(await posted.text(), 'echo');

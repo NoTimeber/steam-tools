@@ -107,6 +107,44 @@ const BUY_ORDER_ERROR: Readonly<Record<number, string>> = {
 
 const NO_JSON_ERROR = 'Steam 未返回有效响应,cookie 可能已失效,请重新登录该账号';
 
+/** HTML 页面的标题;不是 HTML 或没有标题为 null */
+function pageTitle(text: string): string | null {
+	const match = /<title[^>]*>([^<]*)<\/title>/i.exec(text);
+	return match ? decodeEntities(match[1] ?? '').replace(/\s+/g, ' ').trim() : null;
+}
+
+/** 响应摘要(日志和报错用):状态码、被跳转到哪、HTML 只取标题,其它取开头一段 */
+function responseSummary(res: Response, text: string, max = 200): string {
+	const parts = [`HTTP ${res.status}`];
+	if (res.redirected && res.url) {
+		parts.push(`跳转到 ${res.url}`);
+	}
+	const title = pageTitle(text);
+	const body = title != null ? `页面「${title}」` : truncate(text.replace(/\s+/g, ' ').trim(), max);
+	if (body) {
+		parts.push(body);
+	}
+	return parts.join(' ');
+}
+
+/**
+ * Steam 没回 JSON 时说清楚是哪种情况:429 是出口 IP 被限流(账号走机房代理时 Steam 常对市场请求这样);
+ * 被带到登录页才是 cookie 失效;别的带上状态码、跳转地址和页面标题,免得一律说成 cookie 失效
+ */
+function noJsonError(res: Response, text: string): Error {
+	if (res.status === 429) {
+		return new Error('Steam 拒绝了这个出口 IP 的市场请求(HTTP 429 限流)。账号走代理时多半是代理 IP 被限制,换个代理或让这个账号不走代理再试');
+	}
+	const title = pageTitle(text);
+	const toLogin = res.redirected && /\/login/i.test(res.url);
+	// 没有标题的短页面(老代码见过的「login」一类)也按登录页算;完整的 Steam 页面导航里都有「登录」,不能按正文判断
+	const loginPage = title != null ? /sign in|login|登录/i.test(title) : text.length < 500 && /sign in|login|登录/i.test(text);
+	if (res.ok && (toLogin || loginPage)) {
+		return new Error(NO_JSON_ERROR);
+	}
+	return new Error(`Steam 返回的不是 JSON(${responseSummary(res, text, 120)})`);
+}
+
 export function describeBuyOrderError(code: unknown, message?: unknown, rawText?: string, action = '挂求购单失败'): string {
 	if (message) {
 		return `${message}(success=${code})`;
@@ -420,11 +458,10 @@ export function createMarketClient(options: MarketClientOptions = {}) {
 			body: form.toString()
 		});
 		const {text, json} = await readJson(res);
-		log('info', `[market-buyorder] createbuyorder ${marketHashName} 总价=${priceTotalCents} x${quantity} → ${truncate(text, 200)}`);
+		log('info', `[market-buyorder] createbuyorder ${marketHashName} 总价=${priceTotalCents} x${quantity} → ${responseSummary(res, text)}`);
 
 		if (!json) {
-			// 多半是 cookie 失效被重定向到登录页(返回 HTML)
-			throw new Error(NO_JSON_ERROR);
+			throw noJsonError(res, text);
 		}
 		const code = Number(json.success);
 		// 1 = 已挂单(可能仍带 need_confirmation);22 = Pending,要手机确认才生效。其余都是失败
@@ -465,12 +502,12 @@ export function createMarketClient(options: MarketClientOptions = {}) {
 			body: new URLSearchParams({sessionid, buy_orderid: buyOrderId}).toString()
 		});
 		const {text, json} = await readJson(res);
-		log('info', `[market-buyorder] cancelbuyorder ${buyOrderId} → ${truncate(text, 160)}`);
+		log('info', `[market-buyorder] cancelbuyorder ${buyOrderId} → ${responseSummary(res, text, 160)}`);
 		if (json && Number(json.success) === 1) {
 			return {success: true};
 		}
 		if (!json) {
-			throw new Error(NO_JSON_ERROR);
+			throw noJsonError(res, text);
 		}
 		throw new Error(describeBuyOrderError(json.success, json.message, text, '撤销求购单失败'));
 	}
@@ -494,7 +531,7 @@ export function createMarketClient(options: MarketClientOptions = {}) {
 		});
 		const {text, json} = await readJson(res);
 		if (!json) {
-			throw new Error(NO_JSON_ERROR);
+			throw noJsonError(res, text);
 		}
 		if (!json.success) {
 			throw new Error(describeBuyOrderError(json.success, json.message, text, '读取求购单失败'));

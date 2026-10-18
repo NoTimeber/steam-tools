@@ -276,7 +276,8 @@ export function createProxyFetch(proxyUrl: string, options: ProxyFetchOptions = 
 			const response = await once(url, method, headers, body, signal);
 			const location = response.headers.get('location');
 			if (init.redirect === 'manual' || !location || response.status < 300 || response.status >= 400 || response.status === 304) {
-				return response;
+				// 和自带的 fetch 一样带上最终地址、是否跳转过(调用方据此判断被带到了登录页之类)
+				return Object.defineProperties(response, {url: {value: url.href}, redirected: {value: hop > 0}});
 			}
 			if (init.redirect === 'error') {
 				throw new TypeError(`请求被重定向到 ${location}`);
