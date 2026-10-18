@@ -19,9 +19,14 @@
 //     price_total / quantity。price_total 是总价的最小货币单位(分)= 每件分价 × 数量;currency 必须等于账号钱包币种。
 //   - 必须带 Referer = 该商品的上架页,否则 Steam 会拒。
 //   - sessionid 既在 Cookie 里、又要作为表单字段一起带(CSRF)。
+//   - User-Agent 用 STEAM_WEB_USER_AGENT(够新的 Chrome),不要用账号指纹里的 attempt.userAgent(最高 Chrome/99):
+//     Steam 对「非浏览器 HTTP 栈 + 老 Chrome UA」的市场请求回 429(2026-10 实测 priceoverview 每次都 429、
+//     换成 Chrome/150 就是 200;用户挂单 429 也是它),和换不换代理无关。见 src/steam/community.ts。
 //   - item_nameid 没有独立 API。Steam 2025/2026 把商品页改成了 React SSR,HTML 里多半已经没有
 //     Market_LoadOrderSpread( <id> ),所以 nameid 主要靠调用方传(本地缓存 / 社区 nameid 库,见 ./nameids.ts)。
 //     行情只是参考,抓不到不影响挂单。
+
+import {STEAM_WEB_USER_AGENT} from '../steam/community.ts';
 
 const COMMUNITY = 'https://steamcommunity.com';
 
@@ -305,7 +310,7 @@ export function createMarketClient(options: MarketClientOptions = {}) {
 	async function fetchMarketContext(params: ContextParams): Promise<MarketContext> {
 		const {appid, marketHashName} = params;
 		const cookies = (params.cookies ?? []).filter(Boolean);
-		const userAgent = params.userAgent || 'Mozilla/5.0';
+		const userAgent = params.userAgent || STEAM_WEB_USER_AGENT;
 		const currency = Number(params.currency || 0);
 		const country = String(params.country || 'US').trim().toUpperCase() || 'US';
 		const language = params.language || 'english';
@@ -398,7 +403,7 @@ export function createMarketClient(options: MarketClientOptions = {}) {
 	 */
 	async function createBuyOrder(params: CreateBuyOrderParams): Promise<CreateBuyOrderResult> {
 		const cookies = (params.cookies ?? []).filter(Boolean);
-		const userAgent = params.userAgent || 'Mozilla/5.0';
+		const userAgent = params.userAgent || STEAM_WEB_USER_AGENT;
 		const appid = Number(params.appid);
 		const marketHashName = String(params.marketHashName || '');
 		const currency = Number(params.currency || 0);
@@ -478,7 +483,7 @@ export function createMarketClient(options: MarketClientOptions = {}) {
 
 	/** 撤一张求购单;只有明确 success=1 才算成功 */
 	async function cancelBuyOrder(params: WebSessionParams & {buyOrderId: string}): Promise<{success: true}> {
-		const userAgent = params.userAgent || 'Mozilla/5.0';
+		const userAgent = params.userAgent || STEAM_WEB_USER_AGENT;
 		const buyOrderId = String(params.buyOrderId || '').trim();
 		if (!buyOrderId) {
 			throw new Error('缺少 buy_orderid');
@@ -523,7 +528,7 @@ export function createMarketClient(options: MarketClientOptions = {}) {
 			method: 'GET',
 			headers: {
 				Cookie: cookieHeader,
-				'User-Agent': params.userAgent || 'Mozilla/5.0',
+				'User-Agent': params.userAgent || STEAM_WEB_USER_AGENT,
 				Referer: COMMUNITY + '/market/',
 				'X-Requested-With': 'XMLHttpRequest',
 				Accept: '*/*'
@@ -552,7 +557,7 @@ export function createMarketClient(options: MarketClientOptions = {}) {
 
 	/** 分组链接 → 分组名(页面标题去掉「 - Steam Community Market」,如「AK-47 | Redline」) */
 	async function fetchGroupName(params: {appid: number; groupId: string; userAgent?: string}): Promise<string> {
-		const res = await http(listingUrl(params.appid, params.groupId), {headers: {'User-Agent': params.userAgent || 'Mozilla/5.0', Accept: 'text/html'}});
+		const res = await http(listingUrl(params.appid, params.groupId), {headers: {'User-Agent': params.userAgent || STEAM_WEB_USER_AGENT, Accept: 'text/html'}});
 		if (!res.ok) {
 			throw new Error(`HTTP ${res.status}`);
 		}
