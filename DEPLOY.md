@@ -136,7 +136,7 @@ sudo ./deploy/install-updater.sh
 - 需要 Linux + systemd。装的是两个 systemd 单元：`steam-tools-updater.path`（盯着 `data/update/request.json`）和 `steam-tools-updater.service`（执行 `deploy/update.sh`）。
 - 点「立即更新」后，容器在 `data/update/` 里放一个请求文件。更新器看到后删掉它，依次执行 `git pull --ff-only`、`docker compose pull`、`docker compose up -d --wait`（等新容器健康），每一步的进度写进 `updater/status.json`，面板读这个文件显示。失败时面板上显示是哪一步、服务器上的最后几十行输出，可以重试。
 - compose 里有 `build:`（源码构建）时不拉镜像，改成 `up -d --build --wait`。
-- `git pull` 用部署目录主人的身份执行。部署目录里改过跟踪的文件时 `git pull --ff-only` 会失败，面板上能看到原因。
+- `git pull` 用 `.git` 目录主人的身份执行，拉下来的文件归属不变。部署目录和 `.git` 的主人不一样时（比如 `sudo git clone` 之后只把部署目录 chown 给了自己），git 会报 `detected dubious ownership`；1.6.19 起更新器会把部署目录临时标成 `safe.directory`（要 git 2.32 以上），不用另外设置。部署目录里改过跟踪的文件时 `git pull --ff-only` 会失败。失败原因都会显示在面板上。
 - 更新时服务会重启：在线的 Steam 账号断开后自动恢复，面板要重新登录一次，登录后能看到更新结果。
 - 看更新日志：`journalctl -u steam-tools-updater.service`。卸载：`sudo ./deploy/install-updater.sh --uninstall`。
 

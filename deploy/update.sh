@@ -45,17 +45,17 @@ main() {
 		compose+=(-f "$file")
 	done
 
-	local started from log
+	local started from log gitcfg
 	started=$(now_ms)
 	from=$(package_version)
 	log=$(mktemp "$state/.log.XXXXXX") || return 1
+	gitcfg=$(mktemp "$state/.gitconfig.XXXXXX") || return 1
 	# shellcheck disable=SC2064
-	trap "rm -f '$log'" EXIT
+	trap "rm -f '$log' '$gitcfg'" EXIT
 
-	# 拉代码:用项目目录的主人去拉(root 去拉别人的仓库 git 会拒绝,拉下来的文件也会变成 root 的)
 	write_status "$state" running git "$started" 0 "正在拉取新代码" "" "$from" ""
-	if ! as_owner "$dir" git pull --ff-only >"$log" 2>&1; then
-		fail "$state" git "$started" "拉取新代码失败(git pull --ff-only;部署目录里有改过的文件时会这样)" "$log" "$from"
+	if ! git_pull "$dir" "$gitcfg" >"$log" 2>&1; then
+		fail "$state" git "$started" "拉取新代码失败(git pull --ff-only):$(git_hint "$log" "$dir")" "$log" "$from"
 		return 1
 	fi
 
@@ -108,20 +108,74 @@ package_version() {
 	sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' package.json 2>/dev/null | head -n 1
 }
 
-# 以项目目录的主人执行(本来就是那个用户、或者主人就是 root 时直接执行)。HOME 设成主人的家目录:
-# runuser 不换环境变量,git 要从那里读配置和 SSH 密钥(远程是 git@github.com 时);systemd 跑的 root 服务也可能没有 HOME
-as_owner() {
-	local dir=$1
-	shift
-	local owner home
-	owner=$(stat -c %U "$dir" 2>/dev/null || echo "")
+# git pull --ff-only,以仓库(.git)的主人执行:拉下来的对象和文件归属不变(root 去拉别人的仓库,
+# 之后那个用户自己 git pull 会因为 .git 里有 root 的文件而失败)。
+# 项目目录和 .git 的主人不一样时(比如 sudo git clone 之后只把项目目录 chown 给了自己),不管以谁的身份跑,
+# git 2.35.2 起都会报 dubious ownership。所以给 git 一份临时的全局配置(GIT_CONFIG_GLOBAL,git 2.32+):
+# 把项目目录标成 safe.directory,再 include 主人原来的全局配置,代理、凭据之类照旧生效
+git_pull() {
+	local dir=$1 cfg=$2
+	local owner home real
+	owner=$(stat -c %U "$dir/.git" 2>/dev/null || stat -c %U "$dir" 2>/dev/null || echo "")
+	home=$(user_home "$owner")
+	real=$(cd "$dir" && pwd -P) || real=$dir
+	{
+		printf '[include]\n\tpath = %s\n\tpath = %s\n' "$(git_quote "$home/.gitconfig")" "$(git_quote "$home/.config/git/config")"
+		printf '[safe]\n\tdirectory = %s\n\tdirectory = %s\n' "$(git_quote "$dir")" "$(git_quote "$real")"
+	} >"$cfg" || return 1
+	# 以别的用户跑时要能读到(内容只有路径)
+	chmod 644 "$cfg"
+	as_user "$owner" "$home" env GIT_CONFIG_GLOBAL="$cfg" git -C "$dir" pull --ff-only
+}
+
+# gitconfig 的值:加双引号,转义反斜杠和双引号
+git_quote() {
+	local value=${1//\\/\\\\}
+	printf '"%s"' "${value//\"/\\\"}"
+}
+
+user_home() {
+	local home=''
+	if [ -n "$1" ]; then
+		home=$(getent passwd "$1" 2>/dev/null | cut -d: -f6)
+	fi
+	if [ -z "$home" ] && [ "$1" = root ]; then
+		home=/root
+	fi
+	printf '%s' "${home:-/}"
+}
+
+# 以指定用户执行(本来就是那个用户、或者那个用户是 root 时直接执行)。HOME 设成那个用户的家目录:
+# runuser 不换环境变量,git 要从那里读配置和凭据;systemd 跑的 root 服务也可能没有 HOME
+as_user() {
+	local owner=$1 home=$2
+	shift 2
 	if [ "$(id -u)" = 0 ] && [ -n "$owner" ] && [ "$owner" != root ] && command -v runuser >/dev/null 2>&1; then
-		home=$(getent passwd "$owner" 2>/dev/null | cut -d: -f6)
-		runuser -u "$owner" -- env HOME="${home:-/}" "$@"
+		runuser -u "$owner" -- env HOME="$home" "$@"
 	elif [ "$(id -u)" = 0 ]; then
 		HOME=${HOME:-/root} "$@"
 	else
 		"$@"
+	fi
+}
+
+# 拉代码失败时给页面一句看得懂的原因(详细输出另外显示)
+git_hint() {
+	local log=$1 dir=$2
+	if grep -q 'dubious ownership' "$log"; then
+		echo "项目目录和 .git 的归属不一致,git 不肯操作。在服务器上执行 sudo git config --system --add safe.directory $dir 后重试"
+	elif grep -qiE 'would be overwritten|local changes|untracked working tree files' "$log"; then
+		echo "部署目录里有改过的文件,和新代码冲突"
+	elif grep -qiE 'not possible to fast-forward|diverg' "$log"; then
+		echo "部署目录里有本地提交,没法直接快进"
+	elif grep -q 'publickey' "$log"; then
+		echo "SSH 密钥认证失败(远程地址是 git@github.com 时要用 .git 主人的密钥)"
+	elif grep -qiE 'permission denied|insufficient permission' "$log"; then
+		echo "没有写入权限,部署目录里有归属不对的文件"
+	elif grep -qiE "could not resolve host|failed to connect|timed out|unable to access 'http" "$log"; then
+		echo "连不上 GitHub"
+	else
+		echo "原因见下面服务器上的输出"
 	fi
 }
 
