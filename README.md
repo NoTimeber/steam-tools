@@ -2,7 +2,7 @@
 
 多账号 Steam 工具的 Web 服务。部署在服务器上（Docker），用浏览器访问：统一管理一批 Steam 账号的登录和库存，批量做 CS2 / TF2 游戏内购、买游戏、市场求购、悠悠有品自动发货、C5 到价扫货和充值码兑换。
 
-当前版本 **v1.6.19**，更新说明见 [Releases](https://github.com/NoTimeber/steam-tools/releases)。
+当前版本 **v1.6.20**，更新说明见 [Releases](https://github.com/NoTimeber/steam-tools/releases)。
 
 ## 功能
 
