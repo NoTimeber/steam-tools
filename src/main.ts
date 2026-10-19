@@ -318,6 +318,7 @@ const itemNames = loadNameDb(join(config.appDir, 'data', 'cs2-names-zh.json.gz')
 const market = createMarketService({
 	findAttempt,
 	cookiesFor: profiles.cookiesFor,
+	deviceIdFor: name => profiles.local(name).deviceId,
 	fetch: proxy.fetch,
 	names: itemNames,
 	ledgerFile: join(config.dataDir, 'market-buyorders.json'),

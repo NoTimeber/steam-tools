@@ -19,7 +19,7 @@
 // 5. 报价接受:steam-tradeoffer-manager / steamcommunity 换成替身,报价从场景的 offers 里取;
 //    接受、手机确认只记日志,不连 Steam。充值码兑换的 steamstore 也换成替身,按码的前缀决定结果。
 // 6. 假 Steam 市场(steamcommunity.com/market/*),有状态:挂求购、手机确认、撤单、我的求购单,见 fakeMarket();
-//    场景开关在 FAKE_MARKET_FILE。steamcommunity 替身的 getConfirmations 列出待确认的求购单;
+//    场景开关在 FAKE_MARKET_FILE。手机确认 mobileconf/getlist、ajaxop(求购确认自己发,见 fakeMobileconf)列出 / 确认待确认的求购单;
 //    steam-totp 的 getTimeOffset 换成离线版(返回 0)。
 // 7. 假 Steam 商店结算(store / api / checkout.steampowered.com 上买游戏用到的那几个端点),有状态:
 //    每个账号钱包 10.00 美元、已拥有的包,见 fakeStore();商品可用 FAKE_STORE_PACKAGES 追加。
@@ -353,23 +353,6 @@ class FakeSteamCommunity {
 		record({event: 'offerConfirm', offerId: String(objectId), identitySecret});
 		callback(null);
 	}
-	// 手机令牌确认列表:这个账号还没确认的求购单
-	getConfirmations(time, key, callback) {
-		record({event: 'marketConfirmList', owner: this.owner, tag: key && key.tag});
-		const list = [...market.confs.entries()]
-			.filter(([, conf]) => conf.owner === this.owner && !conf.allowed)
-			.map(([id, conf]) => ({
-				id,
-				creator: conf.creator,
-				type: 3,
-				respond(respondTime, respondKey, accept, done) {
-					record({event: 'marketConfirm', owner: conf.owner, confId: id, tag: respondKey && respondKey.tag, accept});
-					conf.allowed = !!accept;
-					done(null);
-				}
-			}));
-		setImmediate(() => callback(null, list));
-	}
 }
 
 // ===== 充值码兑换(steamstore)替身 =====
@@ -440,6 +423,34 @@ function placeMarketOrder(owner, form) {
 	return id;
 }
 
+// 手机令牌确认(steamcommunity.com/mobileconf/*):getlist 列出这个账号还没确认的求购单,ajaxop 按 cid + ck(nonce)确认
+function fakeMobileconf(url, init) {
+	const headers = Object.fromEntries(Object.entries((init && init.headers) || {}).map(([key, value]) => [key.toLowerCase(), String(value)]));
+	const owner = cookieValue(headers.cookie, 'steamLoginSecure');
+	const params = Object.fromEntries(url.searchParams);
+	const json = value => new Response(JSON.stringify(value), {status: 200, headers: {'content-type': 'application/json'}});
+	if (!owner) {
+		return json({success: false, needauth: true});
+	}
+	if (url.pathname === '/mobileconf/getlist') {
+		record({event: 'marketConfirmList', owner, tag: params.tag, params});
+		const conf = [...market.confs.entries()]
+			.filter(([, item]) => item.owner === owner && !item.allowed)
+			.map(([id, item]) => ({id, creator_id: item.creator, nonce: 'nonce-' + id, type: 12, headline: item.form.market_hash_name}));
+		return json({success: true, conf});
+	}
+	if (url.pathname === '/mobileconf/ajaxop') {
+		const item = market.confs.get(params.cid);
+		record({event: 'marketConfirm', owner, confId: params.cid, tag: params.tag, accept: params.op === 'allow', params});
+		if (!item || item.owner !== owner || params.ck !== 'nonce-' + params.cid) {
+			return json({success: false});
+		}
+		item.allowed = params.op === 'allow';
+		return json({success: true});
+	}
+	return json({success: false});
+}
+
 function fakeMarket(url, init) {
 	const headers = Object.fromEntries(Object.entries((init && init.headers) || {}).map(([key, value]) => [key.toLowerCase(), String(value)]));
 	const owner = cookieValue(headers.cookie, 'steamLoginSecure');
@@ -447,9 +458,6 @@ function fakeMarket(url, init) {
 	const scenario = marketScenario();
 	record({event: 'marketRequest', method: (init && init.method) || 'GET', path: url.pathname, query: Object.fromEntries(url.searchParams), owner, form, referer: headers.referer || ''});
 	const json = value => new Response(JSON.stringify(value), {status: 200, headers: {'content-type': 'application/json'}});
-	if (Array.isArray(scenario.assets) && Array.isArray(scenario.descriptions)) {
-		return json({success: 1, total_inventory_count: scenario.assets.length, assets: scenario.assets, descriptions: scenario.descriptions});
-	}
 	if (url.pathname.startsWith('/market/listings/')) {
 		const name = decodeURIComponent(url.pathname.split('/')[4] || '');
 		// 新版分组页(真实的有好几 MB,标题在开头)
@@ -606,9 +614,6 @@ function fakeStore(url, init) {
 	const input = rawInput ? JSON.parse(rawInput) : null;
 	const where = url.hostname + url.pathname;
 	const json = value => new Response(JSON.stringify(value), {status: 200, headers: {'content-type': 'application/json'}});
-	if (Array.isArray(scenario.assets) && Array.isArray(scenario.descriptions)) {
-		return json({success: 1, total_inventory_count: scenario.assets.length, assets: scenario.assets, descriptions: scenario.descriptions});
-	}
 	const packages = storePackages();
 	const tokenOk = !!owner && url.searchParams.get('access_token') === 'WT-' + owner;
 
@@ -968,6 +973,14 @@ globalThis.fetch = async function offlineFetch(input, init) {
 	}
 	if (url.hostname === 'steamcommunity.com' && url.pathname.startsWith('/market/')) {
 		return fakeMarket(url, init);
+	}
+	if (url.hostname === 'steamcommunity.com' && url.pathname.startsWith('/mobileconf/')) {
+		return fakeMobileconf(url, init);
+	}
+	// Steam 时间(求购确认签 key 用)
+	if (url.origin + url.pathname === 'https://api.steampowered.com/ITwoFactorService/QueryTime/v1/') {
+		record({event: 'timeOffset'});
+		return new Response(JSON.stringify({response: {server_time: String(Math.floor(Date.now() / 1000))}}), {status: 200, headers: {'content-type': 'application/json'}});
 	}
 	if (url.hostname === 'steamcommunity.com' && /^\/inventory\/\d+\/730\/2$/.test(url.pathname)) {
 		return fakeInventory(url, init);

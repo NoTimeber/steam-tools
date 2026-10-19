@@ -2,7 +2,7 @@
 // 以及走 cookie 流程(买游戏、求购、库存……)时用哪份 WebSession cookie。
 //
 // 来源:
-//   - maFile(加密库):shared_secret、identity_secret、SteamID、Session.RefreshToken;
+//   - maFile(加密库):shared_secret、identity_secret、device_id、SteamID、Session.RefreshToken;
 //   - 会话库(加密库):登录后保存的 cookies;
 //   - 旧版遗留文件(只读):data/config/cookies/<账号>.json(refreshToken / cookies / cookieHeader)、
 //     data/config/account_cache.json(钱包币种、余额、国家)。
@@ -22,6 +22,8 @@ export interface LocalProfile {
 	hasMaFile: boolean;
 	sharedSecret: string;
 	identitySecret: string;
+	/** maFile 的 device_id(手机确认请求的 p 参数) */
+	deviceId: string;
 	refreshToken: string;
 	country: string;
 	hasWallet: boolean;
@@ -147,6 +149,7 @@ export function createProfiles(options: ProfileOptions) {
 			hasMaFile: false,
 			sharedSecret: '',
 			identitySecret: '',
+			deviceId: '',
 			refreshToken: '',
 			country: '',
 			hasWallet: false,
@@ -163,6 +166,7 @@ export function createProfiles(options: ProfileOptions) {
 			profile.hasMaFile = true;
 			profile.sharedSecret = String(maFile.shared_secret || maFile.sharedSecret || '').trim();
 			profile.identitySecret = String(maFile.identity_secret || maFile.identitySecret || '').trim();
+			profile.deviceId = String(maFile.device_id || maFile.deviceId || '').trim();
 			profile.steamID = String(maFile.SteamID || maFile.steamID || '').trim();
 			const session = maFile.Session && typeof maFile.Session === 'object' ? maFile.Session : null;
 			if (session && session.RefreshToken) {

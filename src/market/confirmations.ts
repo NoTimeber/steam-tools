@@ -8,54 +8,52 @@
 // 挂单后新冒出来的那条就是本单;再用 confirmation_id / buy_orderid 比 id 和 creator 兜底。
 // 多条候选又分不清时宁可报错让用户手动确认,绝不盲目确认别的东西(比如一笔待确认的交易报价)。
 //
-// steamcommunity 一定要走 ../steam/community.ts 的工厂:库默认的 Chrome/118 UA 会被 Steam 以 429 挡掉;
-// 工厂还让 mobileconf 请求按出口排队(两次至少隔几秒)。UA 对了发太密也会 429,读列表、提交确认碰到 429 就等一会再试。
+// mobileconf 请求自己发,不经 steamcommunity 库(照 aiosteampy 的 guard/confirmations.py):
+//   GET /mobileconf/getlist?p=<设备 ID>&a=<SteamID>&k=<确认 key>&t=<Steam 时间>&m=react&tag=getlist
+//   GET /mobileconf/ajaxop?...&tag=allow&op=allow&cid=<确认项 id>&ck=<确认项 nonce>
+// k = HMAC(identity_secret, t + tag)。和 steamcommunity 库的差别:设备 ID 用 maFile 的 device_id(库只能按 SteamID 算一个),
+// HTTP 和挂单走同一套(按账号选代理的 fetch),Steam 时间差也经它查;出错时把 Steam 的原话带进报错和日志。
+// 2026-10 用户服务器上经 steamcommunity 库确认一直 429,而同一个出口挂单正常,所以换成这样。
+// UA 对了发太密也会 429:请求按出口排队(../steam/community.ts 的 mobileconfQueue),碰到 429 等一会再试。
 
 import {createRequire} from 'node:module';
-import {createSteamCommunity} from '../steam/community.ts';
+import {steamIdFromCookies} from '../proxy/index.ts';
+import {mobileconfQueue} from '../steam/community.ts';
+import type {MobileconfQueue} from '../steam/community.ts';
+import {STEAM_WEB_USER_AGENT} from '../steam/user-agent.ts';
 import type {MarketLog} from './client.ts';
 
 const require = createRequire(import.meta.url);
 
+const MOBILECONF = 'https://steamcommunity.com/mobileconf';
+const QUERY_TIME_URL = 'https://api.steampowered.com/ITwoFactorService/QueryTime/v1/';
 const TIME_OFFSET_TTL_MS = 60 * 60 * 1000;
 /** mobileconf 回 429 后依次等多久再试;都等完还是 429 就报限流 */
 const RATE_LIMIT_WAITS_MS = [10000, 20000];
 
-/** steamcommunity 的 HTTP 错误是「HTTP error 429」,带 code */
-function isRateLimited(err: unknown): boolean {
-	return (err as {code?: unknown} | null)?.code === 429 || /HTTP error 429\b/.test(err instanceof Error ? err.message : String(err));
-}
-
-interface ConfirmationKey {
-	tag: string;
-	key: string;
-}
-
-/** steamcommunity 的 CConfirmation(用到的字段) */
+/** 待确认项(getlist 返回的 conf[] 里用到的字段) */
 export interface Confirmation {
 	id: string;
+	/** creator_id:交易报价 id、求购单 id 等 */
 	creator: string;
+	nonce: string;
 	type: unknown;
-	respond(time: number, key: ConfirmationKey, accept: boolean, callback: (err: Error | null) => void): void;
-}
-
-export interface ConfirmationCommunity {
-	setCookies(cookies: string[]): void;
-	getConfirmations(time: number, key: ConfirmationKey, callback: (err: Error | null, confirmations?: Confirmation[]) => void): void;
+	headline: string;
 }
 
 /** steam-totp(用到的部分) */
 export interface Totp {
-	time(offset?: number): number;
 	getConfirmationKey(identitySecret: string, time: number, tag: string): string;
-	getTimeOffset(callback: (err: Error | null, offset?: number) => void): void;
+	getDeviceID(steamID: string): string;
 }
 
 export interface ConfirmerOptions {
-	/** cookies 是之后要设的那份(按它选代理) */
-	createCommunity?: (cookies: readonly string[]) => ConfirmationCommunity;
+	/** 发 mobileconf 和查 Steam 时间用的 fetch(按 Cookie 里的账号选代理) */
+	fetch?: typeof fetch;
 	totp?: Totp;
+	queue?: MobileconfQueue;
 	sleep?: (ms: number) => Promise<void>;
+	/** 本机时间(毫秒):签名的时间和时间差缓存都按它 */
 	now?: () => number;
 	log?: MarketLog;
 	/** 429 后依次等多久再试(测试注入) */
@@ -65,6 +63,13 @@ export interface ConfirmerOptions {
 export interface ListConfirmationsParams {
 	cookies: readonly string[];
 	identitySecret: string;
+	/** 没给就从 steamLoginSecure 里读 */
+	steamID?: string;
+	/** maFile 的 device_id;没有时按 SteamID 算(和 steamcommunity 库一样) */
+	deviceId?: string;
+	userAgent?: string;
+	/** 每个 mobileconf 请求的超时(不含排队) */
+	timeoutMs?: number;
 }
 
 export interface ConfirmBuyOrderParams extends ListConfirmationsParams {
@@ -72,25 +77,183 @@ export interface ConfirmBuyOrderParams extends ListConfirmationsParams {
 	buyOrderId?: string;
 	/** 挂单前的确认项 id 快照;读取失败时为 null */
 	priorConfIds?: ReadonlySet<string> | null;
-	/** 每次读列表 / 提交确认的超时(含在出口队列里等的时间) */
-	timeoutMs?: number;
 	/** 确认项可能在挂单后稍晚才出现:最多查几次、间隔多久 */
 	attempts?: number;
 	gapMs?: number;
+}
+
+/** mobileconf 的错误:status 是 HTTP 状态码(Steam 回 JSON 说失败时没有) */
+class MobileconfError extends Error {
+	status: number;
+	steamText: string;
+	constructor(message: string, status = 0, steamText = '') {
+		super(message);
+		this.status = status;
+		this.steamText = steamText;
+	}
+}
+
+function isRateLimited(err: unknown): err is MobileconfError {
+	return err instanceof MobileconfError && err.status === 429;
+}
+
+function snippet(text: string, max = 160): string {
+	const flat = text.replace(/\s+/g, ' ').trim();
+	return flat.length > max ? flat.slice(0, max) + '…' : flat;
+}
+
+/** Steam 回的话:JSON 的 message / detail,HTML 取标题,别的取开头一段 */
+function steamWords(text: string, json: any): string {
+	if (json && typeof json === 'object') {
+		return String(json.message || json.detail || '') || snippet(text);
+	}
+	const title = /<title[^>]*>([^<]*)<\/title>/i.exec(text)?.[1]?.trim();
+	return title || snippet(text);
 }
 
 function describe(confirmations: readonly Confirmation[]): string {
 	return confirmations.map(conf => `{id:${conf.id},creator:${conf.creator},type:${conf.type}}`).join(',');
 }
 
+function toConfirmation(raw: any): Confirmation {
+	return {
+		id: String(raw?.id ?? ''),
+		creator: String(raw?.creator_id ?? ''),
+		nonce: String(raw?.nonce ?? ''),
+		type: raw?.type,
+		headline: String(raw?.headline ?? '')
+	};
+}
+
 export function createBuyOrderConfirmer(options: ConfirmerOptions = {}) {
-	const createCommunity = options.createCommunity ?? (cookies => createSteamCommunity(cookies) as unknown as ConfirmationCommunity);
-	// 用到时才加载,并且每次都经模块对象调用(e2e 的离线环境会替换 getTimeOffset)
-	const totp = (): Totp => options.totp ?? require('steam-totp') as Totp;
+	const http = options.fetch ?? ((input, init) => fetch(input, init));
+	const totp = options.totp ?? require('steam-totp') as Totp;
+	const queue = options.queue ?? mobileconfQueue;
 	const sleep = options.sleep ?? ((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)));
 	const now = options.now ?? Date.now;
 	const log: MarketLog = options.log ?? (() => {});
 	const rateLimitWaits = options.rateLimitWaitsMs ?? RATE_LIMIT_WAITS_MS;
+
+	// 本机与 Steam 的时间差(秒,确认 key 用),缓存 1 小时。查失败用上次的值或 0,不缓存
+	let cachedOffset: number | null = null;
+	let cachedAt = 0;
+	async function timeOffset(): Promise<number> {
+		if (cachedOffset !== null && now() - cachedAt < TIME_OFFSET_TTL_MS) {
+			return cachedOffset;
+		}
+		try {
+			const sentAt = now();
+			// 和 steam-totp 的 getTimeOffset 一样:空 POST
+			const res = await http(QUERY_TIME_URL, {method: 'POST', headers: {'User-Agent': STEAM_WEB_USER_AGENT}, body: '', signal: AbortSignal.timeout(15000)});
+			if (!res.ok) {
+				throw new Error(`HTTP ${res.status}`);
+			}
+			const serverTime = Number((await res.json() as any)?.response?.server_time);
+			if (!Number.isFinite(serverTime) || serverTime <= 0) {
+				throw new Error('返回里没有 server_time');
+			}
+			cachedOffset = serverTime - Math.round((sentAt + now()) / 2000);
+			cachedAt = now();
+			if (Math.abs(cachedOffset) >= 10) {
+				log('warn', `[market-buyorder] 本机时间和 Steam 差了 ${cachedOffset} 秒(签确认 key 时已按 Steam 时间算)`);
+			}
+		} catch (err) {
+			log('warn', `[market-buyorder] 查 Steam 时间失败,按本机时间签确认 key:${err instanceof Error ? err.message : String(err)}`);
+		}
+		return cachedOffset ?? 0;
+	}
+
+	interface Session {
+		cookies: string[];
+		identitySecret: string;
+		steamID: string;
+		deviceId: string;
+		userAgent: string;
+		timeoutMs: number;
+		offset: number;
+	}
+
+	async function openSession(params: ListConfirmationsParams): Promise<Session> {
+		const cookies = params.cookies.filter(Boolean);
+		const steamID = String(params.steamID || '').trim() || steamIdFromCookies(cookies);
+		if (!steamID) {
+			throw new Error('cookies 里没有 steamLoginSecure,读不出 SteamID,无法手机确认');
+		}
+		return {
+			cookies,
+			identitySecret: String(params.identitySecret || '').trim(),
+			steamID,
+			deviceId: String(params.deviceId || '').trim() || totp.getDeviceID(steamID),
+			userAgent: params.userAgent || STEAM_WEB_USER_AGENT,
+			timeoutMs: params.timeoutMs || 30000,
+			offset: await timeOffset()
+		};
+	}
+
+	/** 发一个 mobileconf 请求,返回 Steam 回的 JSON(success 为真);别的情况抛 MobileconfError */
+	async function mobileconf(session: Session, path: 'getlist' | 'ajaxop', tag: string, extra: Record<string, string> = {}): Promise<any> {
+		await queue.wait(session.cookies);
+		// 签名时间取发出前那一刻(排队可能等了几秒)
+		const time = Math.floor(now() / 1000) + session.offset;
+		const query = new URLSearchParams({
+			p: session.deviceId,
+			a: session.steamID,
+			k: totp.getConfirmationKey(session.identitySecret, time, tag),
+			t: String(time),
+			m: 'react',
+			tag,
+			...extra
+		});
+		let res: Response;
+		let text: string;
+		try {
+			res = await http(`${MOBILECONF}/${path}?${query}`, {
+				headers: {
+					'User-Agent': session.userAgent,
+					Accept: 'application/json, text/plain, */*',
+					'Accept-Language': 'en-US,en;q=0.9',
+					Cookie: session.cookies.join('; ')
+				},
+				signal: AbortSignal.timeout(session.timeoutMs)
+			});
+			text = await res.text();
+		} catch (err) {
+			const timedOut = err instanceof Error && err.name === 'TimeoutError';
+			throw new MobileconfError(timedOut ? `超时: mobileconf/${path}` : `mobileconf/${path} 请求失败:${err instanceof Error ? err.message : String(err)}`);
+		}
+		let json: any = null;
+		try {
+			json = text ? JSON.parse(text) : null;
+		} catch {
+			json = null;
+		}
+		const words = steamWords(text, json);
+		if (res.status === 429) {
+			queue.hold(session.cookies);
+		}
+		if (!res.ok) {
+			throw new MobileconfError(`mobileconf/${path} 返回 HTTP ${res.status}${words ? `:${words}` : ''}`, res.status, words);
+		}
+		if (/\/login\b/i.test(res.url) || json?.needauth) {
+			throw new MobileconfError('Steam 网页登录已失效(手机确认接口要求重新登录),请重新登录这个账号');
+		}
+		if (!json) {
+			throw new MobileconfError(`mobileconf/${path} 返回的不是 JSON:${words || '空'}`, res.status, words);
+		}
+		if (!json.success) {
+			throw new MobileconfError(`mobileconf/${path} 失败:${words || '未知原因'}`, 0, words);
+		}
+		return json;
+	}
+
+	async function fetchConfirmations(session: Session): Promise<Confirmation[]> {
+		const json = await mobileconf(session, 'getlist', 'getlist');
+		return (Array.isArray(json.conf) ? json.conf : []).map(toConfirmation);
+	}
+
+	async function accept(session: Session, conf: Confirmation): Promise<void> {
+		await mobileconf(session, 'ajaxop', 'allow', {op: 'allow', cid: conf.id, ck: conf.nonce});
+	}
 
 	/** 回 429 时按 rateLimitWaits 等一会再试;等完还是 429 就报限流,别的错误照抛 */
 	async function retryRateLimited<T>(label: string, run: () => Promise<T>): Promise<T> {
@@ -98,121 +261,62 @@ export function createBuyOrderConfirmer(options: ConfirmerOptions = {}) {
 			try {
 				return await run();
 			} catch (err) {
-				const wait = rateLimitWaits[retry];
 				if (!isRateLimited(err)) {
 					throw err;
 				}
+				const said = err.steamText ? `,Steam 回:${err.steamText}` : '';
+				const wait = rateLimitWaits[retry];
 				if (wait == null) {
-					throw new Error(`Steam 手机确认接口限流(HTTP 429),重试 ${rateLimitWaits.length} 次仍不行。过几分钟再试,或给这个账号换个代理`);
+					throw new Error(`Steam 手机确认接口限流(HTTP 429${said}),重试 ${rateLimitWaits.length} 次仍不行。过几分钟再试,或给这个账号换个代理`);
 				}
-				log('warn', `[market-buyorder] ${label}被 Steam 限流(HTTP 429),${wait / 1000} 秒后重试(${retry + 1}/${rateLimitWaits.length})`);
+				log('warn', `[market-buyorder] ${label}被 Steam 拒绝(HTTP 429${said}),${wait / 1000} 秒后重试(${retry + 1}/${rateLimitWaits.length})`);
 				await sleep(wait);
 			}
 		}
 	}
 
-	// 本机与 Steam 的时间差(确认 key 用),缓存 1 小时,不用每个账号都查一次。查失败用上次的值或 0,不缓存
-	let cachedOffset: number | null = null;
-	let cachedAt = 0;
-	function timeOffset(): Promise<number> {
-		if (cachedOffset !== null && now() - cachedAt < TIME_OFFSET_TTL_MS) {
-			return Promise.resolve(cachedOffset);
-		}
-		return new Promise(resolve => {
-			try {
-				totp().getTimeOffset((err, offset) => {
-					if (!err) {
-						cachedOffset = offset || 0;
-						cachedAt = now();
-					}
-					resolve(cachedOffset || 0);
-				});
-			} catch {
-				resolve(cachedOffset || 0);
-			}
-		});
-	}
-
-	function signedKey(identitySecret: string, offset: number, tag: string): {time: number; key: ConfirmationKey} {
-		const time = totp().time(offset);
-		return {time, key: {tag, key: totp().getConfirmationKey(identitySecret, time, tag)}};
-	}
-
-	function fetchConfirmations(community: ConfirmationCommunity, identitySecret: string, offset: number): Promise<Confirmation[]> {
-		const {time, key} = signedKey(identitySecret, offset, 'list');
-		return new Promise((resolve, reject) => {
-			community.getConfirmations(time, key, (err, confirmations) => err ? reject(err) : resolve(confirmations || []));
-		});
-	}
-
-	function accept(conf: Confirmation, identitySecret: string, offset: number): Promise<void> {
-		const {time, key} = signedKey(identitySecret, offset, 'accept');
-		return new Promise((resolve, reject) => {
-			conf.respond(time, key, true, err => err ? reject(err) : resolve());
-		});
-	}
-
-	function signedInCommunity(cookies: readonly string[]): ConfirmationCommunity {
-		const community = createCommunity(cookies);
-		community.setCookies([...cookies]);   // 从 steamLoginSecure 解析 steamID,getConfirmations 要用
-		return community;
-	}
-
 	/** 挂单前的快照:当前所有待确认项的 id。没有 cookies 或 identity_secret 时是空集 */
 	async function listConfirmationIds(params: ListConfirmationsParams): Promise<Set<string>> {
-		const cookies = params.cookies.filter(Boolean);
-		const identitySecret = String(params.identitySecret || '').trim();
-		if (!cookies.length || !identitySecret) {
+		if (!params.cookies.some(Boolean) || !String(params.identitySecret || '').trim()) {
 			return new Set();
 		}
-		const confirmations = await fetchConfirmations(signedInCommunity(cookies), identitySecret, await timeOffset());
-		return new Set(confirmations.map(conf => String(conf.id)));
+		const confirmations = await fetchConfirmations(await openSession(params));
+		return new Set(confirmations.map(conf => conf.id));
 	}
 
 	/** 手机确认一张待确认的求购单;返回确认项的 creator(尽量当作真实 buy_orderid)。失败抛错 */
 	async function confirmBuyOrder(params: ConfirmBuyOrderParams): Promise<{confirmed: true; buyOrderId: string}> {
-		const cookies = params.cookies.filter(Boolean);
-		const identitySecret = String(params.identitySecret || '').trim();
 		const confirmationId = String(params.confirmationId || '').trim();
 		const buyOrderId = String(params.buyOrderId || '').trim();
 		const prior = params.priorConfIds ?? null;
-		const timeoutMs = params.timeoutMs || 60000;
 		const attempts = params.attempts || 4;
 		const gapMs = params.gapMs || 5000;
 
-		if (!cookies.length) {
+		if (!params.cookies.some(Boolean)) {
 			throw new Error('缺少 WebSession cookies,无法确认求购单');
 		}
-		if (!identitySecret) {
+		if (!String(params.identitySecret || '').trim()) {
 			throw new Error('该账号未导入 maFile(identity_secret),无法自动手机确认');
 		}
 		if (!confirmationId && !buyOrderId && !prior) {
 			throw new Error('未取到 confirmation_id / buy_orderid 且无确认快照,无法定位待确认的求购单(请在 Steam 手机 App 手动确认)');
 		}
 
-		const community = signedInCommunity(cookies);
-		// 完成后清掉超时定时器(旧代码不清,每次确认都留下几个 30 秒的定时器)
-		const withTimeout = <T>(promise: Promise<T>, label: string): Promise<T> => {
-			let timer: ReturnType<typeof setTimeout> | undefined;
-			const timeout = new Promise<never>((_, reject) => {
-				timer = setTimeout(() => reject(new Error('超时: ' + label)), timeoutMs);
-			});
-			return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
-		};
-		const offset = await timeOffset();
+		const session = await openSession(params);
+		log('info', `[market-buyorder] 手机确认:设备 ID ${params.deviceId ? '用 maFile 的' : '按 SteamID 算'},Steam 时间差 ${session.offset} 秒`);
 
 		for (let i = 0; i < attempts; i++) {
-			const confirmations = await retryRateLimited('读取确认列表', () => withTimeout(fetchConfirmations(community, identitySecret, offset), 'getConfirmations'));
+			const confirmations = await retryRateLimited('读取确认列表', () => fetchConfirmations(session));
 			// 有快照就只看新冒出来的(和字段含义无关,最稳);没有就看全部
-			const candidates = prior ? confirmations.filter(conf => !prior.has(String(conf.id))) : confirmations;
+			const candidates = prior ? confirmations.filter(conf => !prior.has(conf.id)) : confirmations;
 			// confirmation_id 可能等于 conf.id 也可能等于 creator,两边都比;再用 buy_orderid 比 creator;候选只有一条就是它
-			const conf = (confirmationId && candidates.find(c => String(c.id) === confirmationId || String(c.creator) === confirmationId))
-				|| (buyOrderId && candidates.find(c => String(c.creator) === buyOrderId))
+			const conf = (confirmationId && candidates.find(c => c.id === confirmationId || c.creator === confirmationId))
+				|| (buyOrderId && candidates.find(c => c.creator === buyOrderId))
 				|| (candidates.length === 1 ? candidates[0] : undefined);
 
 			if (conf) {
-				await retryRateLimited('提交确认', () => withTimeout(accept(conf, identitySecret, offset), 'respondConfirmation'));
-				const recovered = String(conf.creator || '') || buyOrderId;
+				await retryRateLimited('提交确认', () => accept(session, conf));
+				const recovered = conf.creator || buyOrderId;
 				log('info', `[market-buyorder] 求购单手机确认完成(confId=${conf.id}, creator/buyOrderId=${recovered || '?'})`);
 				return {confirmed: true, buyOrderId: recovered};
 			}
@@ -221,7 +325,7 @@ export function createBuyOrderConfirmer(options: ConfirmerOptions = {}) {
 				throw new Error(`检测到 ${candidates.length} 个待确认项,无法确定属于本求购单,请在 Steam 手机 App 手动确认`);
 			}
 			if (i < attempts - 1) {
-				log('info', `[market-buyorder] 待确认项暂未出现,${gapMs}ms 后重试(${i + 1}/${attempts})`);
+				log('info', `[market-buyorder] 待确认项暂未出现,${gapMs / 1000} 秒后重试(${i + 1}/${attempts})`);
 				await sleep(gapMs);
 				continue;
 			}

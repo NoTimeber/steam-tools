@@ -10,7 +10,8 @@
 // 2026-10 用户服务器上求购单确认回过 429,本机同一套请求直连、经代理都是 200,只能是限流:那时一次挂单十几秒里
 // 连打 mobileconf 好几次,出口又是多人共用的机房代理 IP。ASF 默认两次确认请求至少隔 10 秒。
 // 所以这里的实例发 mobileconf 请求都按出口(同一个代理地址;直连算一个)排队:两次开始至少隔 MOBILECONF_GAP_MS,
-// 回了 429 这个出口再冷却 MOBILECONF_COOLDOWN_MS。求购确认、报价确认都经过这里,互相也排队。
+// 回了 429 这个出口再冷却 MOBILECONF_COOLDOWN_MS。报价确认经过这里;求购确认不经 steamcommunity、自己发 mobileconf
+// (src/market/confirmations.ts),用同一个队列 mobileconfQueue,两边互相也排队。
 //
 // 代理:按要设的 cookie 里的账号选 Steam 代理(src/proxy/),由 src/main.ts 启动时 useCommunityProxy 注册;没注册时直连。
 
@@ -85,6 +86,18 @@ export function createRequestGate(gapMs: number, options: {now?: () => number; s
 }
 
 const mobileconfGate = createRequestGate(MOBILECONF_GAP_MS);
+
+/** 按 cookie 所属账号的出口排队的 mobileconf 队列;不经 steamcommunity、自己发 mobileconf 请求的(求购确认)用它 */
+export interface MobileconfQueue {
+	wait(cookies: readonly string[]): Promise<void>;
+	/** 回了 429:这个出口冷却一会 */
+	hold(cookies: readonly string[]): void;
+}
+
+export const mobileconfQueue: MobileconfQueue = {
+	wait: cookies => mobileconfGate.wait(proxyForCookies(cookies)),
+	hold: cookies => mobileconfGate.hold(proxyForCookies(cookies), MOBILECONF_COOLDOWN_MS)
+};
 
 function isMobileconf(options: CommunityRequestOptions | undefined): boolean {
 	return MOBILECONF_URL.test(String(options?.url ?? options?.uri ?? ''));

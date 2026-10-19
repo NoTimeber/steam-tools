@@ -50,18 +50,18 @@ function world(files: Record<string, unknown> = {}, mafiles: Record<string, Reco
 	return {store, profiles, mafileMap, sessionMap};
 }
 
-test('账号资料:maFile 的令牌密钥和 refreshToken;旧版 cookies 文件兜底 refreshToken;缓存给钱包和国家', () => {
+test('账号资料:maFile 的令牌密钥、设备 ID 和 refreshToken;旧版 cookies 文件兜底 refreshToken;缓存给钱包和国家', () => {
 	const {profiles} = world({
 		'cookies/bravo.json': {refreshToken: ' RT-file '},
 		'cookies/alpha.json': {refreshToken: 'RT-ignored'},
 		[CACHE]: {Alpha: {currency: 23, balance: 3.5, country: 'jp'}, bravo: {currency: null, currencyISO: '', balance: null, country: 'jp'}}
-	}, {alpha: {shared_secret: ' SS ', identity_secret: 'IS', SteamID: '7656a', Session: {RefreshToken: 'RT-ma'}}});
+	}, {alpha: {shared_secret: ' SS ', identity_secret: 'IS', device_id: ' android:abc ', SteamID: '7656a', Session: {RefreshToken: 'RT-ma'}}});
 	assert.deepEqual(profiles.local(' alpha '), {
-		accountName: 'alpha', hasMaFile: true, sharedSecret: 'SS', identitySecret: 'IS', refreshToken: 'RT-ma', steamID: '7656a',
+		accountName: 'alpha', hasMaFile: true, sharedSecret: 'SS', identitySecret: 'IS', deviceId: 'android:abc', refreshToken: 'RT-ma', steamID: '7656a',
 		country: 'CN', hasWallet: true, currency: 23, currencyISO: 'CNY', balance: 3.5
 	});
 	const bravo = profiles.local('bravo');
-	assert.deepEqual([bravo.hasMaFile, bravo.refreshToken, bravo.country, bravo.hasWallet], [false, 'RT-file', 'JP', false], '没有币种时用缓存里的国家');
+	assert.deepEqual([bravo.hasMaFile, bravo.deviceId, bravo.refreshToken, bravo.country, bravo.hasWallet], [false, '', 'RT-file', 'JP', false], '没有币种时用缓存里的国家');
 	assert.equal(profiles.local('').accountName, '');
 });
 

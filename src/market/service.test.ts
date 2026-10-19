@@ -174,7 +174,7 @@ test('挂求购:不用确认的直接成交,记账本;按 id/账号名去重', a
 });
 
 test('挂求购:要手机确认 → 用挂单前快照确认 → 带 confirmation 重发拿到 buy_orderid', async () => {
-	const h = harness([attempt('alpha')]);
+	const h = harness([attempt('alpha')], {}, {deviceIdFor: name => name === 'alpha' ? 'android:mafile-alpha' : ''});
 	h.create.alpha = [{confirmationId: '555', needsConfirmation: true}, {needsConfirmation: true}, {buyOrderId: 'BO-final'}];
 	const result = await h.service.place({accountIds: ['alpha'], appid: 730, marketHashName: AK, pricePerItem: 2, quantity: 1});
 	assert.equal(result.placed, 1);
@@ -182,6 +182,10 @@ test('挂求购:要手机确认 → 用挂单前快照确认 → 带 confirmatio
 	assert.deepEqual(h.calls, ['snapshot alpha', 'create alpha 200x1', 'confirm alpha', 'create alpha 200x1 conf=555', 'create alpha 200x1 conf=555']);
 	assert.deepEqual(h.confirmParams[0]?.priorConfIds, new Set(['old']));
 	assert.equal(h.confirmParams[0]?.confirmationId, '555');
+	// 手机确认用会话的 SteamID、UA 和 maFile 的设备 ID
+	const {cookies, steamID, deviceId, userAgent, identitySecret} = h.confirmParams[0] ?? {};
+	assert.deepEqual({cookies, steamID, deviceId, userAgent, identitySecret},
+		{cookies: ['steamLoginSecure=alpha'], steamID: '7656alpha', deviceId: 'android:mafile-alpha', userAgent: 'UA', identitySecret: 'IS-alpha'});
 	assert.deepEqual(h.sleeps, [1500]);
 	assert.equal(ledgerOf(h)[0]?.status, 'active');
 });

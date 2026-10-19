@@ -78,6 +78,8 @@ export interface FakeSteamEvent {
 	form?: Record<string, string>;
 	referer?: string;
 	owner?: string;
+	/** marketConfirmList / marketConfirm:mobileconf 的查询参数(p、a、k、t、m、tag……) */
+	params?: Record<string, string>;
 	/** marketConfirmList / marketConfirm:确认 key 的 tag、确认项 id、是否同意 */
 	tag?: string;
 	confId?: string;

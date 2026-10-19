@@ -81,7 +81,7 @@ describe('市场求购', () => {
 			{accountName: 'charlie', password: 'pw-good'}
 		]));
 		// 只有 alpha 有 maFile(identity_secret),能自动手机确认
-		writeFileSync(join(appRoot, 'data', 'config', 'mafile', 'alpha.maFile'), JSON.stringify({account_name: 'alpha', identity_secret: 'E2E-IDENTITY-SECRET'}));
+		writeFileSync(join(appRoot, 'data', 'config', 'mafile', 'alpha.maFile'), JSON.stringify({account_name: 'alpha', identity_secret: 'E2E-IDENTITY-SECRET', device_id: 'android:e2e-alpha-device'}));
 		scenario({});
 		server = await startServer({appRoot, env: {APP_PASSWORD: password, FAKE_MARKET_FILE: marketFile}});
 		client = new Client(server.baseUrl);
@@ -171,8 +171,10 @@ describe('市场求购', () => {
 			assert.equal(call.referer, AK_URL);
 		}
 		assert.notEqual(created[0]?.owner, created[1]?.owner);
-		// alpha 有 maFile:挂单前先拍一次确认项快照
-		assert.deepEqual(events('marketConfirmList').map(e => e.tag), ['list']);
+		// alpha 有 maFile:挂单前先拍一次确认项快照(设备 ID 用 maFile 的 device_id)
+		const lists = events('marketConfirmList');
+		assert.deepEqual(lists.map(e => e.tag), ['getlist']);
+		assert.deepEqual([lists[0]?.params?.p, lists[0]?.params?.m], ['android:e2e-alpha-device', 'react']);
 
 		const orders = await ledger();
 		assert.deepEqual(orders.map(o => [o.account, o.status, o.quantity, o.pricePerItemCents, o.priceTotalCents, o.itemName]).sort(), [
@@ -195,7 +197,7 @@ describe('市场求购', () => {
 
 		const confirms = events('marketConfirm');
 		assert.equal(confirms.length, 1);
-		assert.deepEqual([confirms[0]?.tag, confirms[0]?.accept], ['accept', true]);
+		assert.deepEqual([confirms[0]?.tag, confirms[0]?.accept, confirms[0]?.params?.p], ['allow', true, 'android:e2e-alpha-device']);
 		const resend = marketCalls('/market/createbuyorder/').filter(e => e.form?.confirmation);
 		assert.deepEqual(resend.map(e => e.form?.confirmation), [confirms[0]?.confId]);
 

@@ -161,6 +161,8 @@ export interface MarketServiceOptions {
 	writeText(file: string, text: string): void;
 	/** CS2 中英文名词库:搜商品用(TF2 搜社区 nameid 库的英文名) */
 	names?: Pick<NameDb, 'search' | 'zh'>;
+	/** maFile 里的 device_id(手机确认的设备 ID);没有为 '' */
+	deviceIdFor?: (accountName: string) => string;
 	client?: MarketClient;
 	confirmer?: BuyOrderConfirmer;
 	fetch?: typeof fetch;
@@ -174,7 +176,7 @@ export function createMarketService(options: MarketServiceOptions) {
 	const logger = options.logger ?? console;
 	const log: MarketLog = (level, message) => level === 'warn' ? logger.warn(message) : logger.log(message);
 	const client = options.client ?? createMarketClient({fetch: options.fetch, log});
-	const confirmer = options.confirmer ?? createBuyOrderConfirmer({log});
+	const confirmer = options.confirmer ?? createBuyOrderConfirmer({fetch: options.fetch, log});
 	const sleep = options.sleep ?? ((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)));
 	const now = options.now ?? Date.now;
 	const randomId = options.randomId ?? randomUUID;
@@ -396,13 +398,16 @@ export function createMarketService(options: MarketServiceOptions) {
 		}
 		const priceTotalCents = job.pricePerItemCents * quantity;
 
+		// 手机确认要的账号信息(identity_secret 另传)
+		const confirmAs = {cookies, steamID: attempt.steamID || '', deviceId: options.deviceIdFor?.(attempt.accountName) || '', userAgent: attempt.userAgent};
+
 		try {
 			// 挂单前快照已有的确认项,挂单后新冒出来的那条就是本单(见 ./confirmations.ts)。只对有 maFile 的账号做;
 			// 读不到不拦着挂单(不一定要确认,要确认时还有 confirmation_id 兜底),不在这里等限流
 			let priorConfIds: Set<string> | null = null;
 			if (attempt.identitySecret) {
 				try {
-					priorConfIds = await confirmer.listConfirmationIds({cookies, identitySecret: attempt.identitySecret});
+					priorConfIds = await confirmer.listConfirmationIds({...confirmAs, identitySecret: attempt.identitySecret});
 				} catch (err) {
 					priorConfIds = null;
 					log('warn', `[market-buyorder] ${attempt.accountName} 挂单前读取确认列表失败:${errorText(err) || '未知错误'}`);
@@ -432,7 +437,7 @@ export function createMarketService(options: MarketServiceOptions) {
 				} else {
 					try {
 						await confirmer.confirmBuyOrder({
-							cookies,
+							...confirmAs,
 							identitySecret: attempt.identitySecret,
 							confirmationId: first.confirmationId,
 							buyOrderId: first.buyOrderId,
