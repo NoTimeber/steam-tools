@@ -397,13 +397,15 @@ export function createMarketService(options: MarketServiceOptions) {
 		const priceTotalCents = job.pricePerItemCents * quantity;
 
 		try {
-			// 挂单前快照已有的确认项,挂单后新冒出来的那条就是本单(见 ./confirmations.ts)。只对有 maFile 的账号做
+			// 挂单前快照已有的确认项,挂单后新冒出来的那条就是本单(见 ./confirmations.ts)。只对有 maFile 的账号做;
+			// 读不到不拦着挂单(不一定要确认,要确认时还有 confirmation_id 兜底),不在这里等限流
 			let priorConfIds: Set<string> | null = null;
 			if (attempt.identitySecret) {
 				try {
 					priorConfIds = await confirmer.listConfirmationIds({cookies, identitySecret: attempt.identitySecret});
-				} catch {
+				} catch (err) {
 					priorConfIds = null;
+					log('warn', `[market-buyorder] ${attempt.accountName} 挂单前读取确认列表失败:${errorText(err) || '未知错误'}`);
 				}
 			}
 

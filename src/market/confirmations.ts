@@ -8,7 +8,8 @@
 // 挂单后新冒出来的那条就是本单;再用 confirmation_id / buy_orderid 比 id 和 creator 兜底。
 // 多条候选又分不清时宁可报错让用户手动确认,绝不盲目确认别的东西(比如一笔待确认的交易报价)。
 //
-// steamcommunity 一定要走 ../steam/community.ts 的工厂:库默认的 Chrome/118 UA 会被 Steam 以 429 挡掉。
+// steamcommunity 一定要走 ../steam/community.ts 的工厂:库默认的 Chrome/118 UA 会被 Steam 以 429 挡掉;
+// 工厂还让 mobileconf 请求按出口排队(两次至少隔几秒)。UA 对了发太密也会 429,读列表、提交确认碰到 429 就等一会再试。
 
 import {createRequire} from 'node:module';
 import {createSteamCommunity} from '../steam/community.ts';
@@ -17,6 +18,13 @@ import type {MarketLog} from './client.ts';
 const require = createRequire(import.meta.url);
 
 const TIME_OFFSET_TTL_MS = 60 * 60 * 1000;
+/** mobileconf 回 429 后依次等多久再试;都等完还是 429 就报限流 */
+const RATE_LIMIT_WAITS_MS = [10000, 20000];
+
+/** steamcommunity 的 HTTP 错误是「HTTP error 429」,带 code */
+function isRateLimited(err: unknown): boolean {
+	return (err as {code?: unknown} | null)?.code === 429 || /HTTP error 429\b/.test(err instanceof Error ? err.message : String(err));
+}
 
 interface ConfirmationKey {
 	tag: string;
@@ -50,6 +58,8 @@ export interface ConfirmerOptions {
 	sleep?: (ms: number) => Promise<void>;
 	now?: () => number;
 	log?: MarketLog;
+	/** 429 后依次等多久再试(测试注入) */
+	rateLimitWaitsMs?: readonly number[];
 }
 
 export interface ListConfirmationsParams {
@@ -62,6 +72,7 @@ export interface ConfirmBuyOrderParams extends ListConfirmationsParams {
 	buyOrderId?: string;
 	/** 挂单前的确认项 id 快照;读取失败时为 null */
 	priorConfIds?: ReadonlySet<string> | null;
+	/** 每次读列表 / 提交确认的超时(含在出口队列里等的时间) */
 	timeoutMs?: number;
 	/** 确认项可能在挂单后稍晚才出现:最多查几次、间隔多久 */
 	attempts?: number;
@@ -79,6 +90,26 @@ export function createBuyOrderConfirmer(options: ConfirmerOptions = {}) {
 	const sleep = options.sleep ?? ((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)));
 	const now = options.now ?? Date.now;
 	const log: MarketLog = options.log ?? (() => {});
+	const rateLimitWaits = options.rateLimitWaitsMs ?? RATE_LIMIT_WAITS_MS;
+
+	/** 回 429 时按 rateLimitWaits 等一会再试;等完还是 429 就报限流,别的错误照抛 */
+	async function retryRateLimited<T>(label: string, run: () => Promise<T>): Promise<T> {
+		for (let retry = 0; ; retry++) {
+			try {
+				return await run();
+			} catch (err) {
+				const wait = rateLimitWaits[retry];
+				if (!isRateLimited(err)) {
+					throw err;
+				}
+				if (wait == null) {
+					throw new Error(`Steam 手机确认接口限流(HTTP 429),重试 ${rateLimitWaits.length} 次仍不行。过几分钟再试,或给这个账号换个代理`);
+				}
+				log('warn', `[market-buyorder] ${label}被 Steam 限流(HTTP 429),${wait / 1000} 秒后重试(${retry + 1}/${rateLimitWaits.length})`);
+				await sleep(wait);
+			}
+		}
+	}
 
 	// 本机与 Steam 的时间差(确认 key 用),缓存 1 小时,不用每个账号都查一次。查失败用上次的值或 0,不缓存
 	let cachedOffset: number | null = null;
@@ -145,9 +176,9 @@ export function createBuyOrderConfirmer(options: ConfirmerOptions = {}) {
 		const confirmationId = String(params.confirmationId || '').trim();
 		const buyOrderId = String(params.buyOrderId || '').trim();
 		const prior = params.priorConfIds ?? null;
-		const timeoutMs = params.timeoutMs || 30000;
-		const attempts = params.attempts || 6;
-		const gapMs = params.gapMs || 2000;
+		const timeoutMs = params.timeoutMs || 60000;
+		const attempts = params.attempts || 4;
+		const gapMs = params.gapMs || 5000;
 
 		if (!cookies.length) {
 			throw new Error('缺少 WebSession cookies,无法确认求购单');
@@ -171,7 +202,7 @@ export function createBuyOrderConfirmer(options: ConfirmerOptions = {}) {
 		const offset = await timeOffset();
 
 		for (let i = 0; i < attempts; i++) {
-			const confirmations = await withTimeout(fetchConfirmations(community, identitySecret, offset), 'getConfirmations');
+			const confirmations = await retryRateLimited('读取确认列表', () => withTimeout(fetchConfirmations(community, identitySecret, offset), 'getConfirmations'));
 			// 有快照就只看新冒出来的(和字段含义无关,最稳);没有就看全部
 			const candidates = prior ? confirmations.filter(conf => !prior.has(String(conf.id))) : confirmations;
 			// confirmation_id 可能等于 conf.id 也可能等于 creator,两边都比;再用 buy_orderid 比 creator;候选只有一条就是它
@@ -180,7 +211,7 @@ export function createBuyOrderConfirmer(options: ConfirmerOptions = {}) {
 				|| (candidates.length === 1 ? candidates[0] : undefined);
 
 			if (conf) {
-				await withTimeout(accept(conf, identitySecret, offset), 'respondConfirmation');
+				await retryRateLimited('提交确认', () => withTimeout(accept(conf, identitySecret, offset), 'respondConfirmation'));
 				const recovered = String(conf.creator || '') || buyOrderId;
 				log('info', `[market-buyorder] 求购单手机确认完成(confId=${conf.id}, creator/buyOrderId=${recovered || '?'})`);
 				return {confirmed: true, buyOrderId: recovered};
