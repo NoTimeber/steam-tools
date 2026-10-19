@@ -1,4 +1,4 @@
-// 库存:选一个已登录的账号,拉 /api/inventory/:attemptId(社区库存为准,不用连 GC;连着 CS2 GC 时拉不到用 GC 缓存)。
+// 库存:选一个已登录的账号,拉 /api/inventory/:attemptId(后端先让账号连上 CS2 GC 再拉社区库存,交易冷却、磨损才全;社区拉不到时用 GC 缓存)。
 // 状态放在模块里,切到别的页面再回来不用重新加载。
 
 import {computed, reactive} from 'vue';
@@ -60,7 +60,7 @@ export function saveInventoryView(): void {
 
 let version = 0;
 
-/** 能看库存的账号:已登录的(要网页 cookie,不用连 GC) */
+/** 能看库存的账号:已登录的(没连 CS2 GC 的,加载时后端会替它连上) */
 export const inventoryAccounts = computed<AccountRow[]>(() => accounts.rows.filter(row => !!row.attemptId && row.status === '登录成功'));
 
 export const selectedAccount = computed<AccountRow | null>(() => inventoryAccounts.value.find(row => row.key === inventory.selectedKey) ?? null);

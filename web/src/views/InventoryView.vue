@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// 库存管理(照 SteamLabs 的库存页):选一个已登录的账号(不用连 GC),顶部数字卡,逐件/堆叠两种看法,网格卡片或列表,筛选、排序、翻页,点物品看详情。
+// 库存管理(照 SteamLabs 的库存页):选一个已登录的账号(加载时先连上 CS2 GC),顶部数字卡,逐件/堆叠两种看法,网格卡片或列表,筛选、排序、翻页,点物品看详情。
 import {computed, h, onMounted, onUnmounted, ref, watch} from 'vue';
 import {NButton, NDataTable, NInput, NPagination, NSelect, NSpin, NTab, NTabs, NTooltip} from 'naive-ui';
 import type {DataTableColumns, SelectOption} from 'naive-ui';
@@ -141,7 +141,7 @@ function setPageSize(size: number): void {
 
 const emptyText = computed(() => {
 	if (!selectedAccount.value) return '请先在「账户管理」里登录账号,再来这里选账户';
-	if (inventory.loading && !loaded.value) return '正在加载库存...';
+	if (inventory.loading && !loaded.value) return selectedAccount.value.cs2GcConnected ? '正在加载库存...' : '正在连接 CS2 GC,连上后加载库存...';
 	if (inventory.error) return inventory.error;
 	if (!loaded.value) return '点「刷新库存」开始加载';
 	if (!items.value.length) return '当前账户暂无库存';

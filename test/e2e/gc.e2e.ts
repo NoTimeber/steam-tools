@@ -154,13 +154,15 @@ describe('GC', () => {
 		assert.equal((await client.get('/api/terminal/state?accountId=nobody')).status, 404);
 	});
 
-	test('库存不用连 GC:断开 GC 后照样拉社区库存', async () => {
+	test('库存先连 GC:断开 GC 后打开库存,会先进 CS2 等 GC 连上再拉社区库存', async () => {
 		writeFileSync(join(appRoot, 'fake-inventory.json'), JSON.stringify({}));
 		assert.equal((await client.post(`/api/gc/disconnect/${attemptId}`, {game: 'cs2'})).status, 200);
-		const res = await client.get(`/api/inventory/${attemptId}?refresh=1`);
+		const res = await client.get(`/api/inventory/${attemptId}`);
 		assert.equal(res.status, 200, res.text.slice(0, 300));
-		assert.deepEqual([res.json.inventory.source, res.json.inventory.itemCount, res.json.attempt.cs2GcConnected], ['community', 3, false]);
+		assert.deepEqual([res.json.inventory.source, res.json.inventory.itemCount, res.json.attempt.cs2GcConnected], ['community', 3, true]);
 		assert.equal(res.json.attempt.inventoryCount, 3);
+		const played = server.steamEvents().filter(e => e.event === 'gamesPlayed');
+		assert.deepEqual(played.at(-1)?.apps, [730]);
 	});
 
 	test('外部网络全部被拦截,只有预期内的请求', () => {

@@ -195,6 +195,57 @@ test('库存:GC 来源的新鲜缓存不短路(还是去拉社区);没连 GC 也
 	assert.deepEqual(noCookie.requests, []);
 });
 
+/** 库存页先连 GC:attempt 上挂假客户端(记 gamesPlayed)和假 CS2 模块 */
+function withGcClient(h: ReturnType<typeof harness>) {
+	const played: number[][] = [];
+	const csgo = Object.assign(new EventEmitter(), {inventory: [{id: '9', def_index: 7}]});
+	Object.assign(h.attempt, {
+		cs2GcConnected: false, gcConnected: false, activeGame: 'cs2', csgo,
+		client: {gamesPlayed: (apps: number[]) => void played.push(apps), webLogOn: () => {}}
+	});
+	return {
+		played, csgo,
+		connect() {
+			Object.assign(h.attempt, {cs2GcConnected: true, gcConnected: true});
+			csgo.emit('connectedToGC');
+		}
+	};
+}
+
+test('库存页先连 GC:没连就先进 CS2、等 GC 连上,再跳过缓存重拉;同时打开只连一次;已连上不再进游戏', async () => {
+	const h = harness([page(['1']), page(['1', '2']), page(['3'])]);
+	const gc = withGcClient(h);
+	await h.service.get(h.attempt);
+	assert.deepEqual([h.requests, gc.played], [['first'], []], '终端机这类调用方不替账号连 GC');
+
+	const both = Promise.all([h.service.get(h.attempt, {connectGc: true}), h.service.get(h.attempt, {connectGc: true})]);
+	await new Promise(resolve => setImmediate(resolve));
+	assert.deepEqual(gc.played, [[730]], '两次打开只进一次游戏');
+	assert.deepEqual(h.requests, ['first'], 'GC 没连上前不拉社区');
+	gc.connect();
+	const [a, b] = await both;
+	assert.equal(a, b);
+	assert.deepEqual([a.itemCount, h.requests], [2, ['first', 'first']], '刚连上 GC,15 秒内的缓存也不算数');
+
+	assert.equal((await h.service.get(h.attempt, {connectGc: true})).itemCount, 2, '已连上:照常用缓存');
+	assert.deepEqual([gc.played.length, h.requests.length], [1, 2]);
+});
+
+test('库存页先连 GC:GC 报错或账号没登录就报错,不拉社区库存', async () => {
+	const h = harness([page(['1'])]);
+	const gc = withGcClient(h);
+	const pending = h.service.get(h.attempt, {connectGc: true});
+	await new Promise(resolve => setImmediate(resolve));
+	gc.csgo.emit('error', new Error('boom'));
+	await assert.rejects(pending, (err: Error & {statusCode?: number}) => err.statusCode === 409 && err.message.startsWith('CS2 GC 没连上(boom)'));
+	assert.deepEqual(h.requests, []);
+
+	const offline = harness([page(['1'])]);
+	Object.assign(offline.attempt, {cs2GcConnected: false, client: null});
+	await assert.rejects(offline.service.get(offline.attempt, {connectGc: true}), /当前账号尚未登录 Steam/);
+	assert.deepEqual(offline.requests, []);
+});
+
 // ===== GC 模块挂载 =====
 
 class FakeModule extends EventEmitter {

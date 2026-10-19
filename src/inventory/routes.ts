@@ -13,14 +13,14 @@ export interface InventoryRouteDeps {
 }
 
 export function inventoryRoutes(router: Router, {inventory, getAttempt, publicAttempt}: InventoryRouteDeps): void {
-	// ?refresh=1 跳过缓存
+	// 库存页:先连上 CS2 GC 再拉(交易冷却、磨损要靠 GC);?refresh=1 跳过缓存
 	router.get('/api/inventory/:id', async (req, res) => {
 		const attempt = getAttempt(req.params.id!);
 		if (!attempt) {
 			return res.status(404).json({success: false, error: '任务不存在'});
 		}
 		try {
-			const snapshot = await inventory.get(attempt, {forceRefresh: req.query.refresh === '1'});
+			const snapshot = await inventory.get(attempt, {forceRefresh: req.query.refresh === '1', connectGc: true});
 			res.json({success: true, attempt: publicAttempt(attempt), inventory: snapshot});
 		} catch (err) {
 			sendError(res, err, '库存读取失败');

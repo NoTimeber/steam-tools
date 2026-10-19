@@ -185,12 +185,13 @@ const proxy = createProxyService({
 });
 useCommunityProxy(cookies => proxy.proxyForCookies(cookies));
 
-// 库存:CS2 物品名靠本地 schema 描述 GC 物品;库存数量变了推送会话
+// 库存:CS2 物品名靠本地 schema 描述 GC 物品;库存数量变了推送会话;库存页替账号连 CS2 GC 时写会话日志
 const inventory = createInventoryService({
 	describeGcItem: item => describeGcItem(cs2Schema, item),
 	cookiesFor: profiles.cookiesFor,
 	fetch: proxy.fetch,
-	emit: attempt => sessions.emit(attempt)
+	emit: attempt => sessions.emit(attempt),
+	addLog: (attempt, level, message) => sessions.addLog(attempt, level, message)
 });
 
 // CS2 终端机:报价皮肤中文名用 ByMykel 皮肤库(data/cs2-skin-db.json 缓存,app/data/ 随包副本),揭示过的报价记在 data/terminal-offers.json
