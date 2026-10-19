@@ -159,7 +159,7 @@ test('行情:有 nameid 就不抓商品页,直接查盘口;没有求购时最高
 	});
 	assert.deepEqual(context, {
 		appid: 730, marketHashName: 'AK-47 | Redline', currency: 23, itemNameId: '42', itemName: '',
-		highestBuyOrderCents: 0, lowestSellOrderCents: 150, lowestPrice: '$1.50', medianPrice: '$1.40', volume: '1,234'
+		highestBuyOrderCents: 0, lowestSellOrderCents: 150, lowestPrice: '$1.50', medianPrice: '$1.40', volume: '1,234', issues: []
 	});
 	assert.equal(sent.length, 2);
 	const histogram = new URL(sent[0]?.url ?? '');
@@ -179,6 +179,39 @@ test('行情:尽力而为,哪一步断网都不抛;老页面还能抓到 nameid'
 	assert.equal(context.lowestPrice, '');
 	assert.equal(sent.length, 3);
 	assert.equal(sent[0]?.headers.Cookie, undefined, '没有 cookie 就不带 Cookie 头');
+	assert.deepEqual(context.issues, ['盘口:network down', '概览价:network down'], '没拿到的写明原因');
+});
+
+test('行情:没拿到的写明原因(页面照着显示、日志里也有);429 等一会再试一次', async () => {
+	/** 按 URL 前缀依次回的 [状态码, 正文] */
+	const replies: Record<string, Array<[number, string]>> = {
+		[C + '/market/itemordershistogram']: [[429, json({success: false, message: 'Rate limit exceeded'})], [200, json({success: 1, highest_buy_order: '261', lowest_sell_order: '268'})]],
+		[C + '/market/priceoverview/']: [[429, ''], [429, '']]
+	};
+	const http = (async (input: string | URL) => {
+		const url = String(input);
+		const queue = replies[Object.keys(replies).find(prefix => url.startsWith(prefix)) ?? ''] ?? [];
+		const [status, body] = queue.length > 1 ? queue.shift()! : queue[0] ?? [404, ''];
+		return new Response(body, {status});
+	}) as typeof fetch;
+	const waits: number[] = [];
+	const logs: string[] = [];
+	const client = createMarketClient({fetch: http, sleep: async ms => void waits.push(ms), log: (level, message) => void logs.push(`${level} ${message}`)});
+	const context = await client.fetchMarketContext({appid: 730, marketHashName: 'Sealed Dead Hand Terminal', itemNameId: '176610550', currency: 23});
+	assert.deepEqual([context.highestBuyOrderCents, context.lowestSellOrderCents], [261, 268], '盘口第二次拿到了');
+	assert.equal(context.lowestPrice, '');
+	assert.deepEqual(context.issues, ['概览价:Steam 限流(HTTP 429),过一会再查']);
+	assert.deepEqual(waits, [2000, 2000], '两个接口各等了一次');
+	assert.deepEqual(logs, ['warn [market-buyorder] 行情 Sealed Dead Hand Terminal 的概览价没拿到:Steam 限流(HTTP 429),过一会再查']);
+
+	replies[C + '/market/itemordershistogram'] = [[200, json({success: 16})]];
+	replies[C + '/market/priceoverview/'] = [[403, '<html><title>Access Denied</title></html>']];
+	const refused = await client.fetchMarketContext({appid: 730, marketHashName: 'X', itemNameId: '1'});
+	assert.deepEqual(refused.issues, ['盘口:Steam 返回 success=16', '概览价:HTTP 403 页面「Access Denied」']);
+
+	replies[C + '/market/listings/'] = [[200, '<title>Steam Community Market :: Listings for X</title>']];
+	const noNameId = await client.fetchMarketContext({appid: 730, marketHashName: 'X'});
+	assert.equal(noNameId.issues[0], '盘口:找不到这件的 item_nameid,查不了最高求购和最低在售');
 });
 
 test('分组链接:读页面标题里的分组名(解实体、去掉站名后缀);只读到 </title>;打不开报错', async () => {

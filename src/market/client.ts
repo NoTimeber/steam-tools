@@ -49,6 +49,8 @@ export interface MarketContext extends MarketTarget {
 	medianPrice: string;
 	volume: string;
 	currencyISO?: string;
+	/** 没拿到的部分和原因(如「盘口:Steam 限流(HTTP 429)…」),页面上照着显示;都拿到了是空数组 */
+	issues: string[];
 }
 
 export interface WebSessionParams {
@@ -300,13 +302,18 @@ export function listingUrl(appid: number, marketHashName: string): string {
 export interface MarketClientOptions {
 	fetch?: typeof fetch;
 	log?: MarketLog;
+	sleep?: (ms: number) => Promise<void>;
 }
+
+/** 行情接口回 429 时等多久再试一次 */
+const CONTEXT_RETRY_MS = 2000;
 
 export function createMarketClient(options: MarketClientOptions = {}) {
 	const http = options.fetch ?? ((input, init) => fetch(input, init));
 	const log: MarketLog = options.log ?? (() => {});
+	const sleep = options.sleep ?? ((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)));
 
-	/** 行情参考(尽力而为):商品页名称/nameid → 盘口 → 概览价。任何一步失败都不抛,返回已拿到的部分 */
+	/** 行情参考(尽力而为):商品页名称/nameid → 盘口 → 概览价。任何一步失败都不抛,返回已拿到的部分,没拿到的原因在 issues 里 */
 	async function fetchMarketContext(params: ContextParams): Promise<MarketContext> {
 		const {appid, marketHashName} = params;
 		const cookies = (params.cookies ?? []).filter(Boolean);
@@ -330,8 +337,35 @@ export function createMarketClient(options: MarketClientOptions = {}) {
 			lowestSellOrderCents: null,
 			lowestPrice: '',
 			medianPrice: '',
-			volume: ''
+			volume: '',
+			issues: []
 		};
+
+		/** 查一个行情接口,回 Steam 的 JSON(accept 为真的);拿不到就记一条原因(日志和页面都看得到)、返回 null。429 等一会再试一次 */
+		async function contextJson(label: string, url: URL, headers: Record<string, string>, accept: (json: any) => boolean): Promise<any> {
+			for (let attempt = 0; ; attempt++) {
+				let issue: string;
+				try {
+					const res = await http(url, {headers});
+					const {text, json} = await readJson(res);
+					if (res.ok && json && accept(json)) {
+						return json;
+					}
+					if (res.status === 429 && attempt === 0) {
+						await sleep(CONTEXT_RETRY_MS);
+						continue;
+					}
+					issue = res.status === 429 ? 'Steam 限流(HTTP 429),过一会再查'
+						: !res.ok || !json ? responseSummary(res, text, 120)
+						: `Steam 返回 success=${json.success}`;
+				} catch (err) {
+					issue = errorText(err);
+				}
+				result.issues.push(`${label}:${issue}`);
+				log('warn', `[market-buyorder] 行情 ${marketHashName} 的${label}没拿到:${issue}`);
+				return null;
+			}
+		}
 
 		// 1) 调用方没给 nameid 时抓商品页试老正则(还没改版的游戏能抓到),顺便取展示名。
 		//    有 nameid 就不抓:新版页面会 302 到好几 MB 的分组页,里面既没有 nameid 也不是这一件的名字
@@ -355,40 +389,34 @@ export function createMarketClient(options: MarketClientOptions = {}) {
 
 		// 2) 盘口:最高求购 / 最低在售(要 item_nameid)
 		if (result.itemNameId) {
-			try {
-				const url = new URL(COMMUNITY + '/market/itemordershistogram');
-				url.searchParams.set('country', country);
-				url.searchParams.set('language', language);
-				url.searchParams.set('currency', String(currency));
-				url.searchParams.set('item_nameid', result.itemNameId);
-				url.searchParams.set('two_factor', '0');
-				const {json} = await readJson(await http(url, {headers: {...baseHeaders, Accept: 'application/json', Referer: pageUrl}}));
-				if (json && Number(json.success) === 1) {
-					// 没有求购/在售时 Steam 给 null,这里得到 0(和旧版一致):前端把 null 当成「缺 nameid」,
-					// 而最高求购 0 时它会建议出价 0.01,正合适
-					result.highestBuyOrderCents = finiteOrNull(json.highest_buy_order);
-					result.lowestSellOrderCents = finiteOrNull(json.lowest_sell_order);
-				}
-			} catch (err) {
-				log('warn', `[market-buyorder] 盘口抓取失败: ${errorText(err)}`);
+			const url = new URL(COMMUNITY + '/market/itemordershistogram');
+			url.searchParams.set('country', country);
+			url.searchParams.set('language', language);
+			url.searchParams.set('currency', String(currency));
+			url.searchParams.set('item_nameid', result.itemNameId);
+			url.searchParams.set('two_factor', '0');
+			const json = await contextJson('盘口', url, {...baseHeaders, Accept: 'application/json', Referer: pageUrl}, body => Number(body.success) === 1);
+			if (json) {
+				// 没有求购/在售时 Steam 给 null,这里得到 0(和旧版一致):前端把 null 当成「缺 nameid」,
+				// 而最高求购 0 时它会建议出价 0.01,正合适
+				result.highestBuyOrderCents = finiteOrNull(json.highest_buy_order);
+				result.lowestSellOrderCents = finiteOrNull(json.lowest_sell_order);
 			}
+		} else {
+			result.issues.push('盘口:找不到这件的 item_nameid,查不了最高求购和最低在售');
 		}
 
 		// 3) 概览价:成交均价 / 在售最低 / 近 24h 销量
-		try {
-			const url = new URL(COMMUNITY + '/market/priceoverview/');
-			url.searchParams.set('country', country);
-			url.searchParams.set('currency', String(currency));
-			url.searchParams.set('appid', String(appid));
-			url.searchParams.set('market_hash_name', marketHashName);
-			const {json} = await readJson(await http(url, {headers: {...baseHeaders, Accept: 'application/json', Referer: pageUrl}}));
-			if (json && json.success) {
-				result.lowestPrice = String(json.lowest_price || '');
-				result.medianPrice = String(json.median_price || '');
-				result.volume = String(json.volume || '');
-			}
-		} catch (err) {
-			log('warn', `[market-buyorder] 概览价抓取失败: ${errorText(err)}`);
+		const url = new URL(COMMUNITY + '/market/priceoverview/');
+		url.searchParams.set('country', country);
+		url.searchParams.set('currency', String(currency));
+		url.searchParams.set('appid', String(appid));
+		url.searchParams.set('market_hash_name', marketHashName);
+		const json = await contextJson('概览价', url, {...baseHeaders, Accept: 'application/json', Referer: pageUrl}, body => !!body.success);
+		if (json) {
+			result.lowestPrice = String(json.lowest_price || '');
+			result.medianPrice = String(json.median_price || '');
+			result.volume = String(json.volume || '');
 		}
 
 		return result;

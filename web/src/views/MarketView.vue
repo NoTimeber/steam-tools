@@ -329,6 +329,7 @@ const ordersEmpty = computed(() => (market.visibleIds
 							<NTag v-if="market.context.medianPrice" :bordered="false">成交均价 <strong>{{ market.context.medianPrice }}</strong></NTag>
 							<NTag v-if="market.context.volume" :bordered="false">24h 销量 <strong>{{ market.context.volume }}</strong></NTag>
 						</NSpace>
+						<div v-for="issue in market.context.issues ?? []" :key="issue" class="context-issue">{{ issue }}</div>
 						<NButton v-if="suggestion != null" size="small" secondary type="primary" class="suggest" @click="setPrice(suggestion)">
 							↑ 比最高求购高一档 {{ contextCurrency }}{{ suggestion.toFixed(2) }}
 						</NButton>
@@ -466,6 +467,11 @@ const ordersEmpty = computed(() => (market.visibleIds
 
 .suggest {
 	align-self: flex-start;
+}
+
+.context-issue {
+	font-size: 12px;
+	color: var(--warn);
 }
 
 .price-grid {

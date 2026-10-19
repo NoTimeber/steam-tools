@@ -143,7 +143,7 @@ describe('市场求购', () => {
 		assert.equal(pages(), pagesBefore);
 		assert.deepEqual(res.json.context, {
 			appid: 730, marketHashName: AK, currency: 1, itemNameId: AK_NAMEID, itemName: '',
-			highestBuyOrderCents: 120, lowestSellOrderCents: 150, lowestPrice: '$1.50', medianPrice: '$1.40', volume: '321', currencyISO: 'USD'
+			highestBuyOrderCents: 120, lowestSellOrderCents: 150, lowestPrice: '$1.50', medianPrice: '$1.40', volume: '321', currencyISO: 'USD', issues: []
 		});
 		const histogram = marketCalls('/market/itemordershistogram').at(-1);
 		assert.equal(histogram?.query?.item_nameid, AK_NAMEID);

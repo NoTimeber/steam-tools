@@ -19,6 +19,8 @@ export interface MarketContext {
 	lowestPrice: string;
 	medianPrice: string;
 	volume: string;
+	/** 没拿到的部分和原因(老版本服务端没有) */
+	issues?: string[];
 }
 
 /** 搜商品的一条(src/market/index.ts 的 MarketSearchItem) */
