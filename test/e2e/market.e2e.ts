@@ -173,7 +173,7 @@ describe('市场求购', () => {
 		assert.notEqual(created[0]?.owner, created[1]?.owner);
 		// alpha 有 maFile:挂单前先拍一次确认项快照(设备 ID 用 maFile 的 device_id)
 		const lists = events('marketConfirmList');
-		assert.deepEqual(lists.map(e => e.tag), ['getlist']);
+		assert.deepEqual(lists.map(e => e.tag), ['conf']);
 		assert.deepEqual([lists[0]?.params?.p, lists[0]?.params?.m], ['android:e2e-alpha-device', 'react']);
 
 		const orders = await ledger();

@@ -8,13 +8,19 @@
 // 挂单后新冒出来的那条就是本单;再用 confirmation_id / buy_orderid 比 id 和 creator 兜底。
 // 多条候选又分不清时宁可报错让用户手动确认,绝不盲目确认别的东西(比如一笔待确认的交易报价)。
 //
-// mobileconf 请求自己发,不经 steamcommunity 库(照 aiosteampy 的 guard/confirmations.py):
-//   GET /mobileconf/getlist?p=<设备 ID>&a=<SteamID>&k=<确认 key>&t=<Steam 时间>&m=react&tag=getlist
+// mobileconf 请求自己发,不经 steamcommunity 库(参照 aiosteampy 的 guard/confirmations.py、steamguard-cli 的 confirmation.rs):
+//   GET /mobileconf/getlist?p=<设备 ID>&a=<SteamID>&k=<确认 key>&t=<Steam 时间>&m=react&tag=conf
 //   GET /mobileconf/ajaxop?...&tag=allow&op=allow&cid=<确认项 id>&ck=<确认项 nonce>
-// k = HMAC(identity_secret, t + tag)。和 steamcommunity 库的差别:设备 ID 用 maFile 的 device_id(库只能按 SteamID 算一个),
+// k = HMAC(identity_secret, t + tag)。getlist 的 tag 用 conf(steamcommunity 默认、steamguard-cli、SDA 都是它;aiosteampy 用 getlist)。
+// 和 steamcommunity 库的差别:设备 ID 优先用 maFile 的 device_id(库只能按 SteamID 算一个),
 // HTTP 和挂单走同一套(按账号选代理的 fetch),Steam 时间差也经它查;出错时把 Steam 的原话带进报错和日志。
 // 2026-10 用户服务器上经 steamcommunity 库确认一直 429,而同一个出口挂单正常,所以换成这样。
 // UA 对了发太密也会 429:请求按出口排队(../steam/community.ts 的 mobileconfQueue),碰到 429 等一会再试。
+//
+// Steam 拒绝时回 200 + {success:false, message:"Oh nooooooes!", detail:"<原因>"}:message 只是通用错误页的标题,原因在 detail。
+// SDA 见过 device_id 坏了时是「There was a problem loading the confirmation page」;identity_secret / 时间不对是
+// 「...providing incorrect Steam Guard codes」。所以读列表被拒时,换另一个设备 ID(maFile 的 ↔ 按 SteamID 算的)再试一次,
+// 能用的那个这次运行里记住。
 
 import {createRequire} from 'node:module';
 import {steamIdFromCookies} from '../proxy/index.ts';
@@ -30,6 +36,8 @@ const QUERY_TIME_URL = 'https://api.steampowered.com/ITwoFactorService/QueryTime
 const TIME_OFFSET_TTL_MS = 60 * 60 * 1000;
 /** mobileconf 回 429 后依次等多久再试;都等完还是 429 就报限流 */
 const RATE_LIMIT_WAITS_MS = [10000, 20000];
+/** 设备 ID 的样子:android: 后面一串十六进制和横线(SDA 坏掉时会写成 ERROR 之类) */
+const DEVICE_ID = /^android:[0-9a-z-]{8,}$/i;
 
 /** 待确认项(getlist 返回的 conf[] 里用到的字段) */
 export interface Confirmation {
@@ -82,14 +90,16 @@ export interface ConfirmBuyOrderParams extends ListConfirmationsParams {
 	gapMs?: number;
 }
 
-/** mobileconf 的错误:status 是 HTTP 状态码(Steam 回 JSON 说失败时没有) */
+/** mobileconf 的错误:status 是 HTTP 状态码(Steam 回 JSON 说失败时没有);refused 是 Steam 回了 success=false(不是要重新登录) */
 class MobileconfError extends Error {
 	status: number;
 	steamText: string;
-	constructor(message: string, status = 0, steamText = '') {
+	refused: boolean;
+	constructor(message: string, status = 0, steamText = '', refused = false) {
 		super(message);
 		this.status = status;
 		this.steamText = steamText;
+		this.refused = refused;
 	}
 }
 
@@ -102,10 +112,11 @@ function snippet(text: string, max = 160): string {
 	return flat.length > max ? flat.slice(0, max) + '…' : flat;
 }
 
-/** Steam 回的话:JSON 的 message / detail,HTML 取标题,别的取开头一段 */
+/** Steam 回的话:JSON 的 message + detail(message 常常只是「Oh nooooooes!」,原因在 detail),HTML 取标题,别的取开头一段 */
 function steamWords(text: string, json: any): string {
 	if (json && typeof json === 'object') {
-		return String(json.message || json.detail || '') || snippet(text);
+		const words = [json.message, json.detail].map(value => String(value ?? '').trim()).filter(Boolean);
+		return words.join(' ') || snippet(text);
 	}
 	const title = /<title[^>]*>([^<]*)<\/title>/i.exec(text)?.[1]?.trim();
 	return title || snippet(text);
@@ -163,14 +174,25 @@ export function createBuyOrderConfirmer(options: ConfirmerOptions = {}) {
 		return cachedOffset ?? 0;
 	}
 
+	// 这次运行里各账号(SteamID)读列表成功过的设备 ID,下次先用它
+	const workingDeviceIds = new Map<string, string>();
+
 	interface Session {
 		cookies: string[];
 		identitySecret: string;
 		steamID: string;
+		/** 依次可试的设备 ID;deviceId 是现在用的那个 */
+		deviceIds: string[];
 		deviceId: string;
+		/** maFile 的 device_id(能用的才算);'' 没有 */
+		maFileDeviceId: string;
 		userAgent: string;
 		timeoutMs: number;
 		offset: number;
+	}
+
+	function deviceSource(session: Session, deviceId: string): string {
+		return deviceId === session.maFileDeviceId ? 'maFile 的' : '按 SteamID 算的';
 	}
 
 	async function openSession(params: ListConfirmationsParams): Promise<Session> {
@@ -179,11 +201,19 @@ export function createBuyOrderConfirmer(options: ConfirmerOptions = {}) {
 		if (!steamID) {
 			throw new Error('cookies 里没有 steamLoginSecure,读不出 SteamID,无法手机确认');
 		}
+		const fromMaFile = String(params.deviceId || '').trim();
+		const maFileDeviceId = DEVICE_ID.test(fromMaFile) ? fromMaFile : '';
+		if (fromMaFile && !maFileDeviceId) {
+			log('warn', `[market-buyorder] maFile 的 device_id 不像设备 ID(${snippet(fromMaFile, 40)}),改用按 SteamID 算的`);
+		}
+		const deviceIds = [...new Set([workingDeviceIds.get(steamID), maFileDeviceId, totp.getDeviceID(steamID)].filter((id): id is string => !!id))];
 		return {
 			cookies,
 			identitySecret: String(params.identitySecret || '').trim(),
 			steamID,
-			deviceId: String(params.deviceId || '').trim() || totp.getDeviceID(steamID),
+			deviceIds,
+			deviceId: deviceIds[0]!,
+			maFileDeviceId,
 			userAgent: params.userAgent || STEAM_WEB_USER_AGENT,
 			timeoutMs: params.timeoutMs || 30000,
 			offset: await timeOffset()
@@ -241,14 +271,28 @@ export function createBuyOrderConfirmer(options: ConfirmerOptions = {}) {
 			throw new MobileconfError(`mobileconf/${path} 返回的不是 JSON:${words || '空'}`, res.status, words);
 		}
 		if (!json.success) {
-			throw new MobileconfError(`mobileconf/${path} 失败:${words || '未知原因'}`, 0, words);
+			log('warn', `[market-buyorder] mobileconf/${path} 被拒(设备 ID 用${deviceSource(session, session.deviceId)}),Steam 原文:${snippet(text, 400)}`);
+			throw new MobileconfError(`Steam 拒绝了手机确认请求(mobileconf/${path}):${words || '没说原因'}`, 0, words, true);
 		}
 		return json;
 	}
 
+	/** 读确认列表;被拒(success=false)时换下一个设备 ID 再试,成功的那个记住 */
 	async function fetchConfirmations(session: Session): Promise<Confirmation[]> {
-		const json = await mobileconf(session, 'getlist', 'getlist');
-		return (Array.isArray(json.conf) ? json.conf : []).map(toConfirmation);
+		for (;;) {
+			try {
+				const json = await mobileconf(session, 'getlist', 'conf');
+				workingDeviceIds.set(session.steamID, session.deviceId);
+				return (Array.isArray(json.conf) ? json.conf : []).map(toConfirmation);
+			} catch (err) {
+				const next = session.deviceIds[session.deviceIds.indexOf(session.deviceId) + 1];
+				if (!(err instanceof MobileconfError && err.refused) || !next) {
+					throw err;
+				}
+				log('warn', `[market-buyorder] 读取确认列表被拒,设备 ID 换成${deviceSource(session, next)}再试一次`);
+				session.deviceId = next;
+			}
+		}
 	}
 
 	async function accept(session: Session, conf: Confirmation): Promise<void> {
@@ -303,7 +347,7 @@ export function createBuyOrderConfirmer(options: ConfirmerOptions = {}) {
 		}
 
 		const session = await openSession(params);
-		log('info', `[market-buyorder] 手机确认:设备 ID ${params.deviceId ? '用 maFile 的' : '按 SteamID 算'},Steam 时间差 ${session.offset} 秒`);
+		log('info', `[market-buyorder] 手机确认:设备 ID 先用${deviceSource(session, session.deviceId)},Steam 时间差 ${session.offset} 秒`);
 
 		for (let i = 0; i < attempts; i++) {
 			const confirmations = await retryRateLimited('读取确认列表', () => fetchConfirmations(session));
