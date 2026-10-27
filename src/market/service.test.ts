@@ -6,7 +6,7 @@ import {join} from 'node:path';
 import {createNameDb} from '../items/names.ts';
 import type {Attempt} from '../steam/session-manager.ts';
 import type {CreateBuyOrderParams, CreateBuyOrderResult, LiveBuyOrder, MarketClient, MarketContext} from './client.ts';
-import type {BuyOrderConfirmer, ConfirmBuyOrderParams} from './confirmations.ts';
+import type {BuyOrderConfirmer, ConfirmBuyOrderParams} from '../steam/confirmations.ts';
 import {createMarketService, runWithConcurrency} from './index.ts';
 import type {MarketServiceOptions} from './index.ts';
 import type {BuyOrderRecord} from './ledger.ts';

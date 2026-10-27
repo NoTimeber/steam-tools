@@ -7,8 +7,8 @@ import {currencyIdToIso} from '../steam/currencies.ts';
 import type {Attempt} from '../steam/session-manager.ts';
 import {createMarketClient, isGroupId, matchListingUrl, parseListingUrl} from './client.ts';
 import type {CreateBuyOrderParams, LiveBuyOrder, MarketClient, MarketContext, MarketLog, MarketTarget} from './client.ts';
-import {createBuyOrderConfirmer} from './confirmations.ts';
-import type {BuyOrderConfirmer} from './confirmations.ts';
+import {createConfirmer} from '../steam/confirmations.ts';
+import type {BuyOrderConfirmer} from '../steam/confirmations.ts';
 import {createBuyOrderLedger} from './ledger.ts';
 import type {BuyOrderRecord, ReconcileResult} from './ledger.ts';
 import {createNameIdResolver} from './nameids.ts';
@@ -176,7 +176,7 @@ export function createMarketService(options: MarketServiceOptions) {
 	const logger = options.logger ?? console;
 	const log: MarketLog = (level, message) => level === 'warn' ? logger.warn(message) : logger.log(message);
 	const client = options.client ?? createMarketClient({fetch: options.fetch, log});
-	const confirmer = options.confirmer ?? createBuyOrderConfirmer({fetch: options.fetch, log});
+	const confirmer = options.confirmer ?? createConfirmer({fetch: options.fetch, log});
 	const sleep = options.sleep ?? ((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)));
 	const now = options.now ?? Date.now;
 	const randomId = options.randomId ?? randomUUID;
@@ -402,7 +402,7 @@ export function createMarketService(options: MarketServiceOptions) {
 		const confirmAs = {cookies, steamID: attempt.steamID || '', deviceId: options.deviceIdFor?.(attempt.accountName) || '', userAgent: attempt.userAgent};
 
 		try {
-			// 挂单前快照已有的确认项,挂单后新冒出来的那条就是本单(见 ./confirmations.ts)。只对有 maFile 的账号做;
+			// 挂单前快照已有的确认项,挂单后新冒出来的那条就是本单(见 ../steam/confirmations.ts)。只对有 maFile 的账号做;
 			// 读不到不拦着挂单(不一定要确认,要确认时还有 confirmation_id 兜底),不在这里等限流
 			let priorConfIds: Set<string> | null = null;
 			if (attempt.identitySecret) {

@@ -307,6 +307,9 @@ const uu = createUuService({
 	attempts: () => attempts.values(),
 	emit: (event, payload) => io.emit(event, payload),
 	hasMaFile: accountName => profiles.local(accountName).hasMaFile,
+	// 接受报价后的手机确认自己发 mobileconf,和市场求购一样按账号走代理、用 maFile 的 device_id
+	fetch: proxy.fetch,
+	deviceIdFor: accountName => profiles.local(accountName).deviceId,
 	pollIntervalMs: config.uu.pollIntervalMs,
 	inspect: {url: config.uu.inspectUrl, key: config.uu.inspectKey}
 });

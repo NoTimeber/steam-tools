@@ -4,6 +4,8 @@
 import {randomBytes} from 'node:crypto';
 import type {Attempt} from '../steam/session-manager.ts';
 import {findOnlineAttempt} from '../steam/attempts.ts';
+import {createConfirmer} from '../steam/confirmations.ts';
+import type {Confirmer} from '../steam/confirmations.ts';
 import {acceptVerifiedTradeOffer} from '../steam/trade-offer.ts';
 import type {AcceptOfferOptions, AcceptOfferResult} from '../steam/trade-offer.ts';
 import {uuTokenId} from '../store/uu.ts';
@@ -87,6 +89,11 @@ export interface UuServiceOptions {
 	hasMaFile(accountName: string): boolean;
 	api?: UuApi;
 	acceptOffer?: (opts: AcceptOfferOptions) => Promise<AcceptOfferResult>;
+	/** 手机确认发 mobileconf 用的 fetch(按 Cookie 里的账号选代理,和市场求购同一个) */
+	fetch?: typeof fetch;
+	/** 账号 maFile 的 device_id(手机确认用) */
+	deviceIdFor?: (accountName: string) => string;
+	confirmer?: Pick<Confirmer, 'confirmTradeOffer'>;
 	/** 初始轮询间隔(UU_POLL_INTERVAL_MS);数据库里存的设置优先 */
 	pollIntervalMs?: number;
 	listIntervalMs?: number;
@@ -109,6 +116,8 @@ export function createUuService(options: UuServiceOptions) {
 	const api = options.api ?? defaultUuApi;
 	const acceptOffer = options.acceptOffer ?? acceptVerifiedTradeOffer;
 	const logger = options.logger ?? console;
+	// 手机确认的日志每次调用时传,写进那个账号的发货日志,所以不要前缀
+	const confirmer = options.confirmer ?? createConfirmer({fetch: options.fetch, label: ''});
 	const sleep = options.sleep ?? ((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)));
 	const listIntervalMs = options.listIntervalMs ?? LIST_INTERVAL_MS;
 	const listQueryGap = options.listQueryGap ?? LIST_QUERY_GAP;
@@ -211,9 +220,20 @@ export function createUuService(options: UuServiceOptions) {
 		emit: emitAccount,
 		readiness: name => {
 			const ready = readiness(name);
-			return {...ready, attempt: ready.attempt ? {cookies: ready.attempt.cookies, identitySecret: ready.attempt.identitySecret} : null};
+			const attempt = ready.attempt;
+			return {
+				...ready,
+				attempt: attempt ? {
+					cookies: attempt.cookies,
+					identitySecret: attempt.identitySecret,
+					steamID: attempt.steamID || '',
+					deviceId: options.deviceIdFor?.(name) || '',
+					userAgent: attempt.userAgent || ''
+				} : null
+			};
 		},
 		acceptOffer,
+		confirmTradeOffer: (attempt, tradeOfferId, log) => confirmer.confirmTradeOffer({...attempt, tradeOfferId, log}),
 		sleep,
 		timing: {...DEFAULT_DELIVERY_TIMING, ...options.timing},
 		waitConfirmSubStatus: SUBSTATUS_WAIT_CONFIRM

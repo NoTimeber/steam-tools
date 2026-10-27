@@ -142,6 +142,22 @@ test('接受流程:校验通过 → 接受 → 需要确认时用 identity_secre
 	assert.ok(!calls.some(call => call.startsWith('confirm')), '不需要确认时不确认');
 });
 
+test('接受流程:传了 confirm 就用它手机确认这笔报价,不走 steamcommunity 库', async () => {
+	calls.length = 0;
+	nextOffer = fakeOffer();
+	acceptStatus = 'pending';
+	const result = await acceptVerifiedTradeOffer({...baseOptions, confirm: async id => void calls.push('own-confirm ' + id)});
+	assert.deepEqual([result.ok, result.accepted, result.confirmed], [true, true, true]);
+	assert.deepEqual(calls.slice(-2), ['accept', 'own-confirm 5551']);
+	assert.ok(!calls.some(call => call.startsWith('confirm ')));
+
+	calls.length = 0;
+	nextOffer = fakeOffer();
+	await assert.rejects(acceptVerifiedTradeOffer({...baseOptions, confirm: async () => {
+		throw new Error('Steam 手机确认接口限流(HTTP 429)');
+	}}), /限流/, '确认失败照抛,由发货记为失败');
+});
+
 test('接受流程:校验不过绝不接受;dryRun 只校验', async () => {
 	calls.length = 0;
 	nextOffer = fakeOffer({partner: {getSteamID64: () => '76561198000000009'}});

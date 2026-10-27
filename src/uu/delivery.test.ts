@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import type {AcceptOfferOptions, AcceptOfferResult} from '../steam/trade-offer.ts';
 import type {UuDeliverableOrder, UuOrder, UuOrderDetail} from './client.ts';
 import {isWaitSendOfferOrder, listWaitDeliverOrders, runDeliveryPass} from './delivery.ts';
-import type {DeliveryClient, DeliveryContext} from './delivery.ts';
+import type {DeliveryAttempt, DeliveryClient, DeliveryContext} from './delivery.ts';
 import {createAccountState, gameDelivery} from './state.ts';
 import type {AccountState, Readiness} from './state.ts';
 
@@ -65,8 +65,10 @@ interface Harness {
 	accepted: AcceptOfferOptions[];
 	sleeps: number[];
 	emits: number;
-	ready: Readiness & {attempt: {cookies: string[]; identitySecret: string} | null};
+	ready: Readiness & {attempt: DeliveryAttempt | null};
 	acceptResult: AcceptOfferResult | Error;
+	/** ctx.confirmTradeOffer 收到的报价 id 和账号 */
+	confirms: string[];
 }
 
 function harness(): Harness {
@@ -78,8 +80,9 @@ function harness(): Harness {
 		accepted: [],
 		sleeps: [],
 		emits: 0,
-		ready: {online: true, hasCookies: true, hasIdentitySecret: true, steamID: '765', attempt: {cookies: ['steamLoginSecure=x'], identitySecret: 'ID'}},
-		acceptResult: {ok: true, reason: 'accepted', accepted: true, confirmed: true, offer: null}
+		ready: {online: true, hasCookies: true, hasIdentitySecret: true, steamID: '765', attempt: {cookies: ['steamLoginSecure=x'], identitySecret: 'ID', steamID: '765', deviceId: 'android:dev', userAgent: 'UA'}},
+		acceptResult: {ok: true, reason: 'accepted', accepted: true, confirmed: true, offer: null},
+		confirms: []
 	} as unknown as Harness;
 	h.ctx = {
 		client: (_state, _gameId, prefix = '') => {
@@ -95,6 +98,10 @@ function harness(): Harness {
 				throw h.acceptResult;
 			}
 			return h.acceptResult;
+		},
+		confirmTradeOffer: async (attempt, tradeOfferId, log) => {
+			h.confirms.push(`${tradeOfferId} ${attempt.steamID} ${attempt.deviceId}`);
+			log('info', '手机确认:设备 ID 先用maFile 的');
 		},
 		sleep: async ms => void h.sleeps.push(ms),
 		timing: {deliverGapMs: 5000, confirmAcceptGapMs: 1500, orderCooldownMs: 300000, offerStatusPollMs: 1500},
@@ -124,9 +131,9 @@ test('发货:UU 确认 → 隔 1.5 秒 → 按订单信息严格校验后接受;
 	assert.equal(game.status, 'idle');
 	assert.deepEqual(game.stats, {scans: 1, delivered: 2, failed: 0, skipped: 0});
 	assert.deepEqual(h.uu.calls, ['client 730 "[CS2] "', 'list 730', 'detail A', 'confirm A 5551', 'detail B', 'confirm B 5552']);
-	assert.deepEqual(h.accepted.map(opts => ({...opts, logger: undefined})), [
-		{cookies: ['steamLoginSecure=x'], identitySecret: 'ID', tradeOfferId: '5551', expectedPartnerSteamId: BUYER, expectGiveAppId: 730, expectGiveAssetIds: ['42'], logger: undefined, dryRun: false},
-		{cookies: ['steamLoginSecure=x'], identitySecret: 'ID', tradeOfferId: '5552', expectedPartnerSteamId: BUYER, expectGiveAppId: 730, expectGiveAssetIds: undefined, logger: undefined, dryRun: false}
+	assert.deepEqual(h.accepted.map(opts => ({...opts, logger: undefined, confirm: undefined})), [
+		{cookies: ['steamLoginSecure=x'], identitySecret: 'ID', tradeOfferId: '5551', expectedPartnerSteamId: BUYER, expectGiveAppId: 730, expectGiveAssetIds: ['42'], logger: undefined, confirm: undefined, dryRun: false},
+		{cookies: ['steamLoginSecure=x'], identitySecret: 'ID', tradeOfferId: '5552', expectedPartnerSteamId: BUYER, expectGiveAppId: 730, expectGiveAssetIds: undefined, logger: undefined, confirm: undefined, dryRun: false}
 	]);
 	assert.deepEqual(h.sleeps, [1500, 5000, 1500], '确认和接受之间 1.5 秒,订单之间 5 秒');
 	assert.deepEqual(h.state.recentOrders.map(record => [record.orderNo, record.ok, record.tradeOfferId]), [['B', true, '5552'], ['A', true, '5551']]);
@@ -140,6 +147,21 @@ test('发货:UU 确认 → 隔 1.5 秒 → 按订单信息严格校验后接受;
 	game.orderCooldown.clear();
 	await runDeliveryPass(h.ctx, h.state, 'cs2', 'auto');
 	assert.equal(h.accepted.length, 2, '已发货的订单不会再接受');
+});
+
+test('接受后的手机确认交给 ctx.confirmTradeOffer(带会话的 SteamID、maFile 设备 ID),日志写进账号日志', async () => {
+	const h = harness();
+	h.uu.orders = [WAIT_CONFIRM('A')];
+	h.uu.details = {A: detail('5551')};
+	h.ctx.acceptOffer = async opts => {
+		h.accepted.push(opts);
+		await opts.confirm?.('5551');
+		return {ok: true, reason: 'accepted', accepted: true, confirmed: true, offer: null};
+	};
+	await runDeliveryPass(h.ctx, h.state, 'cs2', 'manual');
+	assert.deepEqual(h.confirms, ['5551 765 android:dev']);
+	assert.ok(h.logs.includes('info 手机确认:设备 ID 先用maFile 的'));
+	assert.equal(gameDelivery(h.state, '730').stats.delivered, 1);
 });
 
 test('发货失败:Steam 校验不过(fail-closed)、接受时异常;都计失败并留记录', async () => {
@@ -212,11 +234,11 @@ test('没就绪不发货:离线(空闲)、缺 cookies、缺 identity_secret(报�
 	await runDeliveryPass(h.ctx, h.state, 'cs2', 'manual');
 	assert.equal(h.logs.filter(line => line.includes('Steam 账号未在线')).length, 2, '手动扫描照常播报');
 
-	h.ready = {online: true, hasCookies: true, hasIdentitySecret: false, steamID: '1', attempt: {cookies: ['a'], identitySecret: ''}};
+	h.ready = {online: true, hasCookies: true, hasIdentitySecret: false, steamID: '1', attempt: {cookies: ['a'], identitySecret: '', steamID: '1', deviceId: '', userAgent: ''}};
 	await runDeliveryPass(h.ctx, h.state, 'cs2', 'auto');
 	assert.equal(game.status, 'error');
 	assert.match(game.lastError, /缺少 identity_secret/);
-	h.ready = {online: true, hasCookies: false, hasIdentitySecret: true, steamID: '1', attempt: {cookies: [], identitySecret: 'x'}};
+	h.ready = {online: true, hasCookies: false, hasIdentitySecret: true, steamID: '1', attempt: {cookies: [], identitySecret: 'x', steamID: '1', deviceId: '', userAgent: ''}};
 	await runDeliveryPass(h.ctx, h.state, 'cs2', 'auto');
 	assert.match(game.lastError, /缺少 WebSession cookies/);
 	assert.ok(!h.uu.calls.some(call => call.startsWith('list')), '没就绪不打 UU 接口');

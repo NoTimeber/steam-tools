@@ -22,6 +22,10 @@ export interface DeliveryClient {
 export interface DeliveryAttempt {
 	cookies: string[];
 	identitySecret: string;
+	steamID: string;
+	/** maFile 的 device_id(手机确认用);没有为空 */
+	deviceId: string;
+	userAgent: string;
 }
 
 export interface DeliveryTiming {
@@ -50,6 +54,8 @@ export interface DeliveryContext {
 	emit(state: AccountState): void;
 	readiness(accountName: string): Readiness & {attempt: DeliveryAttempt | null};
 	acceptOffer(opts: AcceptOfferOptions): Promise<AcceptOfferResult>;
+	/** 接受报价后手机确认这一笔(自己发 mobileconf,见 ../steam/confirmations.ts) */
+	confirmTradeOffer(attempt: DeliveryAttempt, tradeOfferId: string, log: (level: 'info' | 'warn', message: string) => void): Promise<void>;
 	sleep(ms: number): Promise<void>;
 	timing: DeliveryTiming;
 	/** 「待您确认报价」的子状态码(1103) */
@@ -149,6 +155,7 @@ export async function deliverOrder(ctx: DeliveryContext, state: AccountState, ga
 					ctx.log(state, level, message);
 				}
 			},
+			confirm: offerId => ctx.confirmTradeOffer(attempt, offerId, (level, message) => ctx.log(state, level, message)),
 			dryRun: false
 		});
 		record.ok = !!result.ok && !!result.accepted;

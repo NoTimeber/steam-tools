@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {createBuyOrderConfirmer} from './confirmations.ts';
+import {createConfirmer} from './confirmations.ts';
 import type {ConfirmerOptions, Totp} from './confirmations.ts';
 
 const STEAM_ID = '76561198000000001';
@@ -89,7 +89,7 @@ const query = (steam: FakeSteam, index: number) => Object.fromEntries(steam.requ
 
 test('快照:读 getlist(maFile 设备 ID、Steam 时间签 key、tag=conf);没有 identity_secret 时不查', async () => {
 	const steam = fakeSteam([[{id: '1', creator: 'a'}, {id: '2', creator: 'b'}]]);
-	const confirmer = createBuyOrderConfirmer(steam.options);
+	const confirmer = createConfirmer(steam.options);
 	const ids = await confirmer.listConfirmationIds({cookies: COOKIES, identitySecret: 'IS', deviceId: MAFILE_DEVICE, userAgent: 'UA-1'});
 	assert.deepEqual(ids, new Set(['1', '2']));
 	assert.deepEqual(query(steam, 0), {p: MAFILE_DEVICE, a: STEAM_ID, k: 'IS@1005/conf', t: '1005', m: 'react', tag: 'conf'});
@@ -104,7 +104,7 @@ test('快照:读 getlist(maFile 设备 ID、Steam 时间签 key、tag=conf);没�
 
 test('快照差分:挂单后新冒出来的那条就是本单,ajaxop allow 它并带回 creator;没有 maFile 设备 ID 时按 SteamID 算', async () => {
 	const steam = fakeSteam([[{id: 'old', creator: 'trade-1'}, {id: 'new', creator: '9001'}]]);
-	const confirmer = createBuyOrderConfirmer(steam.options);
+	const confirmer = createConfirmer(steam.options);
 	const result = await confirmer.confirmBuyOrder({cookies: COOKIES, identitySecret: 'IS', confirmationId: 'mismatch', priorConfIds: new Set(['old'])});
 	assert.deepEqual(result, {confirmed: true, buyOrderId: '9001'});
 	assert.deepEqual(steam.accepted, ['new']);
@@ -116,31 +116,31 @@ test('快照差分:挂单后新冒出来的那条就是本单,ajaxop allow 它�
 
 test('没有快照时用 confirmation_id 比 id 或 creator;多条分不清就报错,绝不乱确认', async () => {
 	const steam = fakeSteam([[{id: '1', creator: 'trade-1'}, {id: '2', creator: '555'}]]);
-	await createBuyOrderConfirmer(steam.options).confirmBuyOrder({cookies: COOKIES, identitySecret: 'IS', confirmationId: '555'});
+	await createConfirmer(steam.options).confirmBuyOrder({cookies: COOKIES, identitySecret: 'IS', confirmationId: '555'});
 	assert.deepEqual(steam.accepted, ['2']);
 
 	const ambiguous = fakeSteam([[{id: '1', creator: 'trade-1'}, {id: '2', creator: 'trade-2'}]]);
-	await assert.rejects(createBuyOrderConfirmer(ambiguous.options).confirmBuyOrder({cookies: COOKIES, identitySecret: 'IS', confirmationId: '777'}), /检测到 2 个待确认项/);
+	await assert.rejects(createConfirmer(ambiguous.options).confirmBuyOrder({cookies: COOKIES, identitySecret: 'IS', confirmationId: '777'}), /检测到 2 个待确认项/);
 	assert.deepEqual(ambiguous.accepted, []);
 });
 
 test('确认项晚到:按间隔重试;一直没有就报错', async () => {
 	const steam = fakeSteam([[], [], [{id: 'n', creator: '1'}]]);
 	const waits: number[] = [];
-	const confirmer = createBuyOrderConfirmer({...steam.options, sleep: async ms => void waits.push(ms)});
+	const confirmer = createConfirmer({...steam.options, sleep: async ms => void waits.push(ms)});
 	await confirmer.confirmBuyOrder({cookies: COOKIES, identitySecret: 'IS', buyOrderId: '1', priorConfIds: new Set()});
 	assert.deepEqual(waits, [5000, 5000]);
 	assert.deepEqual(steam.accepted, ['n']);
 
 	const never = fakeSteam([[{id: 'old', creator: 'x'}]]);
-	await assert.rejects(createBuyOrderConfirmer(never.options).confirmBuyOrder({cookies: COOKIES, identitySecret: 'IS', priorConfIds: new Set(['old']), attempts: 3}), /重试 3 次仍没找到/);
+	await assert.rejects(createConfirmer(never.options).confirmBuyOrder({cookies: COOKIES, identitySecret: 'IS', priorConfIds: new Set(['old']), attempts: 3}), /重试 3 次仍没找到/);
 	assert.equal(never.listCalls, 3);
 	assert.deepEqual(never.accepted, []);
 });
 
 test('前置条件:没 cookie、没 identity_secret、什么线索都没有、读不出 SteamID 时直接报错', async () => {
 	const steam = fakeSteam([[]]);
-	const confirmer = createBuyOrderConfirmer(steam.options);
+	const confirmer = createConfirmer(steam.options);
 	await assert.rejects(confirmer.confirmBuyOrder({cookies: [], identitySecret: 'IS', confirmationId: '1'}), /缺少 WebSession cookies/);
 	await assert.rejects(confirmer.confirmBuyOrder({cookies: COOKIES, identitySecret: '', confirmationId: '1'}), /未导入 maFile/);
 	await assert.rejects(confirmer.confirmBuyOrder({cookies: COOKIES, identitySecret: 'IS', priorConfIds: null}), /无法定位/);
@@ -154,7 +154,7 @@ test('前置条件:没 cookie、没 identity_secret、什么线索都没有、�
 test('Steam 时间差缓存 1 小时;查不到按本机时间签,不缓存', async () => {
 	let clock = NOW_MS;
 	const steam = fakeSteam([[{id: 'a', creator: '1'}]]);
-	const confirmer = createBuyOrderConfirmer({...steam.options, now: () => clock});
+	const confirmer = createConfirmer({...steam.options, now: () => clock});
 	await confirmer.listConfirmationIds({cookies: COOKIES, identitySecret: 'IS'});
 	clock += 59 * 60 * 1000;
 	await confirmer.listConfirmationIds({cookies: COOKIES, identitySecret: 'IS'});
@@ -167,7 +167,7 @@ test('Steam 时间差缓存 1 小时;查不到按本机时间签,不缓存', asy
 	const offline = fakeSteam([[]]);
 	offline.timeFails = true;
 	const logs: string[] = [];
-	const local = createBuyOrderConfirmer({...offline.options, log: (level, message) => void logs.push(`${level} ${message}`)});
+	const local = createConfirmer({...offline.options, log: (level, message) => void logs.push(`${level} ${message}`)});
 	await local.listConfirmationIds({cookies: COOKIES, identitySecret: 'IS'});
 	await local.listConfirmationIds({cookies: COOKIES, identitySecret: 'IS'});
 	assert.equal(query(offline, 0).t, '1000');
@@ -178,11 +178,11 @@ test('Steam 时间差缓存 1 小时;查不到按本机时间签,不缓存', asy
 test('Steam 说失败时把原话带进报错:needauth 提示重新登录,ajaxop success=false 带 message', async () => {
 	const expired = fakeSteam([[]]);
 	expired.needauth = true;
-	await assert.rejects(createBuyOrderConfirmer(expired.options).confirmBuyOrder({cookies: COOKIES, identitySecret: 'IS', confirmationId: '1'}), /网页登录已失效/);
+	await assert.rejects(createConfirmer(expired.options).confirmBuyOrder({cookies: COOKIES, identitySecret: 'IS', confirmationId: '1'}), /网页登录已失效/);
 
 	const refused = fakeSteam([[{id: 'a', creator: '1'}]]);
 	refused.ajaxFail = 'Invalid authenticator';
-	await assert.rejects(createBuyOrderConfirmer(refused.options).confirmBuyOrder({cookies: COOKIES, identitySecret: 'IS', confirmationId: 'a'}),
+	await assert.rejects(createConfirmer(refused.options).confirmBuyOrder({cookies: COOKIES, identitySecret: 'IS', confirmationId: 'a'}),
 		/Steam 拒绝了手机确认请求\(mobileconf\/ajaxop\):Invalid authenticator/);
 });
 
@@ -194,7 +194,7 @@ test('超时:mobileconf 不回就按 timeoutMs 报错', async () => {
 		}
 		return new Promise<Response>((_, reject) => init?.signal?.addEventListener('abort', () => reject(init?.signal?.reason)));
 	}) as typeof fetch;
-	const confirmer = createBuyOrderConfirmer({...steam.options, fetch: hanging});
+	const confirmer = createConfirmer({...steam.options, fetch: hanging});
 	await assert.rejects(confirmer.confirmBuyOrder({cookies: COOKIES, identitySecret: 'IS', confirmationId: '1', timeoutMs: 20}), /超时: mobileconf\/getlist/);
 });
 
@@ -203,7 +203,7 @@ test('限流:读列表、提交确认回 429 时出口冷却、等一会再试,�
 	steam.ajaxStatuses.push(429);
 	const waits: number[] = [];
 	const logs: string[] = [];
-	const confirmer = createBuyOrderConfirmer({
+	const confirmer = createConfirmer({
 		...steam.options, sleep: async ms => void waits.push(ms), log: (level, message) => void logs.push(`${level} ${message}`)
 	});
 	const result = await confirmer.confirmBuyOrder({cookies: COOKIES, identitySecret: 'IS', priorConfIds: new Set()});
@@ -220,14 +220,14 @@ test('限流:读列表、提交确认回 429 时出口冷却、等一会再试,�
 test('限流:一直 429 就按顺序等完再报限流;别的错误不重试', async () => {
 	const limited = fakeSteam([429]);
 	const waits: number[] = [];
-	const confirmer = createBuyOrderConfirmer({...limited.options, sleep: async ms => void waits.push(ms)});
+	const confirmer = createConfirmer({...limited.options, sleep: async ms => void waits.push(ms)});
 	await assert.rejects(confirmer.confirmBuyOrder({cookies: COOKIES, identitySecret: 'IS', confirmationId: '1'}),
 		/Steam 手机确认接口限流\(HTTP 429,Steam 回:Rate limit exceeded\),重试 2 次仍不行/);
 	assert.deepEqual(waits, [10000, 20000]);
 	assert.equal(limited.listCalls, 3);
 
 	const broken = fakeSteam([500]);
-	const strict = createBuyOrderConfirmer({...broken.options, sleep: async () => assert.fail('不该等')});
+	const strict = createConfirmer({...broken.options, sleep: async () => assert.fail('不该等')});
 	await assert.rejects(strict.confirmBuyOrder({cookies: COOKIES, identitySecret: 'IS', confirmationId: '1'}), /mobileconf\/getlist 返回 HTTP 500:Rate limit exceeded/);
 	assert.equal(broken.listCalls, 1);
 });
@@ -239,7 +239,7 @@ test('设备 ID 被拒(Oh nooooooes!):换按 SteamID 算的再试,能用的这�
 	const steam = fakeSteam([[{id: 'n', creator: '9001'}]]);
 	steam.refusedDevices.set(MAFILE_DEVICE, LOADING);
 	const logs: string[] = [];
-	const confirmer = createBuyOrderConfirmer({...steam.options, log: (level, message) => void logs.push(`${level} ${message}`)});
+	const confirmer = createConfirmer({...steam.options, log: (level, message) => void logs.push(`${level} ${message}`)});
 	const result = await confirmer.confirmBuyOrder({cookies: COOKIES, identitySecret: 'IS', deviceId: MAFILE_DEVICE, confirmationId: '9001'});
 	assert.deepEqual(result, {confirmed: true, buyOrderId: '9001'});
 	assert.deepEqual(steam.requests.map(r => [r.url.pathname, r.url.searchParams.get('p')]), [
@@ -256,16 +256,64 @@ test('设备 ID 被拒(Oh nooooooes!):换按 SteamID 算的再试,能用的这�
 test('两个设备 ID 都被拒:报错带上 detail(原因),不再重试', async () => {
 	const steam = fakeSteam([[]]);
 	steam.refusedDevices.set(MAFILE_DEVICE, BAD_CODES).set('android:derived-' + STEAM_ID, BAD_CODES);
-	const confirmer = createBuyOrderConfirmer({...steam.options, sleep: async () => assert.fail('不该等')});
+	const confirmer = createConfirmer({...steam.options, sleep: async () => assert.fail('不该等')});
 	await assert.rejects(confirmer.confirmBuyOrder({cookies: COOKIES, identitySecret: 'IS', deviceId: MAFILE_DEVICE, confirmationId: '1'}),
 		(err: Error) => err.message === `Steam 拒绝了手机确认请求(mobileconf/getlist):Oh nooooooes! ${BAD_CODES}`);
 	assert.equal(steam.requests.length, 2);
 });
 
+test('交易报价:只确认 creator 等于报价 id 的那一条(tag=allow),别的确认项不碰;日志写到这次传的 log、不带前缀', async () => {
+	const steam = fakeSteam([[{id: 'buy', creator: '9001'}, {id: 'other', creator: '5550'}, {id: 'mine', creator: '5551'}]]);
+	const shared: string[] = [];
+	const logs: string[] = [];
+	const confirmer = createConfirmer({...steam.options, label: '', log: (level, message) => void shared.push(`${level} ${message}`)});
+	await confirmer.confirmTradeOffer({
+		cookies: COOKIES, identitySecret: 'IS', deviceId: MAFILE_DEVICE, tradeOfferId: '5551', log: (level, message) => void logs.push(`${level} ${message}`)
+	});
+	assert.deepEqual(steam.accepted, ['mine']);
+	assert.deepEqual(query(steam, 0), {p: MAFILE_DEVICE, a: STEAM_ID, k: 'IS@1005/conf', t: '1005', m: 'react', tag: 'conf'});
+	assert.deepEqual(query(steam, 1), {p: MAFILE_DEVICE, a: STEAM_ID, k: 'IS@1005/allow', t: '1005', m: 'react', tag: 'allow', op: 'allow', cid: 'mine', ck: 'n-mine'});
+	assert.deepEqual(logs, ['info 手机确认:设备 ID 先用maFile 的,Steam 时间差 5 秒']);
+	assert.deepEqual(shared, []);
+});
+
+test('交易报价:确认项晚到按间隔重试;一直没有就报错,列表里别的确认项一个也不确认', async () => {
+	const steam = fakeSteam([[], [{id: 'mine', creator: '5551'}]]);
+	const waits: number[] = [];
+	await createConfirmer({...steam.options, sleep: async ms => void waits.push(ms)}).confirmTradeOffer({cookies: COOKIES, identitySecret: 'IS', tradeOfferId: '5551'});
+	assert.deepEqual(waits, [5000]);
+	assert.deepEqual(steam.accepted, ['mine']);
+
+	const never = fakeSteam([[{id: 'other', creator: '5550'}]]);
+	const logs: string[] = [];
+	await assert.rejects(createConfirmer(never.options).confirmTradeOffer({cookies: COOKIES, identitySecret: 'IS', tradeOfferId: '5551', attempts: 3, log: (level, message) => void logs.push(`${level} ${message}`)}),
+		/重试 3 次仍没找到报价 5551 的待确认项,请在 Steam 手机 App 手动确认/);
+	assert.equal(never.listCalls, 3);
+	assert.deepEqual(never.accepted, []);
+	assert.match(logs.at(-1) ?? '', /^warn .*列表共 1 条: \{id:other,creator:5550,type:12\}/);
+});
+
+test('交易报价:429 等一会再试;缺 cookie / identity_secret / 报价 id 直接报错', async () => {
+	const steam = fakeSteam([429, [{id: 'mine', creator: '5551'}]]);
+	steam.ajaxStatuses.push(429);
+	const waits: number[] = [];
+	const logs: string[] = [];
+	await createConfirmer({...steam.options, sleep: async ms => void waits.push(ms)})
+		.confirmTradeOffer({cookies: COOKIES, identitySecret: 'IS', tradeOfferId: '5551', log: (level, message) => void logs.push(`${level} ${message}`)});
+	assert.deepEqual(waits, [10000, 10000]);
+	assert.deepEqual(steam.accepted, ['mine']);
+	assert.ok(logs.some(line => /^warn \[market-buyorder\] 读取确认列表被 Steam 拒绝\(HTTP 429,Steam 回:Rate limit exceeded\)/.test(line)), '默认前缀');
+
+	const confirmer = createConfirmer(fakeSteam([[]]).options);
+	await assert.rejects(confirmer.confirmTradeOffer({cookies: [], identitySecret: 'IS', tradeOfferId: '1'}), /缺少 WebSession cookies/);
+	await assert.rejects(confirmer.confirmTradeOffer({cookies: COOKIES, identitySecret: '', tradeOfferId: '1'}), /未导入 maFile/);
+	await assert.rejects(confirmer.confirmTradeOffer({cookies: COOKIES, identitySecret: 'IS', tradeOfferId: ' '}), /没有报价 id/);
+});
+
 test('maFile 的 device_id 不像设备 ID(SDA 坏掉时写成 ERROR):直接用按 SteamID 算的', async () => {
 	const steam = fakeSteam([[]]);
 	const logs: string[] = [];
-	await createBuyOrderConfirmer({...steam.options, log: (level, message) => void logs.push(`${level} ${message}`)})
+	await createConfirmer({...steam.options, log: (level, message) => void logs.push(`${level} ${message}`)})
 		.listConfirmationIds({cookies: COOKIES, identitySecret: 'IS', deviceId: 'ERROR'});
 	assert.equal(query(steam, 0).p, 'android:derived-' + STEAM_ID);
 	assert.match(logs[0] ?? '', /^warn .*maFile 的 device_id 不像设备 ID\(ERROR\)/);

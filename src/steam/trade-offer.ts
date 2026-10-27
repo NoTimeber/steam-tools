@@ -1,5 +1,6 @@
 // Steam 报价接受 + 手机令牌确认(UU 发货第二步,从 app/lib/trade-offer.js 移来)。
-// 用 steam-tradeoffer-manager + steamcommunity,cookies 由调用方给(登录拿到的 WebSession cookies)。
+// 用 steam-tradeoffer-manager + steamcommunity,cookies 由调用方给(登录拿到的 WebSession cookies);
+// 手机确认由调用方传 confirm(UU 发货用 ./confirmations.ts 自己发 mobileconf)。
 //
 // fail-closed 严格校验,防止接受错误/恶意报价。接受前必须全部满足(见 checkOffer):
 //   1. offer.id === UU 给的 tradeOfferId;
@@ -111,6 +112,11 @@ export interface AcceptOfferOptions {
 	cookies: string[] | string;
 	/** maFile 的 identity_secret(手机确认用) */
 	identitySecret?: string;
+	/**
+	 * 手机确认这笔报价(UU 发货传 ./confirmations.ts 自己发 mobileconf 的那套)。
+	 * 没给就用 steamcommunity 库的 acceptConfirmationForObject:它签名的 tag 用 list / accept,服务器上一直 429
+	 */
+	confirm?: (tradeOfferId: string) => Promise<void>;
 	tradeOfferId: string | number;
 	expectedPartnerSteamId: string | null | undefined;
 	/** 给出的物品应属的 appid,默认 TF2 440 */
@@ -212,9 +218,14 @@ export async function acceptVerifiedTradeOffer(opts: AcceptOfferOptions): Promis
 	let confirmed = false;
 	if (status === 'pending') {
 		log('info', '需要手机令牌确认，正在确认...');
-		await withTimeout(new Promise<void>((resolve, reject) => {
-			community.acceptConfirmationForObject(opts.identitySecret as string, offer.id, err => err ? reject(err) : resolve());
-		}), 'acceptConfirmation');
+		if (opts.confirm) {
+			// 每个请求自带超时,还有排队和 429 等待重试,总耗时可能超过 timeoutMs,不再套一层
+			await opts.confirm(String(offer.id));
+		} else {
+			await withTimeout(new Promise<void>((resolve, reject) => {
+				community.acceptConfirmationForObject(opts.identitySecret as string, offer.id, err => err ? reject(err) : resolve());
+			}), 'acceptConfirmation');
+		}
 		confirmed = true;
 		log('info', '手机令牌确认完成。');
 	}

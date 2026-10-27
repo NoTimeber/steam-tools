@@ -425,7 +425,7 @@ export function createMarketClient(options: MarketClientOptions = {}) {
 	/**
 	 * 挂一张求购单。要手机确认时的完整流程(对照 aiosteampy place_buy_order):
 	 *   1) 首次提交(不带 confirmation)→ Steam 回 success=22 + confirmation.confirmation_id,订单还没真正建立;
-	 *   2) 用手机令牌 allow 这个确认项(./confirmations.ts);
+	 *   2) 用手机令牌 allow 这个确认项(../steam/confirmations.ts);
 	 *   3) 带 confirmation=<confirmation_id> 再提交一次,Steam 才返回 buy_orderid,订单这时才落地。
 	 *   只 allow 不重发第 3 步,订单会被丢弃(网页「我的求购单」查不到)。
 	 */

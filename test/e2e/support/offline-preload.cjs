@@ -316,7 +316,9 @@ function fakeUu(url, init) {
 // ===== 报价接受的替身 =====
 const ACTIVE_OFFER_STATE = 2;
 class FakeTradeOfferManager {
-	constructor() {}
+	constructor(options) {
+		this.community = (options && options.community) || null;
+	}
 	setCookies(cookies, callback) {
 		callback(null);
 	}
@@ -333,8 +335,10 @@ class FakeTradeOfferManager {
 			isOurOffer: false,
 			itemsToGive: offer.give || [],
 			itemsToReceive: offer.receive || [],
-			accept(done) {
+			accept: done => {
 				record({event: 'offerAccept', offerId: String(id)});
+				// 要手机确认:mobileconf 的待确认列表里出现一条 creator_id = 报价 id 的(见 fakeMobileconf)
+				market.trades.set(String(8000000000 + ++market.seq), {owner: this.community ? this.community.owner : '', offerId: String(id), allowed: false});
 				done(null, 'pending');
 			}
 		});
@@ -397,7 +401,8 @@ steamTotp.getTimeOffset = callback => {
 //   needConfirmation:挂单先回 success=22,手机确认后带 confirmation 重发才落单(和真实流程一样);
 //   createFail:挂单一律回这个;filled:这些求购单已成交,从「我的求购单」里消失。
 // 账号按 cookie 里的 steamLoginSecure 区分;表单里的 sessionid 必须等于 cookie 里的(CSRF),否则回 success=15。
-const market = {seq: 0, orders: new Map(), confs: new Map()};
+// confs:待确认的求购单;trades:接受后等手机确认的交易报价
+const market = {seq: 0, orders: new Map(), confs: new Map(), trades: new Map()};
 
 // 新版市场的分组页(分组 id 和真实 Steam 一致):标题是分组名
 const MARKET_GROUPS = {G18A8263004: 'Kilowatt Case', G1807209A023004: 'AK-47 | Redline', G18072096023004: 'AWP | Redline'};
@@ -423,7 +428,8 @@ function placeMarketOrder(owner, form) {
 	return id;
 }
 
-// 手机令牌确认(steamcommunity.com/mobileconf/*):getlist 列出这个账号还没确认的求购单,ajaxop 按 cid + ck(nonce)确认
+// 手机令牌确认(steamcommunity.com/mobileconf/*):getlist 列出这个账号还没确认的求购单和交易报价,ajaxop 按 cid + ck(nonce)确认;
+// 确认交易报价记 offerConfirm
 function fakeMobileconf(url, init) {
 	const headers = Object.fromEntries(Object.entries((init && init.headers) || {}).map(([key, value]) => [key.toLowerCase(), String(value)]));
 	const owner = cookieValue(headers.cookie, 'steamLoginSecure');
@@ -437,7 +443,19 @@ function fakeMobileconf(url, init) {
 		const conf = [...market.confs.entries()]
 			.filter(([, item]) => item.owner === owner && !item.allowed)
 			.map(([id, item]) => ({id, creator_id: item.creator, nonce: 'nonce-' + id, type: 12, headline: item.form.market_hash_name}));
-		return json({success: true, conf});
+		const trades = [...market.trades.entries()]
+			.filter(([, item]) => item.owner === owner && !item.allowed)
+			.map(([id, item]) => ({id, creator_id: item.offerId, nonce: 'nonce-' + id, type: 2, headline: 'trade'}));
+		return json({success: true, conf: [...conf, ...trades]});
+	}
+	if (url.pathname === '/mobileconf/ajaxop' && market.trades.has(params.cid)) {
+		const trade = market.trades.get(params.cid);
+		record({event: 'offerConfirm', offerId: trade.offerId, owner, confId: params.cid, tag: params.tag, accept: params.op === 'allow', params});
+		if (trade.owner !== owner || params.ck !== 'nonce-' + params.cid) {
+			return json({success: false});
+		}
+		trade.allowed = params.op === 'allow';
+		return json({success: true});
 	}
 	if (url.pathname === '/mobileconf/ajaxop') {
 		const item = market.confs.get(params.cid);

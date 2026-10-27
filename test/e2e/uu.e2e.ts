@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import {mkdirSync, writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {randomBytes} from 'node:crypto';
+import {createRequire} from 'node:module';
 import {Client, removeDir, sleep, startServer, tempDir} from './support/server.ts';
 import type {FakeSteamEvent, TestServer} from './support/server.ts';
 
@@ -14,6 +15,7 @@ const ALPHA_STEAM_ID = '76561190100005555';
 const BUYER = '76561198000000001';
 const IDENTITY_SECRET = 'E2E-IDENTITY-SECRET';
 const TOKEN = 'h.' + Buffer.from(JSON.stringify({Id: 9001, Name: 'uu-alpha', exp: 4102444800})).toString('base64url') + '.s';
+const steamTotp = createRequire(import.meta.url)('steam-totp') as {getConfirmationKey(secret: string, time: number, tag: string): string};
 
 interface DeliveryView {
 	auto: boolean;
@@ -106,7 +108,8 @@ describe('UU 发货', () => {
 		});
 		const res = await client.post('/api/uu/auto', {accountName: 'alpha', gameId: '730', enabled: true});
 		assert.equal(res.status, 200, res.text);
-		const account = await until(alpha, a => a?.delivery['730']?.stats.delivered === 1);
+		// 手机确认的 mobileconf 请求按出口排队,两次至少隔 5 秒
+		const account = await until(alpha, a => a?.delivery['730']?.stats.delivered === 1, 20000);
 		assert.equal(account?.delivery['730']?.stats.delivered, 1, JSON.stringify(account?.recentOrders));
 		assert.equal(account?.recentOrders[0]?.ok, true);
 
@@ -114,7 +117,13 @@ describe('UU 发货', () => {
 		assert.deepEqual(confirm?.body?.confirmOrder, {orderNo: 'CS-1', tradeOfferId: 5551});
 		assert.equal(confirm?.host, 'api.youpin898.com');
 		assert.deepEqual(events('offerAccept').map(e => e.offerId), ['5551']);
-		assert.deepEqual(events('offerConfirm').map(e => [e.offerId, e.identitySecret]), [['5551', IDENTITY_SECRET]]);
+		// 手机确认自己发 mobileconf:getlist 用 tag=conf,只 allow 这笔报价的确认项,key 用 maFile 的 identity_secret 签
+		assert.deepEqual(events('marketConfirmList').map(e => e.tag), ['conf']);
+		const confirms = events('offerConfirm');
+		// 假 mobileconf 只认接受报价的那个账号(同一份 cookie)确认,对不上会回 success=false、发货记失败
+		assert.deepEqual(confirms.map(e => [e.offerId, e.tag, e.accept]), [['5551', 'allow', true]]);
+		const params = confirms[0]?.params ?? {};
+		assert.equal(params.k, steamTotp.getConfirmationKey(IDENTITY_SECRET, Number(params.t), 'allow'));
 	});
 
 	test('报价的对方不是订单买家:fail-closed,绝不接受', async () => {
