@@ -49,7 +49,8 @@ export const TF2 = '440';
 
 export type UuRow =
 	| {kind: 'account'; key: string; account: UuAccount; local: LocalAccount | null}
-	| {kind: 'token'; key: string; token: UuToken; local: LocalAccount | null};
+	/** holder:匹配到的账号已经绑着别的 token(这个 token 就用不上了) */
+	| {kind: 'token'; key: string; token: UuToken; local: LocalAccount | null; holder: UuAccount | null};
 
 function findBySteamId(locals: readonly LocalAccount[], steamId: string): LocalAccount | null {
 	const id = String(steamId || '').trim();
@@ -64,11 +65,15 @@ export function uuRows(accounts: readonly UuAccount[], tokens: readonly UuToken[
 	const sorted = accounts.slice().sort((left, right) => (left.bound === right.bound ? left.accountName.localeCompare(right.accountName) : left.bound ? -1 : 1));
 	const claimed = new Set(sorted.map(account => account.userId).filter(Boolean));
 	const localByName = new Map(locals.map(local => [local.accountName.toLowerCase(), local]));
+	const boundByName = new Map(sorted.filter(account => account.bound).map(account => [account.accountName.toLowerCase(), account]));
 	return [
 		...sorted.map(account => ({kind: 'account' as const, key: 'account:' + account.accountName, account, local: localByName.get(account.accountName.toLowerCase()) ?? null})),
 		...tokens
 			.filter(token => token && token.id && !(token.userId && claimed.has(token.userId)))
-			.map(token => ({kind: 'token' as const, key: 'token:' + token.id, token, local: findBySteamId(locals, token.linkedSteamId)}))
+			.map(token => {
+				const local = findBySteamId(locals, token.linkedSteamId);
+				return {kind: 'token' as const, key: 'token:' + token.id, token, local, holder: local ? boundByName.get(local.accountName.toLowerCase()) ?? null : null};
+			})
 	];
 }
 
@@ -95,16 +100,29 @@ export function onlineHint(account: UuAccount, local: LocalAccount | null): Hint
 	return {text: '在线', tone: 'success'};
 }
 
-/** 还没匹配到账号的 token 为什么用不了 */
-export function tokenHint(token: UuToken, local: LocalAccount | null): {tag: string; hint: string} {
+/**
+ * 还没匹配到账号的 token 为什么用不了。
+ * holder:匹配到的账号已绑着的那一行;bindError:自动绑定时服务端返回的原因(没试过为空)
+ */
+export function tokenHint(token: UuToken, local: LocalAccount | null, holder: UuAccount | null = null, bindError = ''): {tag: string; hint: string} {
 	const steamId = String(token.linkedSteamId || '').trim();
 	if (!steamId) {
 		return {tag: '未匹配', hint: '该 Token 在 UU 侧未绑定 Steam 账号,无法用于发货'};
 	}
-	if (local) {
-		return {tag: '绑定失败', hint: `已匹配到账号 ${local.accountName},但绑定未成功,请检查 Token 是否已过期`};
+	if (!local) {
+		return {tag: '未匹配', hint: `该 Token 绑定的 SteamID ${steamId} 未匹配到「账户管理」中的账号,请先在账户管理添加并登录一次该账号`};
 	}
-	return {tag: '未匹配', hint: `该 Token 绑定的 SteamID ${steamId} 未匹配到「账户管理」中的账号,请先在账户管理添加并登录一次该账号`};
+	if (holder) {
+		const nickname = holder.nickname || '无昵称';
+		// 旧数据可能没记 UU userId,这时分不清绑着的是不是这一个
+		return holder.userId
+			? {tag: '账号已绑定', hint: `已匹配到账号 ${local.accountName},但该账号已绑定另一个 UU Token(${nickname}),这个 Token 没用上;要换用它,先删除该账号的 Token`}
+			: {tag: '账号已绑定', hint: `已匹配到账号 ${local.accountName},该账号已绑定 Token(${nickname}),看不出是不是这一个;用不上可删除`};
+	}
+	if (bindError) {
+		return {tag: '绑定失败', hint: `已匹配到账号 ${local.accountName},自动绑定失败:${bindError}`};
+	}
+	return {tag: '待绑定', hint: `已匹配到账号 ${local.accountName},等待自动绑定`};
 }
 
 /**
@@ -112,16 +130,16 @@ export function tokenHint(token: UuToken, local: LocalAccount | null): {tag: str
  * 且那个账号还没绑 token
  */
 export function autoBindCandidates(tokens: readonly UuToken[], accounts: readonly UuAccount[], locals: readonly LocalAccount[]): Array<{tokenId: string; accountName: string}> {
-	const bound = new Set(accounts.filter(account => account.bound).map(account => account.accountName));
+	const bound = new Set(accounts.filter(account => account.bound).map(account => account.accountName.toLowerCase()));
 	const out: Array<{tokenId: string; accountName: string}> = [];
 	for (const token of tokens) {
 		if (!token.id || !token.linkedSteamId) {
 			continue;
 		}
 		const local = findBySteamId(locals, token.linkedSteamId);
-		if (local && !bound.has(local.accountName)) {
+		if (local && !bound.has(local.accountName.toLowerCase())) {
 			out.push({tokenId: token.id, accountName: local.accountName});
-			bound.add(local.accountName);
+			bound.add(local.accountName.toLowerCase());
 		}
 	}
 	return out;

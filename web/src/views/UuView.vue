@@ -161,7 +161,7 @@ const columns: DataTableColumns<UuRow> = [
 		key: 'online',
 		width: 120,
 		render: row => {
-			if (row.kind === 'token') return h(NTag, {size: 'small', bordered: false}, () => tokenHint(row.token, row.local).tag);
+			if (row.kind === 'token') return h(NTag, {size: 'small', bordered: false}, () => tokenHint(row.token, row.local, row.holder, uu.bindErrors[row.token.id]).tag);
 			const hint = onlineHint(row.account, row.local);
 			return h(NTag, {size: 'small', bordered: false, type: hint.tone, title: hint.title}, () => hint.text);
 		}
@@ -205,7 +205,7 @@ const columns: DataTableColumns<UuRow> = [
 		minWidth: 220,
 		ellipsis: {tooltip: true},
 		render: row => {
-			if (row.kind === 'token') return h('span', {class: 'muted'}, tokenHint(row.token, row.local).hint);
+			if (row.kind === 'token') return h('span', {class: 'muted'}, tokenHint(row.token, row.local, row.holder, uu.bindErrors[row.token.id]).hint);
 			if (!row.account.bound) return h('span', {class: 'muted'}, '点右侧按钮获取并绑定 UU Token');
 			const lastScan = row.account.delivery?.[CS2]?.lastScanAt || row.account.delivery?.[TF2]?.lastScanAt || '';
 			return `${statsText(row.account)}${lastScan ? ' · ' + time(lastScan) : ''}`;

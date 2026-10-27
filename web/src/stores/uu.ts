@@ -1,7 +1,7 @@
 // UU(悠悠有品)发货:发货状态、已获取的 token(浏览器拿不到原文,只有 id)、自动绑定、短信登录拿 token、
 // 发货/上架开关、轮询间隔;推送 uu:update(账号状态)、uu:log(写运行日志)。
 
-import {computed, reactive} from 'vue';
+import {computed, reactive, watch} from 'vue';
 import {api, errorText} from '../api/http.ts';
 import {socket} from '../api/socket.ts';
 import {autoBindCandidates, uuRows} from '../lib/uu.ts';
@@ -28,6 +28,8 @@ export const uu = reactive({
 	error: '',
 	tokens: [] as UuToken[],
 	tokensLoaded: false,
+	/** 自动绑定失败时服务端返回的原因,按 token id;绑上了就删 */
+	bindErrors: {} as Record<string, string>,
 	/** 获取 Token 弹窗 */
 	modal: {
 		open: false,
@@ -83,15 +85,37 @@ export async function refreshTokens(): Promise<void> {
 	} finally {
 		uu.tokensLoaded = true;
 	}
+	await autoBind();
+}
+
+let binding: Promise<void> = Promise.resolve();
+
+/** 自动绑定;正在绑时排在它后面再跑一遍(别同一个 token 并发绑两次) */
+function autoBind(): Promise<void> {
+	binding = binding.catch(() => {}).then(bindCandidates);
+	return binding;
+}
+
+async function bindCandidates(): Promise<void> {
+	// 发货状态没读到时分不清哪些账号已绑,别把别人的 token 顶掉
+	if (!uu.loaded) {
+		return;
+	}
 	let bound = 0;
 	for (const candidate of autoBindCandidates(uu.tokens, uu.accounts, locals.value)) {
 		try {
 			// 浏览器没有 token 原文,按 id 绑定,服务端自己取
 			await api.post('/api/uu/bind', {accountName: candidate.accountName, tokenId: candidate.tokenId});
+			delete uu.bindErrors[candidate.tokenId];
 			addLog('info', `UU Token:已自动绑定到 ${candidate.accountName}`);
 			bound++;
-		} catch {
-			// 绑不上的(token 过期等)留在列表里显示「绑定失败」
+		} catch (err) {
+			// 绑不上的留在列表里,行内显示服务端给的原因;同一个原因只记一次日志,刷新重试不刷屏
+			const reason = errorText(err) || '未知错误';
+			if (uu.bindErrors[candidate.tokenId] !== reason) {
+				addLog('error', `UU Token:自动绑定到 ${candidate.accountName} 失败 ${reason}`);
+			}
+			uu.bindErrors[candidate.tokenId] = reason;
 		}
 	}
 	if (bound) {
@@ -215,7 +239,7 @@ export async function loginVerify(code: string): Promise<boolean> {
 	}
 	uu.modal.busy = true;
 	try {
-		const data = await api.post<{nickname?: string; userId?: string; linkedSteamId?: string; bindError?: string}>('/api/uu/login/verify', {
+		const data = await api.post<{nickname?: string; userId?: string; linkedSteamId?: string; bindError?: string; tokenId?: string}>('/api/uu/login/verify', {
 			loginSessionId: login.loginSessionId,
 			code,
 			accountName: uu.modal.accountName
@@ -226,6 +250,10 @@ export async function loginVerify(code: string): Promise<boolean> {
 		}
 		if (data.bindError) {
 			addLog('warn', `UU Token:已获取,但自动绑定失败 ${data.bindError}`);
+			// 记下原因:行内提示用,随后前端重试同样失败时不重复记日志
+			if (data.tokenId) {
+				uu.bindErrors[data.tokenId] = data.bindError;
+			}
 		}
 		uu.modal.login = null;
 		closeTokenModal();
@@ -275,6 +303,12 @@ export function startUu(): void {
 		return;
 	}
 	started = true;
+	// 直接打开 UU 页时账户管理的 SteamID 可能比 token 列表晚到,那时一个也对不上;对上了再自动绑一次
+	watch(() => autoBindCandidates(uu.tokens, uu.accounts, locals.value).map(candidate => candidate.tokenId + '>' + candidate.accountName).join(','), key => {
+		if (key && uu.tokensLoaded) {
+			void autoBind();
+		}
+	});
 	socket.on('uu:update', (account: UuAccount) => mergeAccount(account));
 	socket.on('uu:log', (payload: {accountName?: string; level?: string; message?: string} | null) => {
 		if (payload) {

@@ -29,6 +29,11 @@ test('发货列表:已绑定在前按名字,再接还没匹配到账号的 token
 	assert.equal(rows[0]!.local?.accountName, 'alpha');
 	assert.equal(rows[3]!.local?.accountName, 'bravo');
 	assert.equal(rows[4]!.local, null);
+	// bravo 已绑着别的 token:x 这一行带上 bravo 那一行
+	const x = rows[3]!;
+	assert.equal(x.kind === 'token' ? x.holder?.accountName : '', 'bravo');
+	const unbound = uuRows([account('Bravo', {bound: false})], [token('x', {linkedSteamId: '7656002'})], locals)[1]!;
+	assert.equal(unbound.kind === 'token' ? unbound.holder : 'n/a', null);
 });
 
 test('在线提示:缺 cookies / maFile 也发不了货', () => {
@@ -39,16 +44,24 @@ test('在线提示:缺 cookies / maFile 也发不了货', () => {
 	assert.deepEqual(onlineHint(account('a'), locals[0]!), {text: '在线', tone: 'success'});
 });
 
-test('未匹配 token 的说明', () => {
+test('未匹配 token 的说明:写清是账号已绑了别的、绑定报错还是还没绑', () => {
+	const matched = token('t', {linkedSteamId: '7656001'});
 	assert.match(tokenHint(token('t'), null).hint, /未绑定 Steam 账号/);
-	assert.deepEqual(tokenHint(token('t', {linkedSteamId: '7656001'}), locals[0]!).tag, '绑定失败');
 	assert.match(tokenHint(token('t', {linkedSteamId: '999'}), null).hint, /SteamID 999 未匹配/);
+	assert.deepEqual(tokenHint(matched, locals[0]!, null, 'token 校验失败: 登录已过期'), {tag: '绑定失败', hint: '已匹配到账号 alpha,自动绑定失败:token 校验失败: 登录已过期'});
+	assert.deepEqual(tokenHint(matched, locals[0]!, account('alpha'), '旧的报错'), {
+		tag: '账号已绑定', hint: '已匹配到账号 alpha,但该账号已绑定另一个 UU Token(n-alpha),这个 Token 没用上;要换用它,先删除该账号的 Token'
+	});
+	assert.match(tokenHint(matched, locals[0]!, account('alpha', {userId: ''})).hint, /看不出是不是这一个/);
+	assert.deepEqual(tokenHint(matched, locals[0]!).tag, '待绑定');
+	assert.doesNotMatch(Object.values(tokenHint(matched, locals[0]!)).join(), /过期/);
 });
 
 test('自动绑定:SteamID 对上账户管理里的账号且该账号没绑过;同一账号只绑一个', () => {
 	const tokens = [token('a', {linkedSteamId: '7656001'}), token('b', {linkedSteamId: '7656002'}), token('c', {linkedSteamId: '7656002'}), token('d'), token('e', {linkedSteamId: '999'})];
 	assert.deepEqual(autoBindCandidates(tokens, [account('alpha')], locals), [{tokenId: 'b', accountName: 'bravo'}]);
 	assert.deepEqual(autoBindCandidates(tokens, [account('alpha', {bound: false})], locals).map(c => c.accountName), ['alpha', 'bravo']);
+	assert.deepEqual(autoBindCandidates(tokens, [account('ALPHA')], locals).map(c => c.accountName), ['bravo'], '账号名大小写不同也算已绑');
 });
 
 test('统计与轮询间隔', () => {
