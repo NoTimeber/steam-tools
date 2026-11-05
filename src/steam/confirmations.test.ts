@@ -12,7 +12,7 @@ const MAFILE_DEVICE = 'android:11111111-2222-3333-4444-555555555555';
 
 interface FakeSteam {
 	/** 每次 getlist 依次返回的列表,数字是 HTTP 错误码(用完后一直返回最后一个) */
-	lists: Array<Array<{id: string; creator: string}> | number>;
+	lists: Array<Array<{id: string; creator: string; raw?: Record<string, unknown>}> | number>;
 	/** 依次给 ajaxop 的状态码(用完就 200) */
 	ajaxStatuses: number[];
 	/** ajaxop 回 success=false 时的 message */
@@ -22,8 +22,10 @@ interface FakeSteam {
 	/** 这些设备 ID 读列表时 Steam 回 success=false + Oh nooooooes!(detail 写原因) */
 	refusedDevices: Map<string, string>;
 	timeFails?: boolean;
-	requests: Array<{url: URL; headers: Record<string, string>}>;
+	requests: Array<{url: URL; headers: Record<string, string>; method: string; body: string}>;
 	accepted: string[];
+	/** 拒绝(op=cancel)掉的确认项 id */
+	cancelled: string[];
 	listCalls: number;
 	timeCalls: number;
 	queue: string[];
@@ -32,14 +34,14 @@ interface FakeSteam {
 const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), {status, headers: {'content-type': 'application/json'}});
 
 function fakeSteam(lists: FakeSteam['lists']): FakeSteam & {options: ConfirmerOptions} {
-	const steam: FakeSteam = {lists, ajaxStatuses: [], refusedDevices: new Map(), requests: [], accepted: [], listCalls: 0, timeCalls: 0, queue: []};
+	const steam: FakeSteam = {lists, ajaxStatuses: [], refusedDevices: new Map(), requests: [], accepted: [], cancelled: [], listCalls: 0, timeCalls: 0, queue: []};
 	const fakeFetch = (async (input: string | URL | Request, init?: RequestInit) => {
 		const url = new URL(String(input));
 		if (url.href === QUERY_TIME) {
 			steam.timeCalls++;
 			return steam.timeFails ? new Response('', {status: 503}) : json({response: {server_time: '1005', skew_tolerance_seconds: '60'}});
 		}
-		steam.requests.push({url, headers: Object.fromEntries(new Headers(init?.headers).entries())});
+		steam.requests.push({url, headers: Object.fromEntries(new Headers(init?.headers).entries()), method: init?.method ?? 'GET', body: String(init?.body ?? '')});
 		if (url.pathname === '/mobileconf/getlist') {
 			if (steam.needauth) {
 				return json({success: false, needauth: true});
@@ -52,7 +54,7 @@ function fakeSteam(lists: FakeSteam['lists']): FakeSteam & {options: ConfirmerOp
 			if (typeof entry === 'number') {
 				return json({success: false, message: 'Rate limit exceeded'}, entry);
 			}
-			return json({success: true, conf: entry.map(conf => ({id: conf.id, creator_id: conf.creator, nonce: 'n-' + conf.id, type: 12, headline: 'h'}))});
+			return json({success: true, conf: entry.map(conf => ({id: conf.id, creator_id: conf.creator, nonce: 'n-' + conf.id, type: 12, headline: 'h', ...conf.raw}))});
 		}
 		if (url.pathname === '/mobileconf/ajaxop') {
 			const status = steam.ajaxStatuses.shift() ?? 200;
@@ -62,7 +64,19 @@ function fakeSteam(lists: FakeSteam['lists']): FakeSteam & {options: ConfirmerOp
 			if (steam.ajaxFail) {
 				return json({success: false, message: steam.ajaxFail});
 			}
-			steam.accepted.push(url.searchParams.get('cid') ?? '');
+			(url.searchParams.get('op') === 'cancel' ? steam.cancelled : steam.accepted).push(url.searchParams.get('cid') ?? '');
+			return json({success: true});
+		}
+		if (url.pathname === '/mobileconf/multiajaxop') {
+			const status = steam.ajaxStatuses.shift() ?? 200;
+			if (status !== 200) {
+				return json({success: false, message: 'Rate limit exceeded'}, status);
+			}
+			if (steam.ajaxFail) {
+				return json({success: false, message: steam.ajaxFail});
+			}
+			const form = new URLSearchParams(String(init?.body ?? ''));
+			(form.get('op') === 'cancel' ? steam.cancelled : steam.accepted).push(...form.getAll('cid[]'));
 			return json({success: true});
 		}
 		return new Response('not found', {status: 404});
@@ -317,4 +331,82 @@ test('maFile 的 device_id 不像设备 ID(SDA 坏掉时写成 ERROR):直接用�
 		.listConfirmationIds({cookies: COOKIES, identitySecret: 'IS', deviceId: 'ERROR'});
 	assert.equal(query(steam, 0).p, 'android:derived-' + STEAM_ID);
 	assert.match(logs[0] ?? '', /^warn .*maFile 的 device_id 不像设备 ID\(ERROR\)/);
+});
+
+test('令牌确认页读列表:带上显示用的字段(类型名、说明、图标、时间、按钮字、警告);非 https 图标不要', async () => {
+	const steam = fakeSteam([[
+		{id: 't1', creator: '5551', raw: {
+			type: 2, type_name: 'Trade Offer', headline: 'Bob', summary: ['You will give up 1 item', ' ', 'You will receive 2 items'],
+			icon: 'https://avatars.example/bob.jpg', creation_time: 1700000000, accept: 'Send Offer', cancel: 'Cancel', warn: 'New friend'
+		}},
+		{id: 'm1', creator: '777', raw: {type: 3, summary: 'Selling for $1.00', icon: 'javascript:alert(1)'}}
+	]]);
+	const list = await createConfirmer(steam.options).listConfirmations({cookies: COOKIES, identitySecret: 'IS', deviceId: MAFILE_DEVICE});
+	assert.deepEqual(list, [
+		{
+			id: 't1', creator: '5551', nonce: 'n-t1', type: 2, headline: 'Bob', typeName: 'Trade Offer', summary: ['You will give up 1 item', 'You will receive 2 items'],
+			icon: 'https://avatars.example/bob.jpg', createdAt: 1700000000, acceptText: 'Send Offer', cancelText: 'Cancel', warn: 'New friend'
+		},
+		{id: 'm1', creator: '777', nonce: 'n-m1', type: 3, headline: 'h', typeName: '', summary: ['Selling for $1.00'], icon: '', createdAt: 0, acceptText: '', cancelText: '', warn: ''}
+	]);
+	assert.deepEqual(query(steam, 0), {p: MAFILE_DEVICE, a: STEAM_ID, k: 'IS@1005/conf', t: '1005', m: 'react', tag: 'conf'});
+
+	const confirmer = createConfirmer(fakeSteam([[]]).options);
+	await assert.rejects(confirmer.listConfirmations({cookies: [], identitySecret: 'IS'}), /缺少 WebSession cookies,无法读取令牌确认/);
+	await assert.rejects(confirmer.listConfirmations({cookies: COOKIES, identitySecret: ''}), /未导入 maFile/);
+});
+
+test('令牌确认页读列表:429 等一会再试', async () => {
+	const steam = fakeSteam([429, [{id: 'a', creator: '1'}]]);
+	const waits: number[] = [];
+	const list = await createConfirmer({...steam.options, sleep: async ms => void waits.push(ms)}).listConfirmations({cookies: COOKIES, identitySecret: 'IS'});
+	assert.deepEqual(list.map(conf => conf.id), ['a']);
+	assert.deepEqual(waits, [10000]);
+});
+
+test('确认 / 拒绝一条:ajaxop,签名 tag 和 op 一样(allow / cancel)', async () => {
+	const steam = fakeSteam([[]]);
+	const confirmer = createConfirmer(steam.options);
+	await confirmer.respondToConfirmations({cookies: COOKIES, identitySecret: 'IS', deviceId: MAFILE_DEVICE, confirmations: [{id: 'x', nonce: 'nx'}], accept: false});
+	assert.deepEqual(steam.cancelled, ['x']);
+	assert.equal(steam.requests[0]?.method, 'GET');
+	assert.deepEqual(query(steam, 0), {p: MAFILE_DEVICE, a: STEAM_ID, k: 'IS@1005/cancel', t: '1005', m: 'react', tag: 'cancel', op: 'cancel', cid: 'x', ck: 'nx'});
+
+	await confirmer.respondToConfirmations({cookies: COOKIES, identitySecret: 'IS', confirmations: [{id: 'y', nonce: 'ny'}], accept: true});
+	assert.deepEqual(steam.accepted, ['y']);
+	assert.deepEqual([query(steam, 1).tag, query(steam, 1).op], ['allow', 'allow']);
+});
+
+test('确认 / 拒绝多条:POST multiajaxop,表单里每条一对 cid[] ck[];429 等一会再试;Steam 拒绝带原话', async () => {
+	const steam = fakeSteam([[]]);
+	steam.ajaxStatuses.push(429);
+	const waits: number[] = [];
+	const confirmer = createConfirmer({...steam.options, sleep: async ms => void waits.push(ms)});
+	await confirmer.respondToConfirmations({
+		cookies: COOKIES, identitySecret: 'IS', deviceId: MAFILE_DEVICE, accept: true,
+		confirmations: [{id: 'a', nonce: 'na'}, {id: 'b', nonce: 'nb'}, {id: '', nonce: 'skip'}]
+	});
+	assert.deepEqual(steam.accepted, ['a', 'b']);
+	assert.deepEqual(waits, [10000]);
+	const last = steam.requests.at(-1)!;
+	assert.equal(last.method, 'POST');
+	assert.equal(last.url.href, 'https://steamcommunity.com/mobileconf/multiajaxop');
+	assert.match(last.headers['content-type'] ?? '', /^application\/x-www-form-urlencoded/);
+	assert.equal(last.headers.cookie, COOKIES.join('; '));
+	const form = new URLSearchParams(last.body);
+	assert.deepEqual([...form], [
+		['p', MAFILE_DEVICE], ['a', STEAM_ID], ['k', 'IS@1005/allow'], ['t', '1005'], ['m', 'react'], ['tag', 'allow'], ['op', 'allow'],
+		['cid[]', 'a'], ['ck[]', 'na'], ['cid[]', 'b'], ['ck[]', 'nb']
+	]);
+
+	const refused = fakeSteam([[]]);
+	refused.ajaxFail = 'Invalid authenticator';
+	await assert.rejects(createConfirmer(refused.options).respondToConfirmations({
+		cookies: COOKIES, identitySecret: 'IS', accept: false, confirmations: [{id: 'a', nonce: 'na'}, {id: 'b', nonce: 'nb'}]
+	}), /Steam 拒绝了手机确认请求\(mobileconf\/multiajaxop\):Invalid authenticator/);
+	assert.deepEqual(refused.cancelled, []);
+
+	const empty = createConfirmer(fakeSteam([[]]).options);
+	await assert.rejects(empty.respondToConfirmations({cookies: COOKIES, identitySecret: 'IS', accept: true, confirmations: []}), /没有要确认的确认项/);
+	await assert.rejects(empty.respondToConfirmations({cookies: COOKIES, identitySecret: '', accept: false, confirmations: [{id: 'a', nonce: 'n'}]}), /无法拒绝/);
 });

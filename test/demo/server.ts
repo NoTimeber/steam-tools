@@ -13,6 +13,7 @@
 // 代理管理:演示里有个假代理 127.0.0.1:<PORT+1>(DEMO_PROXY_PORT 可改;用户名、密码随便填,用户名以 -rotate 结尾的每次连接换出口 IP),
 // 检测能过(出口 IP 是假的);经它的 Steam 网页请求会失败(假代理不转发 HTTPS)。
 // 库存:每个登录的账号看到同一份假社区库存(随包皮肤库里挑的皮肤 + 武器箱 + 终端机,有冷却中、锁定、重复的)。
+// 令牌确认:alpha(有 maFile)登录后能看到几条演示待确认项(交易报价、市场上架、求购、创建 API Key)。
 // 删掉那个目录就回到初始状态。端口 PORT、口令 APP_PASSWORD 可改。前端要先在 web/ 下构建(npm run build),开发时用 web/ 下的 npm run dev。
 
 import {spawn} from 'node:child_process';
@@ -122,6 +123,23 @@ function demoInventory() {
 const inventoryFile = join(root, 'fake-inventory.json');
 writeFileSync(inventoryFile, JSON.stringify(demoInventory()));
 
+// 令牌确认的待确认项(每次启动重写;每个账号一份,确认 / 拒绝后在这次运行里消失)。文字照 Steam 原样是英文
+const confirmationsFile = join(root, 'fake-confirmations.json');
+const minutesAgo = (minutes: number) => Math.floor(Date.now() / 1000) - minutes * 60;
+writeFileSync(confirmationsFile, JSON.stringify([
+	{id: '9100001', creator_id: '6400000001', type: 2, type_name: 'Trade Offer', headline: 'DemoTrader', creation_time: minutesAgo(3),
+		summary: ['You will give up 1 item', 'You will receive 2 items'], accept: 'Send Offer', cancel: 'Cancel'},
+	{id: '9100002', creator_id: '6400000002', type: 2, type_name: 'Trade Offer', headline: 'NewFriend_42', creation_time: minutesAgo(40),
+		summary: ['You will give up 3 items', 'You will receive nothing'], accept: 'Send Offer', cancel: 'Cancel',
+		warn: 'You have not been friends with this user for very long.'},
+	{id: '9100003', creator_id: '5100000001', type: 3, type_name: 'Market Listing', headline: 'AK-47 | Redline (Field-Tested)', creation_time: minutesAgo(65),
+		summary: ['Selling for ¥ 98.50 (You receive ¥ 85.66)'], accept: 'Create Listing', cancel: 'Cancel'},
+	{id: '9100004', creator_id: '7000000101', type: 12, type_name: 'Market Purchase', headline: 'Kilowatt Case', creation_time: minutesAgo(130),
+		summary: ['Buy order: 10 × ¥ 0.58'], accept: 'Confirm', cancel: 'Cancel'},
+	{id: '9100005', creator_id: '0', type: 9, type_name: 'Web API Key', headline: 'Create Web API Key', creation_time: minutesAgo(5),
+		summary: ['Domain: steam-trade-helper.example'], accept: 'Confirm', cancel: 'Cancel'}
+], null, 2));
+
 const port = process.env.PORT || '53110';
 const password = process.env.APP_PASSWORD || 'demo-password';
 
@@ -156,6 +174,7 @@ const child = spawn(process.execPath, ['--require', join(REPO_ROOT, 'test', 'e2e
 		FAKE_UU_FILE: uuScenarioFile,
 		FAKE_C5_FILE: c5ScenarioFile,
 		FAKE_INVENTORY_FILE: inventoryFile,
+		FAKE_CONFIRMATIONS_FILE: confirmationsFile,
 		PROXY_TEST_URL: 'http://ip.demo.test/',
 		UPDATE_CHECK: '0'
 	}

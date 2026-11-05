@@ -1,9 +1,9 @@
 <script setup lang="ts">
 // 账户管理:面包屑 + 大标题 + 右上角操作按钮,下面「账户」「账户分组」两个标签页(账户分组可进单个分组的编辑页,
 // 点账户名进账户详情页)。账户列表在 accounts/AccountsTab.vue,分组在 accounts/GroupsTab.vue,详情在 accounts/AccountDetail.vue;
-// 这里管导入、导出、新建 / 删除分组、Steam Guard 验证码,以及详情页右上角的登录 / 登出、消费记录、代理。
+// 这里管导入、导出、新建 / 删除分组、Steam Guard 验证码,以及详情页右上角的登录 / 登出、令牌确认、消费记录、代理。
 import {computed, reactive, ref, watch} from 'vue';
-import {NAlert, NButton, NCard, NInput, NModal, NSpace, NTab, NTabs, useDialog, useMessage} from 'naive-ui';
+import {NAlert, NButton, NCard, NInput, NModal, NSpace, NTab, NTabs, NTooltip, useDialog, useMessage} from 'naive-ui';
 import {errorText} from '../api/http.ts';
 import AppIcon from '../components/AppIcon.vue';
 import {accountsCsv} from '../lib/accounts.ts';
@@ -15,6 +15,7 @@ import type {AccountRow} from '../stores/accounts.ts';
 import {refreshAuthCodes} from '../stores/authcodes.ts';
 import AccountDetail from './accounts/AccountDetail.vue';
 import AccountsTab from './accounts/AccountsTab.vue';
+import ConfirmationsModal from './accounts/ConfirmationsModal.vue';
 import GroupsTab from './accounts/GroupsTab.vue';
 import HistoryModal from './accounts/HistoryModal.vue';
 import ProxyModal from './accounts/ProxyModal.vue';
@@ -45,6 +46,7 @@ function openTab(value: 'accounts' | 'groups'): void {
 const detailName = ref('');
 const detailRow = computed(() => accounts.rows.find(row => row.accountName.toLowerCase() === detailName.value.toLowerCase()));
 const historyAccount = ref('');
+const confirmAccount = ref('');
 const proxyAccounts = ref<string[]>([]);
 const detailOnline = computed(() => detailRow.value?.status === '登录成功' || detailRow.value?.status === '登录中');
 
@@ -218,6 +220,12 @@ async function submitGuard(): Promise<void> {
 					<NButton :type="detailOnline ? 'default' : 'primary'" :disabled="!detailRow" @click="toggleDetailLogin">
 						<template #icon><AppIcon :name="detailOnline ? 'logout' : 'login'" :size="16" /></template>{{ detailOnline ? '登出' : '登录' }}
 					</NButton>
+					<NTooltip :disabled="!!detailRow?.hasMaFile" placement="bottom">
+						<template #trigger>
+							<span><NButton :disabled="!detailRow?.hasMaFile" @click="confirmAccount = detailName"><template #icon><AppIcon name="shield" :size="16" /></template>令牌确认</NButton></span>
+						</template>
+						没有导入 maFile(identity_secret),用不了令牌确认
+					</NTooltip>
 					<NButton @click="historyAccount = detailName"><template #icon><AppIcon name="receipt" :size="16" /></template>消费记录</NButton>
 					<NButton @click="proxyAccounts = [detailName]"><template #icon><AppIcon name="globe" :size="16" /></template>代理</NButton>
 				</template>
@@ -293,6 +301,7 @@ async function submitGuard(): Promise<void> {
 				</template>
 			</NCard>
 		</NModal>
+		<ConfirmationsModal :account-name="confirmAccount" @close="confirmAccount = ''" />
 		<HistoryModal :account-name="historyAccount" @close="historyAccount = ''" />
 		<ProxyModal :account-names="proxyAccounts" @close="proxyAccounts = []" />
 	</div>

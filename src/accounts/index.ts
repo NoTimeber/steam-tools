@@ -1,10 +1,13 @@
 // 账号与登录(从 app/server.js 移来):账户名单同步、分组、账号资料、maFile 导入、令牌验证码、
-// 登录(密码 / refreshToken)、Steam Guard、WebSession、登出、删除账号、连接/断开 GC,以及重启后自动恢复登录要的凭据。
+// 登录(密码 / refreshToken)、Steam Guard、WebSession、登出、删除账号、连接/断开 GC、令牌确认(./confirmations.ts),
+// 以及重启后自动恢复登录要的凭据。
 // 路由在 ./routes.ts;会话管理、加密库、推送由 src/main.ts 注入,单元测试用假的。
 
 import {randomUUID} from 'node:crypto';
 import {createRequire} from 'node:module';
 import {findAttemptByKey} from '../steam/attempts.ts';
+import {createConfirmer} from '../steam/confirmations.ts';
+import type {Confirmer} from '../steam/confirmations.ts';
 import {gameConfig, normalizeGame} from '../steam/games.ts';
 import {disconnectGameSession, ensureGameSession} from '../steam/gc-client.ts';
 import {safeName} from '../steam/session-manager.ts';
@@ -14,6 +17,7 @@ import {normalizeStoredAccount} from '../store/accounts.ts';
 import type {AccountStore, StoredAccount} from '../store/accounts.ts';
 import type {MaFileStore} from '../store/mafiles.ts';
 import type {SteamSessionStore} from '../store/steam-sessions.ts';
+import {createAccountConfirmations} from './confirmations.ts';
 import {createCountryLookup} from './country.ts';
 import {createAccountGroups} from './groups.ts';
 import type {AccountGroup, PublicAccount} from './groups.ts';
@@ -55,6 +59,8 @@ export interface AccountServiceOptions {
 	logger?: Pick<Console, 'warn'>;
 	/** 账号指纹(机器名、UA),只读缓存、没有不生成;不传详情里就不显示 */
 	fingerprintOf?: (accountName: string) => {machineName: string; userAgent: string} | null;
+	/** 令牌确认发 mobileconf 用的;不传按 fetch 新建一个 */
+	confirmer?: Pick<Confirmer, 'listConfirmations' | 'respondToConfirmations'>;
 }
 
 /** 账户详情里的一条日志 */
@@ -142,6 +148,19 @@ export function createAccountService(options: AccountServiceOptions) {
 		now
 	});
 	const groups = createAccountGroups(store);
+	// 令牌确认:在线的用会话的 cookie,不在线的用上次登录存下的;mobileconf 和求购、UU 发货同一套(按账号走代理、maFile 的 device_id)
+	const confirmations = createAccountConfirmations({
+		accountNameOf: raw => findStoredAccount(store.accounts, raw)?.accountName ?? null,
+		findAttempt: accountName => findAttemptByKey(sessions.attempts, accountName) ?? undefined,
+		cookiesFor: attempt => profiles.cookiesFor(attempt),
+		profileOf: accountName => profiles.local(accountName),
+		confirmer: options.confirmer ?? createConfirmer({fetch: options.fetch, label: ''}),
+		addLog: (attempt, level, message) => {
+			sessions.addLog(attempt, level, message);
+			sessions.emit(attempt);
+		},
+		now
+	});
 
 	function attemptById(id: unknown): Attempt {
 		const attempt = sessions.attempts.get(String(id));
@@ -631,6 +650,9 @@ export function createAccountService(options: AccountServiceOptions) {
 		reorderGroups: groups.reorderGroups, moveToGroup: groups.moveToGroup,
 		login, loginWithRefreshToken, submitGuard, requestWebSession, logout, cleanup, connectGc, disconnectGc, cookies, listAttempts,
 		loadHistory, getHistory, restoreCredentials,
+		/** 令牌确认:读待确认项、确认 / 拒绝 */
+		listConfirmations: (body: {accountName?: unknown}) => confirmations.list(body.accountName),
+		respondConfirmations: confirmations.respond,
 		/** 拿到 WebSession 后后台刷新真实账户国家 */
 		refreshCountry: country.refresh,
 		findStoredAccount: (accountName: unknown) => findStoredAccount(store.accounts, accountName)

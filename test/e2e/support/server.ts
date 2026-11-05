@@ -46,7 +46,7 @@ async function freePort(): Promise<number> {
 export interface FakeSteamEvent {
 	run: string;
 	event: 'logOn' | 'logOff' | 'gamesPlayed' | 'sendToGC' | 'blockedFetch' | 'purchaseInit' | 'microTxnAuthorize' | 'purchaseFinalize'
-		| 'uuRequest' | 'offerAccept' | 'offerConfirm' | 'marketRequest' | 'marketConfirmList' | 'marketConfirm' | 'timeOffset' | 'storeRequest' | 'walletRedeem' | 'webLogOn' | 'guardCode' | 'inventoryRequest'
+		| 'uuRequest' | 'offerAccept' | 'offerConfirm' | 'marketRequest' | 'marketConfirmList' | 'marketConfirm' | 'mobileconfRespond' | 'timeOffset' | 'storeRequest' | 'walletRedeem' | 'webLogOn' | 'guardCode' | 'inventoryRequest'
 		| 'c5Request';
 	/** walletRedeem:兑换的码 */
 	code?: string;
@@ -84,6 +84,9 @@ export interface FakeSteamEvent {
 	tag?: string;
 	confId?: string;
 	accept?: boolean;
+	/** mobileconfRespond:这次确认 / 拒绝的确认项 id、op(allow / cancel) */
+	confIds?: string[];
+	op?: string;
 	/** c5Request:请求头里的 Accept-Encoding(path / method / query / body 同上) */
 	acceptEncoding?: string;
 }

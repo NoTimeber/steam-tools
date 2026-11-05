@@ -19,6 +19,7 @@ import {
 import type {AccountRow} from '../../stores/accounts.ts';
 import {authCodeSecondsLeft, authCodes, watchAuthCodes} from '../../stores/authcodes.ts';
 import {loadProxies, proxy} from '../../stores/proxy.ts';
+import ConfirmationsModal from './ConfirmationsModal.vue';
 import HistoryModal from './HistoryModal.vue';
 import ProxyModal from './ProxyModal.vue';
 
@@ -27,6 +28,8 @@ const message = useMessage();
 const dialog = useDialog();
 
 const historyAccount = ref('');
+/** 正在看令牌确认的账号 */
+const confirmAccount = ref('');
 /** 正在设代理的账号(一个或勾选的几个) */
 const proxyAccounts = ref<string[]>([]);
 
@@ -170,9 +173,17 @@ async function copyCode(code: string): Promise<void> {
 // ===== 表格 =====
 const seqOf = computed(() => new Map(visibleRows.value.map((row, index) => [row.key, index + 1])));
 
-/** 行尾的图标按钮,鼠标放上去显示 label */
-function iconAction(icon: IconName, label: string, onClick?: () => void) {
-	return withTip(h(NButton, {size: 'small', text: true, type: 'primary', 'aria-label': label, onClick, class: 'row-action'}, {icon: () => h(AppIcon, {name: icon, size: 17})}), label);
+/** 行尾的图标按钮,鼠标放上去显示 label;muted 是灰的(这个账号用不了,点了会说原因) */
+function iconAction(icon: IconName, label: string, onClick?: () => void, muted = false) {
+	return withTip(h(NButton, {size: 'small', text: true, type: muted ? 'default' : 'primary', 'aria-label': label, onClick, class: ['row-action', muted ? 'is-muted' : '']}, {icon: () => h(AppIcon, {name: icon, size: 17})}), label);
+}
+
+function openConfirmations(row: AccountRow): void {
+	if (!row.hasMaFile) {
+		message.warning(`${row.accountName} 没有导入 maFile(identity_secret),用不了令牌确认`);
+		return;
+	}
+	confirmAccount.value = row.accountName;
 }
 
 function guardCell(row: AccountRow) {
@@ -290,7 +301,7 @@ const columns = computed<DataTableColumns<AccountRow>>(() => {
 	list.push({
 		title: '',
 		key: 'actions',
-		width: 120,
+		width: 148,
 		fixed: 'right',
 		render: row => h('div', {class: 'row-actions'}, [
 			row.status === '登录成功' || row.status === '登录中'
@@ -298,6 +309,9 @@ const columns = computed<DataTableColumns<AccountRow>>(() => {
 				: iconAction('login', '登录这个账号', () => loginAccount(row)),
 			h(NDropdown, {trigger: 'click', options: moveOptions(row.groupId), onSelect: (key: string) => onMove(key, [row])},
 				() => h('span', {class: 'tip-anchor'}, [iconAction('folder', '设置账户分组')])),
+			row.hasMaFile
+				? iconAction('shield', '令牌确认:交易报价、市场上架等待确认项', () => openConfirmations(row))
+				: iconAction('shield', '没有 maFile,用不了令牌确认', () => openConfirmations(row), true),
 			iconAction('receipt', '查看 Steam 消费记录', () => (historyAccount.value = row.accountName)),
 			iconAction('globe', '设置这个账号的 Steam 代理', () => (proxyAccounts.value = [row.accountName]))
 		])
@@ -533,6 +547,7 @@ function confirmDelete(): void {
 		</div>
 	</section>
 
+	<ConfirmationsModal :account-name="confirmAccount" @close="confirmAccount = ''" />
 	<HistoryModal :account-name="historyAccount" @close="historyAccount = ''" />
 	<ProxyModal :account-names="proxyAccounts" @close="proxyAccounts = []" />
 </template>
@@ -768,6 +783,10 @@ function confirmDelete(): void {
 	display: flex;
 	align-items: center;
 	gap: 10px;
+}
+
+:deep(.row-action.is-muted) {
+	opacity: 0.4;
 }
 
 @media (max-width: 900px) {

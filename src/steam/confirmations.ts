@@ -1,4 +1,5 @@
-// Steam 手机令牌确认(mobileconf):求购单确认(从 app/services/steamMarketBuyOrder.js 移来)、UU 发货接受报价后的确认。
+// Steam 手机令牌确认(mobileconf):求购单确认(从 app/services/steamMarketBuyOrder.js 移来)、UU 发货接受报价后的确认,
+// 以及账户管理「令牌确认」的读列表、逐条/批量确认或拒绝(listConfirmations / respondToConfirmations)。
 //
 // 2024 年起部分账号/地区挂求购要手机确认:createbuyorder 返回 success=22(Pending),
 // 要用 maFile 的 identity_secret 在 mobileconf 里 allow 后再带 confirmation 重发一次才真正落单(见 ../market/client.ts)。
@@ -11,7 +12,8 @@
 //
 // mobileconf 请求自己发,不经 steamcommunity 库(参照 aiosteampy 的 guard/confirmations.py、steamguard-cli 的 confirmation.rs):
 //   GET /mobileconf/getlist?p=<设备 ID>&a=<SteamID>&k=<确认 key>&t=<Steam 时间>&m=react&tag=conf
-//   GET /mobileconf/ajaxop?...&tag=allow&op=allow&cid=<确认项 id>&ck=<确认项 nonce>
+//   GET /mobileconf/ajaxop?...&tag=allow&op=allow&cid=<确认项 id>&ck=<确认项 nonce>(拒绝是 tag=cancel&op=cancel)
+//   POST /mobileconf/multiajaxop,表单 p a k t m tag op + 每条一对 cid[] ck[](一次确认/拒绝多条,steamguard-cli、SDA 都这样)
 // k = HMAC(identity_secret, t + tag)。getlist 的 tag 用 conf(steamcommunity 默认、steamguard-cli、SDA 都是它;aiosteampy 用 getlist)。
 // 和 steamcommunity 库的差别:设备 ID 优先用 maFile 的 device_id(库只能按 SteamID 算一个),
 // HTTP 和挂单走同一套(按账号选代理的 fetch),Steam 时间差也经它查;出错时把 Steam 的原话带进报错和日志。
@@ -50,7 +52,24 @@ export interface Confirmation {
 	nonce: string;
 	type: unknown;
 	headline: string;
+	// 以下给令牌确认页显示用(Steam 的原文,英文)
+	/** type_name:Steam 给的类型名 */
+	typeName: string;
+	/** summary:几行说明(交易给出/收到几件、上架价格等) */
+	summary: string[];
+	/** 图标地址(交易对方头像、物品图) */
+	icon: string;
+	/** creation_time(秒);没有为 0 */
+	createdAt: number;
+	/** 按钮上的字(Accept / Cancel 之类) */
+	acceptText: string;
+	cancelText: string;
+	/** Steam 给的警告(比如对方是新好友);没有为 '' */
+	warn: string;
 }
+
+/** 确认 / 拒绝要的两样:确认项 id 和 nonce */
+export type ConfirmationRef = Pick<Confirmation, 'id' | 'nonce'>;
 
 /** steam-totp(用到的部分) */
 export interface Totp {
@@ -104,6 +123,13 @@ export interface ConfirmTradeOfferParams extends ListConfirmationsParams {
 	gapMs?: number;
 }
 
+export interface RespondConfirmationsParams extends ListConfirmationsParams {
+	/** 要处理的确认项(id + nonce,来自 listConfirmations) */
+	confirmations: readonly ConfirmationRef[];
+	/** true 确认(allow),false 拒绝(cancel) */
+	accept: boolean;
+}
+
 /** mobileconf 的错误:status 是 HTTP 状态码(Steam 回 JSON 说失败时没有);refused 是 Steam 回了 success=false(不是要重新登录) */
 class MobileconfError extends Error {
 	status: number;
@@ -140,13 +166,23 @@ function describe(confirmations: readonly Confirmation[]): string {
 	return confirmations.map(conf => `{id:${conf.id},creator:${conf.creator},type:${conf.type}}`).join(',');
 }
 
+const text = (value: unknown): string => (value == null ? '' : String(value).trim());
+
 function toConfirmation(raw: any): Confirmation {
+	const created = Number(raw?.creation_time);
 	return {
 		id: String(raw?.id ?? ''),
 		creator: String(raw?.creator_id ?? ''),
 		nonce: String(raw?.nonce ?? ''),
 		type: raw?.type,
-		headline: String(raw?.headline ?? '')
+		headline: String(raw?.headline ?? ''),
+		typeName: text(raw?.type_name),
+		summary: (Array.isArray(raw?.summary) ? raw.summary : [raw?.summary]).map(text).filter(Boolean),
+		icon: /^https:\/\//i.test(text(raw?.icon)) ? text(raw.icon) : '',
+		createdAt: Number.isFinite(created) && created > 0 ? created : 0,
+		acceptText: text(raw?.accept),
+		cancelText: text(raw?.cancel),
+		warn: text(raw?.warn)
 	};
 }
 
@@ -238,30 +274,40 @@ export function createConfirmer(options: ConfirmerOptions = {}) {
 		};
 	}
 
-	/** 发一个 mobileconf 请求,返回 Steam 回的 JSON(success 为真);别的情况抛 MobileconfError */
-	async function mobileconf(session: Session, path: 'getlist' | 'ajaxop', tag: string, extra: Record<string, string> = {}): Promise<any> {
+	/**
+	 * 发一个 mobileconf 请求,返回 Steam 回的 JSON(success 为真);别的情况抛 MobileconfError。
+	 * getlist / ajaxop 是 GET,参数在地址里;multiajaxop 是 POST,参数(含重复的 cid[] ck[])放表单
+	 */
+	async function mobileconf(session: Session, path: 'getlist' | 'ajaxop' | 'multiajaxop', tag: string, extra: ReadonlyArray<[string, string]> = []): Promise<any> {
 		await queue.wait(session.cookies);
 		// 签名时间取发出前那一刻(排队可能等了几秒)
 		const time = Math.floor(now() / 1000) + session.offset;
-		const query = new URLSearchParams({
-			p: session.deviceId,
-			a: session.steamID,
-			k: totp.getConfirmationKey(session.identitySecret, time, tag),
-			t: String(time),
-			m: 'react',
-			tag,
+		const params = new URLSearchParams([
+			['p', session.deviceId],
+			['a', session.steamID],
+			['k', totp.getConfirmationKey(session.identitySecret, time, tag)],
+			['t', String(time)],
+			['m', 'react'],
+			['tag', tag],
 			...extra
-		});
+		]);
+		const headers: Record<string, string> = {
+			'User-Agent': session.userAgent,
+			Accept: 'application/json, text/plain, */*',
+			'Accept-Language': 'en-US,en;q=0.9',
+			Cookie: session.cookies.join('; ')
+		};
+		const post = path === 'multiajaxop';
+		if (post) {
+			headers['Content-Type'] = 'application/x-www-form-urlencoded; charset=UTF-8';
+		}
 		let res: Response;
 		let text: string;
 		try {
-			res = await http(`${MOBILECONF}/${path}?${query}`, {
-				headers: {
-					'User-Agent': session.userAgent,
-					Accept: 'application/json, text/plain, */*',
-					'Accept-Language': 'en-US,en;q=0.9',
-					Cookie: session.cookies.join('; ')
-				},
+			res = await http(post ? `${MOBILECONF}/${path}` : `${MOBILECONF}/${path}?${params}`, {
+				method: post ? 'POST' : 'GET',
+				headers,
+				body: post ? params.toString() : undefined,
 				signal: AbortSignal.timeout(session.timeoutMs)
 			});
 			text = await res.text();
@@ -313,8 +359,27 @@ export function createConfirmer(options: ConfirmerOptions = {}) {
 		}
 	}
 
-	async function accept(session: Session, conf: Confirmation): Promise<void> {
-		await mobileconf(session, 'ajaxop', 'allow', {op: 'allow', cid: conf.id, ck: conf.nonce});
+	async function accept(session: Session, conf: ConfirmationRef): Promise<void> {
+		await mobileconf(session, 'ajaxop', 'allow', [['op', 'allow'], ['cid', conf.id], ['ck', conf.nonce]]);
+	}
+
+	/** 确认(allow)或拒绝(cancel)几条:一条用 ajaxop,多条用 multiajaxop 一次提交(签名 tag 和 op 相同) */
+	async function respond(session: Session, confirmations: readonly ConfirmationRef[], op: 'allow' | 'cancel'): Promise<void> {
+		if (confirmations.length === 1) {
+			const [conf] = confirmations;
+			await mobileconf(session, 'ajaxop', op, [['op', op], ['cid', conf!.id], ['ck', conf!.nonce]]);
+			return;
+		}
+		await mobileconf(session, 'multiajaxop', op, [['op', op], ...confirmations.flatMap(conf => [['cid[]', conf.id], ['ck[]', conf.nonce]] as Array<[string, string]>)]);
+	}
+
+	function requireCredentials(params: ListConfirmationsParams, what: string): void {
+		if (!params.cookies.some(Boolean)) {
+			throw new Error(`缺少 WebSession cookies,无法${what}`);
+		}
+		if (!String(params.identitySecret || '').trim()) {
+			throw new Error(`该账号未导入 maFile(identity_secret),无法${what}`);
+		}
 	}
 
 	/** 回 429 时按 rateLimitWaits 等一会再试;等完还是 429 就报限流,别的错误照抛 */
@@ -433,7 +498,26 @@ export function createConfirmer(options: ConfirmerOptions = {}) {
 		throw new Error(`重试 ${attempts} 次仍没找到报价 ${tradeOfferId} 的待确认项,请在 Steam 手机 App 手动确认`);
 	}
 
-	return {listConfirmationIds, confirmBuyOrder, confirmTradeOffer};
+	/** 令牌确认页:读这个账号现在所有的待确认项(429 等一会再试)。失败抛错 */
+	async function listConfirmations(params: ListConfirmationsParams): Promise<Confirmation[]> {
+		requireCredentials(params, '读取令牌确认');
+		const session = await openSession(params);
+		return retryRateLimited(session, '读取确认列表', () => fetchConfirmations(session));
+	}
+
+	/** 令牌确认页:确认或拒绝几条待确认项(id + nonce 来自 listConfirmations)。Steam 回 success=false 抛错 */
+	async function respondToConfirmations(params: RespondConfirmationsParams): Promise<void> {
+		const what = params.accept ? '确认' : '拒绝';
+		requireCredentials(params, what);
+		const confirmations = params.confirmations.filter(conf => conf.id && conf.nonce);
+		if (!confirmations.length) {
+			throw new Error(`没有要${what}的确认项`);
+		}
+		const session = await openSession(params);
+		await retryRateLimited(session, `提交${what}`, () => respond(session, confirmations, params.accept ? 'allow' : 'cancel'));
+	}
+
+	return {listConfirmationIds, confirmBuyOrder, confirmTradeOffer, listConfirmations, respondToConfirmations};
 }
 
 export type Confirmer = ReturnType<typeof createConfirmer>;

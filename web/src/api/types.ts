@@ -66,6 +66,38 @@ export interface AccountDetail {
 	logs: AttemptLog[];
 }
 
+/** 令牌确认里的一条待确认项(src/accounts/confirmations.ts 的 PublicConfirmation;不含 nonce)。文字是 Steam 原文(英文) */
+export interface PendingConfirmation {
+	id: string;
+	/** 交易报价 id、上架 / 求购单 id 等 */
+	creator: string;
+	/** 2 交易报价、3 市场上架、12 市场求购…… */
+	type: number;
+	typeName: string;
+	headline: string;
+	summary: string[];
+	icon: string;
+	/** 创建时间(毫秒);不知道为 0 */
+	createdAt: number;
+	acceptText: string;
+	cancelText: string;
+	warn: string;
+}
+
+/** POST /api/accounts/confirmations/list 的结果 */
+export interface ConfirmationList {
+	accountName: string;
+	confirmations: PendingConfirmation[];
+	/** 从 Steam 读的时间(毫秒) */
+	fetchedAt: number;
+}
+
+/** POST /api/accounts/confirmations/respond 的结果:处理掉的 id 和剩下的列表 */
+export interface ConfirmationRespondResult extends ConfirmationList {
+	done: string[];
+	accept: boolean;
+}
+
 /** 名单里的账号(src/accounts/groups.ts 的 publicAccounts;不含密码) */
 export interface StoredAccount {
 	id: string;

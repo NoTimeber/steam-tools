@@ -1,4 +1,5 @@
-// 账号与登录的 HTTP 路由:账户名单、分组、账号资料、maFile、令牌验证码、登录/Guard/WebSession/登出、删除账号、消费记录、连接/断开 GC。
+// 账号与登录的 HTTP 路由:账户名单、分组、账号资料、maFile、令牌验证码、登录/Guard/WebSession/登出、删除账号、消费记录、
+// 令牌确认、连接/断开 GC。
 
 import {keyedRoute, requestGame, spreadRoute} from '../web/http.ts';
 import type {Handler, Router} from '../web/http.ts';
@@ -48,6 +49,9 @@ export function accountRoutes(router: Router, {accounts, debug}: AccountRouteDep
 	// 消费记录:POST 开始读(后台翻页,force 重读),GET 查进度/结果
 	router.post('/api/accounts/history', keyedRoute('history', req => accounts.loadHistory(req.body || {}), '读取消费记录失败'));
 	router.get('/api/accounts/history', keyedRoute('history', req => accounts.getHistory(req.query.accountName), '读取消费记录失败'));
+	// 令牌确认:list 从 Steam 重新读待确认项;respond 确认(accept=true)/ 拒绝几条,只认最近读到的列表里的 id
+	router.post('/api/accounts/confirmations/list', spreadRoute(req => accounts.listConfirmations(req.body || {}), '读取令牌确认失败'));
+	router.post('/api/accounts/confirmations/respond', spreadRoute(req => accounts.respondConfirmations(req.body || {}), '提交令牌确认失败'));
 	router.post('/api/gc/connect/:id', spreadRoute(req => accounts.connectGc(req.params.id!, requestGame(req)), '连接 GC 失败'));
 	router.post('/api/gc/disconnect/:id', spreadRoute(req => accounts.disconnectGc(req.params.id!, requestGame(req)), '断开 GC 失败'));
 	router.get('/api/cookies/:id', debug, spreadRoute(req => accounts.cookies(req.params.id!), '读取 cookies 失败'));

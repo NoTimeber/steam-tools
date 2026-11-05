@@ -1,13 +1,18 @@
-// 账号与登录:refreshToken 登录、Steam Guard 验证码、手动刷新 WebSession、登录后查真实账户国家、账户列表补全国家。
-// 假 steam-user:密码 pw-guard 要移动令牌验证码(24680 才对);假商店账户页按 FAKE_STORE_COUNTRY 回国家。
+// 账号与登录:refreshToken 登录、Steam Guard 验证码、手动刷新 WebSession、登录后查真实账户国家、账户列表补全国家、令牌确认。
+// 假 steam-user:密码 pw-guard 要移动令牌验证码(24680 才对);假商店账户页按 FAKE_STORE_COUNTRY 回国家;
+// 假 mobileconf 的「令牌确认」确认项在 FAKE_CONFIRMATIONS_FILE。
 
 import {after, before, describe, test} from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdirSync, writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {randomBytes} from 'node:crypto';
+import {createRequire} from 'node:module';
 import {Client, removeDir, sleep, startServer, tempDir} from './support/server.ts';
 import type {FakeSteamEvent, TestServer} from './support/server.ts';
+
+const IDENTITY_SECRET = 'E2E-HOTEL-IDENTITY';
+const steamTotp = createRequire(import.meta.url)('steam-totp') as {getConfirmationKey(secret: string, time: number, tag: string): string};
 
 interface PublicAttempt {
 	id: string;
@@ -44,7 +49,16 @@ describe('账号与登录', () => {
 			{accountName: 'golf', password: 'pw-guard'},
 			{accountName: 'hotel', password: 'pw-good'}
 		]));
-		server = await startServer({appRoot, env: {APP_PASSWORD: password, FAKE_STORE_COUNTRY: 'UY'}});
+		// hotel 有 maFile(只有 identity_secret,登录照旧按密码),能用令牌确认
+		mkdirSync(join(appRoot, 'data', 'config', 'mafile'), {recursive: true});
+		writeFileSync(join(appRoot, 'data', 'config', 'mafile', 'hotel.maFile'), JSON.stringify({account_name: 'hotel', identity_secret: IDENTITY_SECRET}));
+		const confirmationsFile = join(appRoot, 'fake-confirmations.json');
+		writeFileSync(confirmationsFile, JSON.stringify([
+			{id: 'c1', creator_id: '5551', type: 2, type_name: 'Trade Offer', headline: 'Bob', summary: ['You will give up 1 item'], creation_time: 1700000000},
+			{id: 'c2', creator_id: '7001', type: 3, type_name: 'Market Listing', headline: 'AK-47 | Redline', summary: ['Selling for $10.00']},
+			{id: 'c3', creator_id: '5552', type: 2, type_name: 'Trade Offer', headline: 'Eve'}
+		]));
+		server = await startServer({appRoot, env: {APP_PASSWORD: password, FAKE_STORE_COUNTRY: 'UY', FAKE_CONFIRMATIONS_FILE: confirmationsFile}});
 		client = new Client(server.baseUrl);
 		await client.login(password);
 	});
@@ -131,6 +145,46 @@ describe('账号与登录', () => {
 
 		assert.equal((await client.post('/api/accounts/history', {accountName: 'nobody'})).status, 404);
 		assert.equal((await client.get('/api/accounts/history?accountName=golf')).json.history, null);
+	});
+
+	test('令牌确认:读待确认项(不下发 nonce);一次确认两条走 multiajaxop、拒绝一条走 ajaxop;处理过的不能再提交', async () => {
+		const list = await client.post('/api/accounts/confirmations/list', {accountName: 'HOTEL'});
+		assert.equal(list.status, 200, list.text);
+		assert.equal(list.json.accountName, 'hotel');
+		type Item = {id: string; type: number; headline: string; summary: string[]; createdAt: number};
+		assert.deepEqual((list.json.confirmations as Item[]).map(c => [c.id, c.type, c.headline]), [['c1', 2, 'Bob'], ['c2', 3, 'AK-47 | Redline'], ['c3', 2, 'Eve']]);
+		assert.equal((list.json.confirmations as Item[])[0]?.createdAt, 1700000000_000);
+		assert.ok(!list.text.includes('nonce'), '不下发 nonce');
+		const listed = events('marketConfirmList').at(-1);
+		assert.equal(listed?.tag, 'conf');
+		assert.equal(listed?.params?.k, steamTotp.getConfirmationKey(IDENTITY_SECRET, Number(listed?.params?.t), 'conf'));
+
+		// mobileconf 请求按出口排队,两次至少隔 5 秒
+		const accepted = await client.post('/api/accounts/confirmations/respond', {accountName: 'hotel', ids: ['c1', 'c2'], accept: true});
+		assert.equal(accepted.status, 200, accepted.text);
+		assert.deepEqual(accepted.json.done, ['c1', 'c2']);
+		assert.deepEqual((accepted.json.confirmations as Item[]).map(c => c.id), ['c3']);
+		const multi = events('mobileconfRespond').at(-1);
+		assert.deepEqual([multi?.path, multi?.method, multi?.confIds, multi?.op, multi?.tag], ['/mobileconf/multiajaxop', 'POST', ['c1', 'c2'], 'allow', 'allow']);
+		assert.equal(multi?.params?.k, steamTotp.getConfirmationKey(IDENTITY_SECRET, Number(multi?.params?.t), 'allow'));
+
+		const declined = await client.post('/api/accounts/confirmations/respond', {accountName: 'hotel', ids: ['c3'], accept: false});
+		assert.equal(declined.status, 200, declined.text);
+		const single = events('mobileconfRespond').at(-1);
+		assert.deepEqual([single?.path, single?.method, single?.confIds, single?.op], ['/mobileconf/ajaxop', 'GET', ['c3'], 'cancel']);
+
+		assert.equal((await client.post('/api/accounts/confirmations/respond', {accountName: 'hotel', ids: ['c1'], accept: true})).status, 409, '处理过的不能再提交');
+		assert.equal(events('mobileconfRespond').length, 2);
+		const again = await client.post('/api/accounts/confirmations/list', {accountName: 'hotel'});
+		assert.deepEqual(again.json.confirmations, []);
+
+		const attempts = (await client.get('/api/attempts')).json.attempts as PublicAttempt[];
+		const logs = attempts.find(a => a.accountName === 'hotel')?.logs.map(l => l.message) ?? [];
+		assert.ok(logs.includes('令牌确认:已确认 2 项:交易报价「Bob」;市场上架「AK-47 | Redline」'), JSON.stringify(logs));
+		assert.ok(logs.includes('令牌确认:已拒绝 1 项:交易报价「Eve」'));
+
+		assert.equal((await client.post('/api/accounts/confirmations/list', {accountName: 'golf'})).status, 409, '没有 maFile');
+		assert.equal((await client.post('/api/accounts/confirmations/list', {accountName: 'nobody'})).status, 404);
 	});
 
 	test('账户列表补全国家:钱包币种推断不出来的,用保存的 cookie 查商店账户页', async () => {

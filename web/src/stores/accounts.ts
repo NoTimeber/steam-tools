@@ -4,7 +4,9 @@
 import {computed, reactive} from 'vue';
 import {api, errorText} from '../api/http.ts';
 import {socket} from '../api/socket.ts';
-import type {AccountDetail, AccountGroup, AccountGroupState, AccountProfile, GameId, PublicAttempt, PublicHistory, StoredAccount} from '../api/types.ts';
+import type {
+	AccountDetail, AccountGroup, AccountGroupState, AccountProfile, ConfirmationList, ConfirmationRespondResult, GameId, PublicAttempt, PublicHistory, StoredAccount
+} from '../api/types.ts';
 import {ALL_ACCOUNTS, NO_GROUP, collapseAttemptStatus, emptyFilters, lastErrorMessage, matchesFilters, matchesSearch, parseAccountText, sortAccounts} from '../lib/accounts.ts';
 import type {AccountFilters, LoginStatus, SortKey, SortOrder} from '../lib/accounts.ts';
 import {addLog} from './logs.ts';
@@ -544,6 +546,16 @@ export function connectedGame(row: AccountRow): GameId | '' {
 
 export function canUseGc(row: AccountRow): boolean {
 	return !!row.attemptId && row.status === '登录成功';
+}
+
+/** 令牌确认:从 Steam 重新读这个账号的待确认项 */
+export function fetchConfirmations(accountName: string): Promise<ConfirmationList> {
+	return api.post<ConfirmationList>('/api/accounts/confirmations/list', {accountName});
+}
+
+/** 令牌确认:确认(accept=true)或拒绝几条;只认最近一次读到的列表里的 id */
+export function respondConfirmations(accountName: string, ids: readonly string[], accept: boolean): Promise<ConfirmationRespondResult> {
+	return api.post<ConfirmationRespondResult>('/api/accounts/confirmations/respond', {accountName, ids, accept});
 }
 
 /** 账户详情:资料、钱包、会话、指纹、这次会话的完整日志 */

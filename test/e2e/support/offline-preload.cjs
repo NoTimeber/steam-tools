@@ -20,6 +20,7 @@
 //    接受、手机确认只记日志,不连 Steam。充值码兑换的 steamstore 也换成替身,按码的前缀决定结果。
 // 6. 假 Steam 市场(steamcommunity.com/market/*),有状态:挂求购、手机确认、撤单、我的求购单,见 fakeMarket();
 //    场景开关在 FAKE_MARKET_FILE。手机确认 mobileconf/getlist、ajaxop(求购确认自己发,见 fakeMobileconf)列出 / 确认待确认的求购单;
+//    FAKE_CONFIRMATIONS_FILE 里的确认项(账户管理「令牌确认」演示 / 测试用)每个账号都有一份,ajaxop / multiajaxop 确认或拒绝后消失;
 //    steam-totp 的 getTimeOffset 换成离线版(返回 0)。
 // 7. 假 Steam 商店结算(store / api / checkout.steampowered.com 上买游戏用到的那几个端点),有状态:
 //    每个账号钱包 10.00 美元、已拥有的包,见 fakeStore();商品可用 FAKE_STORE_PACKAGES 追加。
@@ -428,16 +429,41 @@ function placeMarketOrder(owner, form) {
 	return id;
 }
 
-// 手机令牌确认(steamcommunity.com/mobileconf/*):getlist 列出这个账号还没确认的求购单和交易报价,ajaxop 按 cid + ck(nonce)确认;
-// 确认交易报价记 offerConfirm
+// 「令牌确认」的确认项:FAKE_CONFIRMATIONS_FILE 是 getlist 的 conf[] 原样(id、creator_id、type、type_name、headline、summary……,
+// nonce 固定是 nonce-<id>),每个账号一份;handled 记各账号(steamLoginSecure)确认 / 拒绝掉的 id。测试随时改这个文件
+const seededHandled = new Map();
+
+function seededConfirmations() {
+	const file = process.env.FAKE_CONFIRMATIONS_FILE;
+	try {
+		const list = file ? JSON.parse(fs.readFileSync(file, 'utf8')) : [];
+		return Array.isArray(list) ? list : [];
+	} catch (_) {
+		return [];
+	}
+}
+
+function handledBy(owner) {
+	if (!seededHandled.has(owner)) {
+		seededHandled.set(owner, new Set());
+	}
+	return seededHandled.get(owner);
+}
+
+// 手机令牌确认(steamcommunity.com/mobileconf/*):getlist 列出这个账号还没确认的求购单、交易报价和 FAKE_CONFIRMATIONS_FILE 里的确认项,
+// ajaxop 按 cid + ck(nonce)确认(GET),multiajaxop 一次处理多条(POST 表单 cid[] ck[]);
+// 确认交易报价记 offerConfirm,处理 FAKE_CONFIRMATIONS_FILE 里的记 mobileconfRespond
 function fakeMobileconf(url, init) {
 	const headers = Object.fromEntries(Object.entries((init && init.headers) || {}).map(([key, value]) => [key.toLowerCase(), String(value)]));
 	const owner = cookieValue(headers.cookie, 'steamLoginSecure');
-	const params = Object.fromEntries(url.searchParams);
+	const form = new URLSearchParams(init && init.body ? String(init.body) : '');
+	const params = Object.fromEntries(url.pathname === '/mobileconf/multiajaxop' ? form : url.searchParams);
 	const json = value => new Response(JSON.stringify(value), {status: 200, headers: {'content-type': 'application/json'}});
 	if (!owner) {
 		return json({success: false, needauth: true});
 	}
+	const seeded = seededConfirmations();
+	const handled = handledBy(owner);
 	if (url.pathname === '/mobileconf/getlist') {
 		record({event: 'marketConfirmList', owner, tag: params.tag, params});
 		const conf = [...market.confs.entries()]
@@ -446,7 +472,23 @@ function fakeMobileconf(url, init) {
 		const trades = [...market.trades.entries()]
 			.filter(([, item]) => item.owner === owner && !item.allowed)
 			.map(([id, item]) => ({id, creator_id: item.offerId, nonce: 'nonce-' + id, type: 2, headline: 'trade'}));
-		return json({success: true, conf: [...conf, ...trades]});
+		const extra = seeded.filter(item => !handled.has(String(item.id))).map(item => ({...item, id: String(item.id), nonce: 'nonce-' + item.id}));
+		return json({success: true, conf: [...conf, ...trades, ...extra]});
+	}
+	const respond = (ids, nonces) => {
+		record({event: 'mobileconfRespond', owner, path: url.pathname, method: (init && init.method) || 'GET', confIds: ids, tag: params.tag, op: params.op, accept: params.op === 'allow', params});
+		const ok = ids.length > 0 && ids.length === nonces.length && params.tag === params.op && ['allow', 'cancel'].includes(params.op)
+			&& ids.every((id, index) => seeded.some(item => String(item.id) === id) && !handled.has(id) && nonces[index] === 'nonce-' + id);
+		if (ok) {
+			ids.forEach(id => handled.add(id));
+		}
+		return json({success: ok});
+	};
+	if (url.pathname === '/mobileconf/multiajaxop') {
+		return respond(form.getAll('cid[]'), form.getAll('ck[]'));
+	}
+	if (url.pathname === '/mobileconf/ajaxop' && seeded.some(item => String(item.id) === params.cid)) {
+		return respond([params.cid], [params.ck]);
 	}
 	if (url.pathname === '/mobileconf/ajaxop' && market.trades.has(params.cid)) {
 		const trade = market.trades.get(params.cid);
