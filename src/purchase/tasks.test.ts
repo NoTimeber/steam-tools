@@ -2,8 +2,8 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {EventEmitter} from 'node:events';
 import type {Attempt} from '../steam/session-manager.ts';
-import {clampItemsToBalance, createPurchaseTasks, formatMoney, normalizeCartData, PURCHASE_MAX_ITEM_QUANTITY} from './tasks.ts';
-import type {PublicTask, TaskAccount, TaskEvent} from './tasks.ts';
+import {clampItemsToBalance, createPurchaseTasks, formatMoney, MAX_UNITS_PER_ORDER, normalizeCartData, PURCHASE_MAX_ITEM_QUANTITY, splitIntoOrders} from './tasks.ts';
+import type {PublicTask, TaskAccount, TaskEvent, TaskItem} from './tasks.ts';
 import type {CatalogItem} from './catalog-items.ts';
 import type {PurchaseOrder, PurchaseResult, StoreData} from './store-gc.ts';
 
@@ -235,4 +235,63 @@ test('任务列表:按创建时间倒序,最多保留 60 个', () => {
 	assert.ok(list.every((task, index) => index === 0 || String(list[index - 1]?.createdAt) >= String(task.createdAt)));
 	assert.equal(h.tasks.get(list[0]!.id)?.id, list[0]?.id);
 	assert.equal(list.find(task => task.game === 'tf2')?.type, 'tf2-purchase');
+});
+
+// ===== 拆单:GC 一笔订单最多 20 件 =====
+
+const MUSIC_KIT: CatalogItem = {def_index: 7059, name: '音乐盒 | Vicetone & Cozi Zuehlsdorff, 内华达', type: '音乐盒', category: '音乐盒', prices: {USD: 499}};
+
+const taskItem = (itemDefId: number, quantity: number, unitPriceCents: number): TaskItem =>
+	({itemDefId, name: String(itemDefId), type: '', quantity, unitPriceCents, totalPriceCents: unitPriceCents * quantity});
+const shape = (orders: TaskItem[][]) => orders.map(order => order.map(item => `${item.itemDefId}x${item.quantity}=${item.totalPriceCents}`).join('+'));
+
+test('拆单规则:每笔 ≤ 20 件,按购物车顺序装满再开下一笔,超出的拆到下一笔,小计按拆出的数量重算', () => {
+	assert.equal(MAX_UNITS_PER_ORDER, 20);
+	assert.deepEqual(shape(splitIntoOrders([taskItem(7059, 24, 499)])), ['7059x20=9980', '7059x4=1996']);
+	assert.deepEqual(shape(splitIntoOrders([taskItem(7059, 20, 499)])), ['7059x20=9980'], '正好 20 件不拆');
+	assert.deepEqual(shape(splitIntoOrders([taskItem(1200, 15, 199), taskItem(7059, 10, 499)])), ['1200x15=2985+7059x5=2495', '7059x5=2495']);
+	assert.deepEqual(shape(splitIntoOrders([taskItem(1, 45, 100)])), ['1x20=2000', '1x20=2000', '1x5=500']);
+	assert.deepEqual(splitIntoOrders([taskItem(1, 0, 100)]), [], '数量 0 的不下单');
+});
+
+test('任务:24 个音乐盒拆成 20 + 4 两笔,余额按每笔回包更新', async () => {
+	let balance = 169;
+	const h = harness({list: [MUSIC_KIT], purchase: async (attempt, order) => {
+		const cost = order.items.reduce((sum, item) => sum + item.unitPriceCents * item.quantity, 0);
+		balance = Math.round(balance * 100 - cost) / 100;
+		return {txnId: `T${h.purchases.length}`, itemIds: [], initResult: 1, finalizeResult: 1, balanceAfter: balance};
+	}});
+	const viiy = makeAttempt('viiy9563', {balance: 169});
+	h.attempts.set(viiy.id, viiy);
+	const task = h.tasks.create('cs2', {viiy9563: [{itemDefId: 7059, quantity: 24, costInLocalCurrency: 499}]});
+	await h.tasks.start(task);
+	const account = task.accounts[0]!;
+	assert.equal(account.status, 'completed', account.error);
+	assert.deepEqual(h.purchases.map(p => p.order.items.map(item => [item.itemDefId, item.quantity, item.unitPriceCents])), [[[7059, 20, 499]], [[7059, 4, 499]]]);
+	assert.equal(account.balanceAfter, 49.24);
+	assert.equal(viiy.balance, 49.24);
+	assert.ok(task.logs.some(log => log.message.includes('共 24 件，超过每笔 20 件的上限，拆成 2 笔下单')));
+	assert.ok(task.logs.some(log => log.message.includes('第 2/2 笔成交:4 件 USD 19.96，交易 T2')));
+	assert.ok(task.logs.some(log => log.message.includes('GC 下单成功，交易 T1, T2')));
+	assert.ok(h.accountLogs.some(line => line.includes('共 24 件商品(分 2 笔)')));
+});
+
+test('任务:拆单后某一笔失败就停,报清已成交多少;第一笔就失败时报原始错误', async () => {
+	const h = harness({list: [MUSIC_KIT], purchase: async (attempt, order) => {
+		if (h.purchases.length === 2) {
+			throw new Error('PurchaseInit 返回失败 result=2(载荷 country=US currency=省略 cost=4990)');
+		}
+		attempt.balance = Number(attempt.balance) - 99.8;
+		return {txnId: 'T1', itemIds: [], initResult: 1, finalizeResult: 1, balanceAfter: Number(attempt.balance)};
+	}});
+	const viiy = makeAttempt('viiy9563', {balance: 300});
+	h.attempts.set(viiy.id, viiy);
+	const task = h.tasks.create('cs2', {viiy9563: [{itemDefId: 7059, quantity: 50, costInLocalCurrency: 499}]});
+	await h.tasks.start(task);
+	const account = task.accounts[0]!;
+	assert.equal(account.status, 'failed');
+	assert.equal(h.purchases.length, 2, '第 2 笔失败后第 3 笔不再下');
+	assert.equal(account.error, '已成交 20/50 件(1 笔，USD 99.80)后第 2 笔失败: PurchaseInit 返回失败 result=2(载荷 country=US currency=省略 cost=4990)');
+	assert.equal(account.balanceAfter, 200.2);
+	assert.deepEqual(h.saved, ['viiy9563'], '已成交的部分照样存会话(余额已变)');
 });

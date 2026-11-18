@@ -160,6 +160,40 @@ export function clampItemsToBalance(account: TaskAccount): void {
 	account.totalCostCents = kept.reduce((sum, item) => sum + Number(item.totalPriceCents || 0), 0);
 }
 
+/**
+ * GC 一笔订单最多买几件(所有行项数量加起来)。实测 CS2:新音乐盒一笔 24 个回 PurchaseInit result=2,
+ * 2 个成交;上限是 20(总价写法没问题,载荷照旧填单价 × 数量)。TF2 走同一套商城后端,一样拆
+ */
+export const MAX_UNITS_PER_ORDER = 20;
+
+/**
+ * 购物车拆成几笔订单,每笔件数 ≤ max:按购物车顺序往一笔里装,装满开下一笔;
+ * 单个商品超过剩余空位就拆到下一笔。每行的小计按拆出的数量重算
+ */
+export function splitIntoOrders(items: readonly TaskItem[], max = MAX_UNITS_PER_ORDER): TaskItem[][] {
+	const orders: TaskItem[][] = [];
+	let current: TaskItem[] = [];
+	let used = 0;
+	for (const item of items) {
+		let left = Math.max(0, Math.floor(Number(item.quantity || 0)));
+		while (left > 0) {
+			if (used >= max) {
+				orders.push(current);
+				current = [];
+				used = 0;
+			}
+			const take = Math.min(left, max - used);
+			current.push({...item, quantity: take, totalPriceCents: item.unitPriceCents * take});
+			used += take;
+			left -= take;
+		}
+	}
+	if (current.length) {
+		orders.push(current);
+	}
+	return orders;
+}
+
 export function formatMoney(cents: number, currencyISO: string): string {
 	return `${String(currencyISO || 'USD').trim().toUpperCase()} ${(Number(cents || 0) / 100).toFixed(2)}`;
 }
@@ -420,28 +454,53 @@ export function createPurchaseTasks(options: PurchaseTaskOptions) {
 			return fail(task, account, `余额不足，当前 ${Number(balance).toFixed(2)} ${account.currencyISO}`);
 		}
 
-		let result;
-		try {
-			result = await options.gc.purchase(attempt, game, account, storeData);
-		} catch (err) {
-			fail(task, account, errorMessage(err, 'GC 下单失败'));
-			options.events.addLog(attempt, 'error', `${config.label} 内购失败: ${account.error}`);
-			options.events.emit(attempt);
-			return;
+		// GC 一笔订单最多 20 件(超过回 result=2):超了就拆成几笔,每笔 ≤ 20 件
+		const orders = splitIntoOrders(account.items, MAX_UNITS_PER_ORDER);
+		if (orders.length > 1) {
+			log(task, 'info', `共 ${account.totalUnits} 件，超过每笔 ${MAX_UNITS_PER_ORDER} 件的上限，拆成 ${orders.length} 笔下单`, account.account);
+		}
+		const txnIds: string[] = [];
+		let itemIdCount = 0;
+		let boughtUnits = 0;
+		let boughtCents = 0;
+		for (const [index, items] of orders.entries()) {
+			let result;
+			try {
+				result = await options.gc.purchase(attempt, game, {...account, items}, storeData);
+			} catch (err) {
+				const reason = errorMessage(err, 'GC 下单失败');
+				// 前面几笔已经成交(钱已扣):照实报清楚,后面的不再下
+				fail(task, account, boughtUnits ? `已成交 ${boughtUnits}/${account.totalUnits} 件(${txnIds.length} 笔，${formatMoney(boughtCents, account.currencyISO)})后第 ${index + 1} 笔失败: ${reason}` : reason);
+				options.events.addLog(attempt, 'error', `${config.label} 内购失败: ${account.error}`);
+				if (boughtUnits) {
+					options.events.saveSession(attempt);
+				}
+				options.events.emit(attempt);
+				return;
+			}
+			const units = items.reduce((sum, item) => sum + Number(item.quantity || 0), 0);
+			const cents = items.reduce((sum, item) => sum + item.totalPriceCents, 0);
+			txnIds.push(result.txnId);
+			itemIdCount += result.itemIds.length;
+			boughtUnits += units;
+			boughtCents += cents;
+			if (result.balanceAfter != null && Number.isFinite(Number(result.balanceAfter))) {
+				attempt.balance = Number(result.balanceAfter);
+				account.balanceAfter = Number(result.balanceAfter);
+			} else if (attempt.balance != null && Number.isFinite(Number(attempt.balance))) {
+				account.balanceAfter = Number(attempt.balance);
+			}
+			if (orders.length > 1) {
+				log(task, 'info', `第 ${index + 1}/${orders.length} 笔成交:${units} 件 ${formatMoney(cents, account.currencyISO)}，交易 ${result.txnId}`, account.account);
+			}
 		}
 
-		if (result.balanceAfter != null && Number.isFinite(Number(result.balanceAfter))) {
-			attempt.balance = Number(result.balanceAfter);
-			account.balanceAfter = Number(result.balanceAfter);
-		} else if (attempt.balance != null && Number.isFinite(Number(attempt.balance))) {
-			account.balanceAfter = Number(attempt.balance);
-		}
 		account.status = 'completed';
 		account.updatedAt = new Date().toISOString();
-		options.events.addLog(attempt, 'success', `${config.label} GC 内购成功 ${formatMoney(totalCostCents, account.currencyISO)}，共 ${account.totalUnits} 件商品`);
+		options.events.addLog(attempt, 'success', `${config.label} GC 内购成功 ${formatMoney(totalCostCents, account.currencyISO)}，共 ${account.totalUnits} 件商品${orders.length > 1 ? `(分 ${orders.length} 笔)` : ''}`);
 		options.events.saveSession(attempt);
 		options.events.emit(attempt);
-		log(task, 'success', `GC 下单成功，交易 ${result.txnId}，新增 ${result.itemIds.length} 个 item_id`, account.account);
+		log(task, 'success', `GC 下单成功，交易 ${txnIds.join(', ')}，新增 ${itemIdCount} 个 item_id`, account.account);
 	}
 
 	async function run(task: PurchaseTask): Promise<void> {
