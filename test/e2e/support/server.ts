@@ -47,7 +47,7 @@ export interface FakeSteamEvent {
 	run: string;
 	event: 'logOn' | 'logOff' | 'gamesPlayed' | 'sendToGC' | 'blockedFetch' | 'purchaseInit' | 'microTxnAuthorize' | 'purchaseFinalize'
 		| 'uuRequest' | 'offerAccept' | 'offerConfirm' | 'marketRequest' | 'marketConfirmList' | 'marketConfirm' | 'mobileconfRespond' | 'timeOffset' | 'storeRequest' | 'walletRedeem' | 'webLogOn' | 'guardCode' | 'inventoryRequest'
-		| 'c5Request';
+		| 'ecoRequest' | 'sellConfirm';
 	/** walletRedeem:兑换的码 */
 	code?: string;
 	client?: string;
@@ -84,11 +84,10 @@ export interface FakeSteamEvent {
 	tag?: string;
 	confId?: string;
 	accept?: boolean;
-	/** mobileconfRespond:这次确认 / 拒绝的确认项 id、op(allow / cancel) */
+	/** mobileconfRespond / sellConfirm:这次确认 / 拒绝的确认项 id、op(allow / cancel);sellConfirm 另带对应的 listingid */
 	confIds?: string[];
+	listingIds?: string[];
 	op?: string;
-	/** c5Request:请求头里的 Accept-Encoding(path / method / query / body 同上) */
-	acceptEncoding?: string;
 }
 
 export interface StartOptions {

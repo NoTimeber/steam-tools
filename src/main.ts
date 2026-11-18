@@ -10,7 +10,7 @@ import {GlobalOffensive, TeamFortress2} from './steam/gc-libs.ts';
 import {existsSync, mkdirSync} from 'node:fs';
 import {createServer} from 'node:http';
 import {createRequire} from 'node:module';
-import {join} from 'node:path';
+import {dirname, join} from 'node:path';
 import type {Server as SocketServer} from 'socket.io';
 import {loadConfig} from './config.ts';
 import {readJsonFileSafe, writeFileAtomic, writeJsonAtomic} from './core/atomic-file.ts';
@@ -30,8 +30,7 @@ import {currencyIdToIso} from './steam/currencies.ts';
 import {installMicroTxnHooks} from './steam/microtxn.ts';
 import type {SteamUserClass} from './steam/microtxn.ts';
 import {findAttemptByKey, listAccountRefs, listCookieFlowAccounts} from './steam/attempts.ts';
-import {STEAM_WEB_USER_AGENT, useCommunityProxy} from './steam/community.ts';
-import {fetchTradeUrl} from './steam/trade-url.ts';
+import {useCommunityProxy} from './steam/community.ts';
 import {createGcModuleAttacher} from './steam/gc-modules.ts';
 import {LOCAL_CM_FALLBACKS} from './steam/cm-fallback.ts';
 import {createAccountService, createProfiles, resolveAccountCountry} from './accounts/index.ts';
@@ -50,8 +49,8 @@ import {createBuyGameService} from './buygame/index.ts';
 import {buyGameRoutes} from './buygame/routes.ts';
 import {createWalletService} from './wallet/index.ts';
 import {walletRoutes} from './wallet/routes.ts';
-import {createC5Service} from './c5/index.ts';
-import {c5Routes} from './c5/routes.ts';
+import {createEcoService} from './eco/index.ts';
+import {ecoRoutes} from './eco/routes.ts';
 import {createProxyService} from './proxy/index.ts';
 import {proxyRoutes} from './proxy/routes.ts';
 import {createUsageMeter} from './proxy/usage.ts';
@@ -105,13 +104,15 @@ const isAllowedOrigin = createOriginCheck(config.http.allowedOrigins);
 const auth = createAuth({
 	envPassword: config.auth.envPassword,
 	authFile: config.authFile,
+	// 登录会话存盘(只存 token 的哈希):服务重启、改代码自动重启后不用重新输口令
+	sessionFile: join(dirname(config.authFile), 'auth-sessions.json'),
 	ttlMs: config.auth.sessionTtlMs,
 	cookieSecure: parseCookieSecure(config.http.cookieSecure),
 	setupToken: config.auth.setupToken
 });
 
 // ===== 加密数据库 =====
-// 账户名单、maFile、Steam session、UU token/发货配置、C5 app-key/扫货流水都存在这里(敏感字段 AES-256-GCM)。
+// 账户名单、maFile、Steam session、UU token/发货配置、ECO 私钥/扫货流水都存在这里(敏感字段 AES-256-GCM)。
 // 首次启动时把旧版明文 JSON 导入,原文件挪到 data/_migrated_plaintext/ 下等你确认后删除。
 // 主密钥:MASTER_KEY 环境变量 > MASTER_KEY_FILE > <安装根>/secrets/master.key(开发环境缺失时自动生成)。
 let store: Store;
@@ -161,7 +162,7 @@ const profiles = createProfiles({
 // 代理用量:经代理的 Steam 网页请求按天、代理、账号、类型累计,30 秒写一次库
 const proxyUsage = createUsageMeter({db: store.db});
 
-// Steam 代理池:代理、代理组、账号 / 账户分组的绑定,只给 Steam 的请求用(C5 / 悠悠照旧直连)。
+// Steam 代理池:代理、代理组、账号 / 账户分组的绑定,只给 Steam 的请求用(ECO / 悠悠照旧直连)。
 // 走 fetch 的 Steam 请求按 Cookie 里的 SteamID 认账号;steamcommunity(手机确认、交易报价)按要设的 cookie 选
 const proxy = createProxyService({
 	store: store.proxies,
@@ -314,7 +315,7 @@ const uu = createUuService({
 	inspect: {url: config.uu.inspectUrl, key: config.uu.inspectKey}
 });
 
-// CS2 饰品中英文名词库(随包 app/data/cs2-names-zh.json.gz,第一次用到才读):C5 扫货、市场求购搜商品共用
+// CS2 饰品中英文名词库(随包 app/data/cs2-names-zh.json.gz,第一次用到才读):ECO 扫货、市场求购搜商品共用
 const itemNames = loadNameDb(join(config.appDir, 'data', 'cs2-names-zh.json.gz'));
 
 // 市场求购:账本 data/market-buyorders.json 只记本工具挂出的求购;item_nameid 先查缓存 data/market-nameids.json,
@@ -349,30 +350,54 @@ const wallet = createWalletService({
 	emit: payload => io.emit('wallet:redeem', payload)
 });
 
-// 收货账号下拉:账户管理里的全部账号;SteamID 先看在线会话,再看 maFile、上次登录存下的会话
-const c5AccountRefs = () => listAccountRefs(store.accounts.list().map(account => account.accountName), attempts.values(), {
-	steamIdOf: accountName => profiles.local(accountName).steamID
-		|| String(store.sessions.get(safeName(accountName))?.steamID || ''),
-	cookiesFor: profiles.cookiesFor
-});
-
-// C5 扫货:app-key、设置、监控列表、购买流水在加密库(store.c5);到价自动买,运行状态重启后恢复;中文名查随包词库 app/data/cs2-names-zh.json.gz
-const c5 = createC5Service({
-	store: store.c5,
+// ECO 扫货:PartnerId、RSA 私钥(加密)、设置、监控列表、购买流水在数据库(store.eco);到价自动买,运行状态重启后恢复。
+// 收货账号从 ECO 上绑定的 Steam 账号里选(带交易链接);账户管理里的账号只用来认是谁
+const eco = createEcoService({
+	store: store.eco,
 	names: itemNames,
-	// 收货账号从本工具登录着的账号里选,交易链接用它的网页会话去 Steam 取
-	localAccounts: c5AccountRefs,
-	fetchTradeUrl: async account => {
-		const ref = c5AccountRefs().find(entry => entry.account === account);
-		const attempt = findAttempt(account);
-		return fetchTradeUrl({
-			steamId: ref?.steamId ?? '',
-			// 不在线时用上次登录存下的网页会话
-			cookies: profiles.cookiesFor(attempt ?? {accountName: account}),
-			userAgent: STEAM_WEB_USER_AGENT,
-			fetch: proxy.fetch
-		});
+	localAccounts: () => listAccountRefs(store.accounts.list().map(account => account.accountName), attempts.values(), {
+		steamIdOf: accountName => profiles.local(accountName).steamID
+			|| String(store.sessions.get(safeName(accountName))?.steamID || ''),
+		cookiesFor: profiles.cookiesFor
+	}),
+	// 导入令牌绑定 ECO:SteamID 只用登录会话里记下的(精确值);名单和 maFile 里的可能被 JSON 舍入过
+	guardSources: () => {
+		const groupNames = new Map(store.groups.list().map(group => [group.id, group.name]));
+		const members = store.groups.members();
+		return store.accounts.list().map(account => ({
+			account: account.accountName,
+			steamId: String(store.sessions.get(safeName(account.accountName))?.steamID || ''),
+			group: groupNames.get(members.get(accountKey(account.accountName)) ?? '') ?? '',
+			hasMaFile: store.mafiles.has(account.accountName),
+			hasPassword: !!account.password
+		}));
 	},
+	// 更新交易链接:在线的用当前会话,否则用上次登录存下的 refreshToken;steamLoginSecure 有就带上
+	steamTokens: accountName => {
+		const attempt = findAttempt(accountName);
+		const saved = store.sessions.get(safeName(accountName)) as {refreshToken?: unknown} | null;
+		// 当前会话、上次存下的、maFile 里带的,取第一个没过期的(refreshToken 是 JWT,exp 是秒)
+		const unexpired = (token: unknown) => {
+			const text = String(token || '');
+			let exp = NaN;
+			try {
+				exp = Number(JSON.parse(Buffer.from(text.split('.')[1] || '', 'base64url').toString('utf8')).exp);
+			} catch {
+				// 不是 JWT、读不出过期时间:当作能用,交给平台判断
+			}
+			return Number.isFinite(exp) && exp * 1000 <= Date.now() ? '' : text;
+		};
+		const refreshToken = [attempt?.refreshToken, saved?.refreshToken, profiles.local(accountName).refreshToken].map(unexpired).find(Boolean) ?? '';
+		if (!refreshToken) {
+			return null;
+		}
+		const secure = profiles.cookiesFor(attempt ?? {accountName}).find(cookie => cookie.startsWith('steamLoginSecure='));
+		return {refreshToken, accessToken: secure ? secure.slice('steamLoginSecure='.length) : undefined};
+	},
+	guardCredentials: accountName => ({
+		maFile: store.mafiles.get(accountName),
+		password: store.accounts.get(accountName)?.password ?? ''
+	}),
 	emit: (event, payload) => io.emit(event, payload)
 });
 
@@ -399,7 +424,7 @@ const app = createWebApp({
 		router => marketRoutes(router, {market, listAccounts: cookieFlowAccounts}),
 		router => uuRoutes(router, {uu}),
 		router => walletRoutes(router, {wallet}),
-		router => c5Routes(router, {c5}),
+		router => ecoRoutes(router, {eco}),
 		router => proxyRoutes(router, {proxy})
 	]
 });
@@ -429,7 +454,7 @@ function shutdown(signal: string): void {
 	console.log(`[shutdown] 收到 ${signal},登出 ${attempts.size} 个会话并关闭服务`);
 	sessions.shutdown();   // 不改登录意图:下次启动照常自动恢复
 	uu.stop();
-	c5.stop();
+	eco.stop();
 	proxyUsage.stop();
 	io.close();
 	httpServer.close(() => process.exit(0));
@@ -446,4 +471,4 @@ if (config.sessions.restoreEnabled) {
 }
 purchase.catalog.preload();
 uu.start();
-c5.start();
+eco.start();

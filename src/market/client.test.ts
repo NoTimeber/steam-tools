@@ -159,7 +159,8 @@ test('行情:有 nameid 就不抓商品页,直接查盘口;没有求购时最高
 	});
 	assert.deepEqual(context, {
 		appid: 730, marketHashName: 'AK-47 | Redline', currency: 23, itemNameId: '42', itemName: '',
-		highestBuyOrderCents: 0, lowestSellOrderCents: 150, lowestPrice: '$1.50', medianPrice: '$1.40', volume: '1,234', issues: []
+		highestBuyOrderCents: 0, lowestSellOrderCents: 150, sellOrders: [], buyOrders: [], sellTotal: null, buyTotal: null,
+		lowestPrice: '$1.50', medianPrice: '$1.40', volume: '1,234', issues: []
 	});
 	assert.equal(sent.length, 2);
 	const histogram = new URL(sent[0]?.url ?? '');

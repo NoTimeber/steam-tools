@@ -25,9 +25,11 @@ npm run typecheck   # 类型检查(src/ 和 test/)
   - **假悠悠接口、报价接受替身**：按 `FAKE_UU_FILE` 里的场景回包。
   - **充值码兑换替身**（steamstore）：码的前缀决定结果（`GOOD-` 成功、`USED-` 已使用、`LIMIT-` 被限流）。
   - **假 Steam 市场**：挂求购、手机确认、撤单、我的求购单都有状态；开关（要不要手机确认、拒单、已成交）在 `FAKE_MARKET_FILE`。
+    出售也有状态：`sellitem` 从假库存上架（默认要手机确认，确认项 type=3、creator_id = listingid）、`mylistings` 的在售 / 待确认、`removelisting` 下架、`myhistory/render` 成交记录；
+    `FAKE_MARKET_FILE` 里的 `sellNoConfirmation`（不用确认）、`sellFail`（按 assetid 拒绝）、`soldListings`（这些在售单已卖出）。
   - **假 Steam 商店结算**：买游戏用到的 store / api / checkout 端点，每个账号钱包 10.00 美元、记住已拥有的包；商品可用 `FAKE_STORE_PACKAGES` 追加。设了 `FAKE_STORE_COUNTRY` 时还模拟商店账户页（查真实国家用）。
-  - **假社区库存**：两页共 3 件；`FAKE_INVENTORY_FILE` 可设成私密（403）。
-  - **假 C5GAME 开放平台**：余额、在售（19 位整数 id）、批量购买 / 快速购买、订单详情都有状态；初始场景在 `FAKE_C5_FILE`。app-key 以 `bad` 开头的一律拒绝，以 `ip` 开头的查在售时报不在白名单。
+  - **假社区库存**：两页共 3 件；`FAKE_INVENTORY_FILE` 可设成私密（403）或换成自己的物品；在市场上架中的物品不在库存里，下架后回来。
+  - **假 ECOSteam 开放平台**：余额、绑定的 Steam 账号（带交易链接）、在售、按商品编号 / 按类别购买、订单状态都有状态；初始场景在 `FAKE_ECO_FILE`。场景里给了公钥时按官方示例的规则独立验签（验不过回 5004），PartnerId 不对回 5005。
   - **外网拦截**：`fetch` 只放行本机；汇率接口返回固定数据；其它外部请求直接失败，并记进日志供测试断言。
 
 [`support/server.ts`](e2e/support/server.ts) 提供这些工具：
@@ -50,7 +52,8 @@ npm run typecheck   # 类型检查(src/ 和 test/)
 | `accounts.e2e.ts` | refreshToken 登录、Steam Guard 验证码（错码重来）、手动刷新 WebSession、登录后查商店账户页拿真实国家、账户列表补全国家 |
 | `wallet.e2e.ts` | 充值码批量兑换：临时登录（密码 / maFile refreshToken）→ 兑换 → 登出，成功/已使用/限流/登录失败的推送，临时登录不进账户列表 |
 | `market.e2e.ts` | 市场求购：行情（社区 nameid 库）、多账号挂求购、手机确认后重发落单、刷新对账、撤单、挂满 |
-| `c5.e2e.ts` | C5 扫货：app-key 加密落库、监控列表校验、检查连接、查在售（64 位 id 不丢精度）、自动扫货批量下单（开扫前要交易链接和总预算）、按中文搜饰品、对账、重启后恢复运行状态 |
+| `market-sell.e2e.ts` | 市场出售：可上架库存（冷却、不可上架）、参考价和手续费换算、逐件上架（表单 / Referer）、只自动确认本批（先前的上架和无关交易报价不碰）、没 maFile 留待手机确认、多账号在售、下架回库存、成交记录分页、参数校验 |
+| `eco.e2e.ts` | ECO 扫货：私钥加密落库、请求签名（假平台独立验签）、监控列表校验、按中文搜饰品、检查连接、查在售、从 ECO 绑定账号选收货账号、自动扫货逐件下单（开扫前要交易链接和总预算）、对账、重启后恢复、快速购买、换密钥后验签失败 |
 
 ## 离线演示服务
 

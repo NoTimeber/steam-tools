@@ -6,12 +6,15 @@ import type {NameDb} from '../items/names.ts';
 import {currencyIdToIso} from '../steam/currencies.ts';
 import type {Attempt} from '../steam/session-manager.ts';
 import {createMarketClient, isGroupId, matchListingUrl, parseListingUrl} from './client.ts';
-import type {CreateBuyOrderParams, LiveBuyOrder, MarketClient, MarketContext, MarketLog, MarketTarget} from './client.ts';
+import type {CreateBuyOrderParams, LiveBuyOrder, MarketClient, MarketContext, MarketLog, MarketTarget, PricePoint} from './client.ts';
 import {createConfirmer} from '../steam/confirmations.ts';
 import type {BuyOrderConfirmer} from '../steam/confirmations.ts';
 import {createBuyOrderLedger} from './ledger.ts';
 import type {BuyOrderRecord, ReconcileResult} from './ledger.ts';
 import {createNameIdResolver} from './nameids.ts';
+import {clampConcurrency, runWithConcurrency} from './concurrency.ts';
+import {createSellService} from './sell.ts';
+import type {SellConfirmer, SellServiceOptions} from './sell.ts';
 
 export {parseListingUrl};
 export type {BuyOrderRecord, MarketContext};
@@ -34,25 +37,7 @@ function errorText(err: unknown): string {
 	return err instanceof Error ? err.message : '';
 }
 
-/** 并发上限 1~8,默认 2(太高容易触发 Steam 风控) */
-function clampConcurrency(value: unknown): number {
-	return Math.max(1, Math.min(8, Math.round(Number(value)) || 2));
-}
-
-/** 最多 limit 个同时跑,结果与 items 同序 */
-export async function runWithConcurrency<T, R>(items: readonly T[], limit: number, worker: (item: T, index: number) => Promise<R>): Promise<R[]> {
-	const results = new Array<R>(items.length);
-	const lanes = Math.max(1, Math.min(Number(limit) || 1, items.length || 1));
-	let cursor = 0;
-	async function lane(): Promise<void> {
-		while (cursor < items.length) {
-			const index = cursor++;
-			results[index] = await worker(items[index] as T, index);
-		}
-	}
-	await Promise.all(Array.from({length: lanes}, lane));
-	return results;
-}
+export {runWithConcurrency};
 
 /** 前端传来的商品定位:优先 url,其次 appid + marketHashName */
 export function resolveTarget(input: {url?: unknown; appid?: unknown; marketHashName?: unknown}): MarketTarget {
@@ -165,6 +150,10 @@ export interface MarketServiceOptions {
 	deviceIdFor?: (accountName: string) => string;
 	client?: MarketClient;
 	confirmer?: BuyOrderConfirmer;
+	/** 出售上架的手机确认(读列表 + 确认几条);默认和求购共用一个 createConfirmer */
+	sellConfirmer?: SellConfirmer;
+	/** 出售的其它可调项(测试注入假 HTTP、缩短间隔) */
+	sell?: Partial<Pick<SellServiceOptions, 'client' | 'fetchInventory' | 'sellGapMs' | 'confirmGapMs' | 'confirmAttempts' | 'publisherFeePercent'>>;
 	fetch?: typeof fetch;
 	sleep?: (ms: number) => Promise<void>;
 	now?: () => number;
@@ -176,7 +165,8 @@ export function createMarketService(options: MarketServiceOptions) {
 	const logger = options.logger ?? console;
 	const log: MarketLog = (level, message) => level === 'warn' ? logger.warn(message) : logger.log(message);
 	const client = options.client ?? createMarketClient({fetch: options.fetch, log});
-	const confirmer = options.confirmer ?? createConfirmer({fetch: options.fetch, log});
+	const sharedConfirmer = options.confirmer && options.sellConfirmer ? null : createConfirmer({fetch: options.fetch, log});
+	const confirmer = options.confirmer ?? sharedConfirmer!;
 	const sleep = options.sleep ?? ((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)));
 	const now = options.now ?? Date.now;
 	const randomId = options.randomId ?? randomUUID;
@@ -310,6 +300,49 @@ export function createMarketService(options: MarketServiceOptions) {
 		result.currencyISO = currencyIso(attempt);
 		nameIds.remember(target.appid, target.marketHashName, result.itemNameId);
 		return result;
+	}
+
+	// ===== 价格走势 =====
+
+	/** 同一币种、同一件物品 5 分钟内不重查(Steam 这个接口限流很紧) */
+	const historyCache = new Map<string, {at: number; points: PricePoint[]}>();
+	const HISTORY_TTL_MS = 5 * 60_000;
+
+	async function priceHistory(query: ContextQuery & {refresh?: unknown}): Promise<{appid: number; marketHashName: string; currency: number | null; currencyISO: string; points: PricePoint[]; cachedAt: number}> {
+		const attempt = findAttempt(query.accountId || query.account);
+		if (!attempt) {
+			throw marketError(404, '账号不存在或未登录(用 id 或账号名指定)');
+		}
+		let target: MarketTarget;
+		try {
+			target = resolveTarget(query);
+		} catch (err) {
+			throw marketError(400, errorText(err));
+		}
+		const currencyISO = currencyIso(attempt);
+		const key = `${currencyISO || attempt.currency}|${target.appid}|${target.marketHashName}`;
+		const cached = historyCache.get(key);
+		if (cached && query.refresh !== '1' && query.refresh !== true && now() - cached.at < HISTORY_TTL_MS) {
+			return {...target, currency: attempt.currency ?? null, currencyISO, points: cached.points, cachedAt: cached.at};
+		}
+		let points: PricePoint[];
+		try {
+			points = await client.fetchPriceHistory({
+				...target,
+				cookies: options.cookiesFor(attempt),
+				userAgent: attempt.userAgent,
+				currency: attempt.currency,
+				country: attempt.country || attempt.loginGeoCountry || 'US'
+			});
+		} catch (err) {
+			throw marketError(502, errorText(err) || '价格走势获取失败');
+		}
+		const at = now();
+		historyCache.set(key, {at, points});
+		if (historyCache.size > 200) {
+			historyCache.delete(historyCache.keys().next().value!);
+		}
+		return {...target, currency: attempt.currency ?? null, currencyISO, points, cachedAt: at};
 	}
 
 	// ===== 挂求购 =====
@@ -579,7 +612,22 @@ export function createMarketService(options: MarketServiceOptions) {
 		};
 	}
 
-	return {search, context, place, orders: ledger.list, cancel, sync};
+	// ===== 出售(./sell.ts):参考价用上面的 context,中文名用同一份词库 =====
+	const sell = createSellService({
+		findAttempt,
+		cookiesFor: options.cookiesFor,
+		deviceIdFor: options.deviceIdFor,
+		context: query => context(query),
+		zhOf,
+		confirmer: options.sellConfirmer ?? sharedConfirmer!,
+		fetch: options.fetch,
+		sleep,
+		now,
+		log,
+		...options.sell
+	});
+
+	return {search, context, priceHistory, place, orders: ledger.list, cancel, sync, sell};
 }
 
 export type MarketService = ReturnType<typeof createMarketService>;

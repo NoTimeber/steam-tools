@@ -120,7 +120,7 @@ export interface AccountRef {
 }
 
 /**
- * 账户管理里的全部账号(按名单顺序),补上 SteamID、昵称、在不在线(C5 扫货选收货账号用)。
+ * 账户管理里的全部账号(按名单顺序),补上 SteamID、昵称、在不在线(ECO 扫货认收货账号是谁用)。
  * SteamID 先取在线会话的,没有再问 steamIdOf(maFile、上次登录存下的会话)。
  */
 export function listAccountRefs(accountNames: readonly string[], attempts: Iterable<Attempt>, options: {

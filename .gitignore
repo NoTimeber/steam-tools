@@ -3,6 +3,8 @@
 /data/
 /logs/
 .env
+# 前端本机开关(如 VITE_FEATURE_ECO=1)
+/web/.env.local
 inspect_key.txt
 
 # 数据库主密钥(和 data/ 分开保管、分开备份)

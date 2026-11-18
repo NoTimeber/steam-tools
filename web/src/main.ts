@@ -4,8 +4,9 @@ import {socket} from './api/socket.ts';
 import {router} from './router.ts';
 import {startAccounts} from './stores/accounts.ts';
 import {startBuyGame} from './stores/buygame.ts';
-import {startC5} from './stores/c5.ts';
+import {startEco} from './stores/eco.ts';
 import {startMarket} from './stores/market.ts';
+import {ECO_ENABLED} from './modules.ts';
 import {startProxies} from './stores/proxy.ts';
 import {startPurchase} from './stores/purchase.ts';
 import {startUpdateStatus} from './stores/update.ts';
@@ -21,7 +22,9 @@ startPurchase();
 startBuyGame();
 startMarket();
 startUu();
-startC5();
+if (ECO_ENABLED) {
+	startEco();
+}
 startWallet();
 startProxies();
 startUpdateStatus();

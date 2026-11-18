@@ -50,3 +50,5 @@ node test/fixtures/price-sheets/make-catalog-snapshot.cjs . /tmp/legacy-server.j
 ```
 
 schema 文件（`app/schema/`）更新后名称和分类会跟着变，这时需要重新生成快照。
+
+2026-11-18：`app/schema/` 换成新版（`items_game.txt`、`csgo_english.txt` 来自 SteamDatabase/GameTracking-CS2，`csgo_schinese.txt` 来自 csfloat/cs-files），`catalogs.cs2` 用当前 `src/purchase/catalog-items.ts` 重新生成。生成前逐项核对过：样本里 250 个商品的 defIndex、类型、分类、价格摘要都没变，只有 42 个名称换成了新版中文名（顺序随名称变）。`schemaSweep.cs2` 对应旧版 schema，物品定义数量不一致时测试会跳过。

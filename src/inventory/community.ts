@@ -173,6 +173,9 @@ export interface CommunityFetchParams {
 	userAgent?: string;
 	/** GC 库存里的物品(按 assetid),用来校正交易冷却 */
 	gcItemsByAssetId?: ReadonlyMap<string, any> | null;
+	/** 哪个游戏的库存,默认 CS2(730 / 2);市场出售也拉 TF2 等 */
+	appid?: number;
+	contextid?: string | number;
 }
 
 export async function fetchCommunityInventory(params: CommunityFetchParams, http: typeof fetch = (input, init) => fetch(input, init), now: () => number = Date.now): Promise<InventorySnapshot> {
@@ -188,7 +191,7 @@ export async function fetchCommunityInventory(params: CommunityFetchParams, http
 	let startAssetId = '';
 	let count = 0;
 	do {
-		const payload = await fetchPage(params.steamID, cookieHeader, startAssetId, params.userAgent, http);
+		const payload = await fetchPage(params.steamID, cookieHeader, startAssetId, params.userAgent, http, params.appid ?? APP_ID, params.contextid ?? CONTEXT_ID);
 		pages.push(payload);
 		items.push(...normalizeCommunityInventoryPage(payload, params.gcItemsByAssetId ?? null, now()));
 		startAssetId = payload.more_items ? String(payload.last_assetid || '') : '';
@@ -205,8 +208,8 @@ export async function fetchCommunityInventory(params: CommunityFetchParams, http
 	};
 }
 
-async function fetchPage(steamID: string, cookieHeader: string, startAssetId: string, userAgent: string | undefined, http: typeof fetch): Promise<any> {
-	const url = new URL(`https://steamcommunity.com/inventory/${steamID}/${APP_ID}/${CONTEXT_ID}`);
+async function fetchPage(steamID: string, cookieHeader: string, startAssetId: string, userAgent: string | undefined, http: typeof fetch, appid: number, contextid: string | number): Promise<any> {
+	const url = new URL(`https://steamcommunity.com/inventory/${steamID}/${appid}/${contextid}`);
 	url.searchParams.set('l', 'schinese');
 	url.searchParams.set('count', String(PAGE_SIZE));
 	if (startAssetId) {

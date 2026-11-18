@@ -143,7 +143,10 @@ describe('市场求购', () => {
 		assert.equal(pages(), pagesBefore);
 		assert.deepEqual(res.json.context, {
 			appid: 730, marketHashName: AK, currency: 1, itemNameId: AK_NAMEID, itemName: '',
-			highestBuyOrderCents: 120, lowestSellOrderCents: 150, lowestPrice: '$1.50', medianPrice: '$1.40', volume: '321', currencyISO: 'USD', issues: []
+			highestBuyOrderCents: 120, lowestSellOrderCents: 150,
+			sellOrders: [{priceCents: 150, quantity: 3, cumulative: 3}, {priceCents: 152, quantity: 2, cumulative: 5}, {priceCents: 160, quantity: 10, cumulative: 15}],
+			buyOrders: [{priceCents: 120, quantity: 5, cumulative: 5}, {priceCents: 115, quantity: 20, cumulative: 25}], sellTotal: 15, buyTotal: 25,
+			lowestPrice: '$1.50', medianPrice: '$1.40', volume: '321', currencyISO: 'USD', issues: []
 		});
 		const histogram = marketCalls('/market/itemordershistogram').at(-1);
 		assert.equal(histogram?.query?.item_nameid, AK_NAMEID);
@@ -155,6 +158,16 @@ describe('市场求购', () => {
 		assert.equal(missing.status, 404);
 		const badUrl = await client.get(`/api/market/context?accountId=${alpha.attemptId}&url=nope`);
 		assert.equal(badUrl.status, 400);
+
+		// 价格走势:按账号会话查,点按时间排好,价格转成分
+		const history = await client.get(`/api/market/pricehistory?accountId=${encodeURIComponent(alpha.attemptId)}&url=${encodeURIComponent(AK_URL)}`);
+		assert.equal(history.status, 200, history.text);
+		assert.deepEqual(history.json.points.map((p: any) => [new Date(p.time).toISOString().slice(0, 10), p.priceCents, p.volume]), [
+			['2026-11-15', 140, 12], ['2026-11-16', 145, 20], ['2026-11-17', 150, 7]
+		]);
+		assert.equal(history.json.currencyISO, 'USD');
+		const historyMissing = await client.get(`/api/market/pricehistory?accountId=nobody&url=${encodeURIComponent(AK_URL)}`);
+		assert.equal(historyMissing.status, 404);
 	});
 
 	test('挂求购(不用手机确认):两个账号各挂一张;表单、CSRF、Referer 和网页一致;记进账本', async () => {

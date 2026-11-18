@@ -19,20 +19,24 @@
 // 5. 报价接受:steam-tradeoffer-manager / steamcommunity 换成替身,报价从场景的 offers 里取;
 //    接受、手机确认只记日志,不连 Steam。充值码兑换的 steamstore 也换成替身,按码的前缀决定结果。
 // 6. 假 Steam 市场(steamcommunity.com/market/*),有状态:挂求购、手机确认、撤单、我的求购单,见 fakeMarket();
-//    场景开关在 FAKE_MARKET_FILE。手机确认 mobileconf/getlist、ajaxop(求购确认自己发,见 fakeMobileconf)列出 / 确认待确认的求购单;
+//    出售也有状态:sellitem(从假库存里上架,默认要手机确认)、mylistings 的在售 / 待确认、removelisting 下架、
+//    myhistory/render 的成交记录(上架 / 下架 / 卖出),见 fakeSell();场景 sellNoConfirmation / sellFail / soldListings。
+//    场景开关在 FAKE_MARKET_FILE。手机确认 mobileconf/getlist、ajaxop(求购确认自己发,见 fakeMobileconf)列出 / 确认待确认的求购单
+//    和上架(type=3,creator_id = listingid;确认一条或 multiajaxop 一次确认多条,记 sellConfirm);
 //    FAKE_CONFIRMATIONS_FILE 里的确认项(账户管理「令牌确认」演示 / 测试用)每个账号都有一份,ajaxop / multiajaxop 确认或拒绝后消失;
 //    steam-totp 的 getTimeOffset 换成离线版(返回 0)。
 // 7. 假 Steam 商店结算(store / api / checkout.steampowered.com 上买游戏用到的那几个端点),有状态:
 //    每个账号钱包 10.00 美元、已拥有的包,见 fakeStore();商品可用 FAKE_STORE_PACKAGES 追加。
 //    购买记录页(store.steampowered.com/account/history/ + AjaxLoadMoreHistory):每个账号 37 条,每页 15 条,见 historyRow()。
 // 8. 假社区库存(steamcommunity.com/inventory/<steamID>/730/2):两页共 3 件;FAKE_INVENTORY_FILE 可设成私密(403)或整个换掉(assets + descriptions,演示服务用),见 fakeInventory()。
+//    在市场上架(待确认 / 在售 / 已卖出)的物品不在库存里,下架后回来。
 //    交易报价隐私设置页(steamcommunity.com/profiles/<steamID>/tradeoffers/privacy):带会话 cookie 时给出这个账号的
 //    交易链接(partner = SteamID 低 32 位),没 cookie 时 302 去登录页,见 fakeTradeUrlPage()。
-// 9. 假 C5GAME 开放平台(openapi.c5game.com),有状态:余额、在售(64 位 id)、批量购买 / 快速购买、订单详情,
-//    初始场景在 FAKE_C5_FILE,见 fakeC5()。app-key 以 bad 开头的一律拒绝,以 ip 开头的查在售时报不在白名单。
+// 9. 假 ECOSteam 开放平台(openapi.ecosteam.cn),有状态:余额、绑定账号、在售、按商品编号 / 按类别购买、订单状态,
+//    初始场景在 FAKE_ECO_FILE,见 fakeEco()。场景里给了公钥就独立验签,PartnerId 不对回 5005。
 // 10. 外网拦截:全局 fetch 只放行本机;汇率接口返回固定数据;其余外部请求直接失败。
 //
-// logOn / logOff / gamesPlayed / sendToGC / 下单各步 / 悠悠请求 / 报价接受 / 市场请求和确认 / 商店结算请求 / 社区库存请求 / C5 请求 /
+// logOn / logOff / gamesPlayed / sendToGC / 下单各步 / 悠悠请求 / 报价接受 / 市场请求和确认 / 商店结算请求 / 社区库存请求 / ECO 请求 /
 // 被拦的外部请求都追加一行 JSON 到 FAKE_STEAM_LOG(设置了才写)。
 
 const path = require('path');
@@ -403,7 +407,9 @@ steamTotp.getTimeOffset = callback => {
 //   createFail:挂单一律回这个;filled:这些求购单已成交,从「我的求购单」里消失。
 // 账号按 cookie 里的 steamLoginSecure 区分;表单里的 sessionid 必须等于 cookie 里的(CSRF),否则回 success=15。
 // confs:待确认的求购单;trades:接受后等手机确认的交易报价
-const market = {seq: 0, orders: new Map(), confs: new Map(), trades: new Map()};
+// listings:出售单(listingid → {owner, appid, contextid, assetid, newAssetId, amount, price, fee, status, description});
+// sellConfs:上架的待确认项(confId → {owner, listingId, allowed});history:成交记录事件(新的在后)
+const market = {seq: 0, orders: new Map(), confs: new Map(), trades: new Map(), listings: new Map(), sellConfs: new Map(), history: []};
 
 // 新版市场的分组页(分组 id 和真实 Steam 一致):标题是分组名
 const MARKET_GROUPS = {G18A8263004: 'Kilowatt Case', G1807209A023004: 'AK-47 | Redline', G18072096023004: 'AWP | Redline'};
@@ -473,7 +479,30 @@ function fakeMobileconf(url, init) {
 			.filter(([, item]) => item.owner === owner && !item.allowed)
 			.map(([id, item]) => ({id, creator_id: item.offerId, nonce: 'nonce-' + id, type: 2, headline: 'trade'}));
 		const extra = seeded.filter(item => !handled.has(String(item.id))).map(item => ({...item, id: String(item.id), nonce: 'nonce-' + item.id}));
-		return json({success: true, conf: [...conf, ...trades, ...extra]});
+		const sells = [...market.sellConfs.entries()]
+			.filter(([, item]) => item.owner === owner && !item.allowed)
+			.map(([id, item]) => ({id, creator_id: item.listingId, nonce: 'nonce-' + id, type: 3, type_name: 'Market Listing',
+				headline: (market.listings.get(item.listingId) || {}).description?.market_hash_name || ''}));
+		return json({success: true, conf: [...conf, ...trades, ...extra, ...sells]});
+	}
+	// 上架的确认项:ajaxop 一条或 multiajaxop 多条,全是这个账号的上架确认才算数;确认后出售单转为在售
+	const sellIds = url.pathname === '/mobileconf/multiajaxop' ? form.getAll('cid[]') : [params.cid];
+	if (sellIds.length && sellIds.every(id => market.sellConfs.has(id))) {
+		const nonces = url.pathname === '/mobileconf/multiajaxop' ? form.getAll('ck[]') : [params.ck];
+		const items = sellIds.map(id => market.sellConfs.get(id));
+		record({event: 'sellConfirm', owner, path: url.pathname, confIds: sellIds, listingIds: items.map(item => item.listingId), tag: params.tag, op: params.op, accept: params.op === 'allow', params});
+		const ok = params.tag === params.op && ['allow', 'cancel'].includes(params.op) && nonces.length === sellIds.length
+			&& items.every((item, index) => item.owner === owner && !item.allowed && nonces[index] === 'nonce-' + sellIds[index]);
+		if (ok) {
+			items.forEach(item => {
+				item.allowed = true;
+				const listing = market.listings.get(item.listingId);
+				if (listing && listing.status === 'to_confirm') {
+					listing.status = params.op === 'allow' ? 'active' : 'cancelled';
+				}
+			});
+		}
+		return json({success: ok});
 	}
 	const respond = (ids, nonces) => {
 		record({event: 'mobileconfRespond', owner, path: url.pathname, method: (init && init.method) || 'GET', confIds: ids, tag: params.tag, op: params.op, accept: params.op === 'allow', params});
@@ -529,7 +558,19 @@ function fakeMarket(url, init) {
 		return new Response(`<html><title>Steam Community Market :: Listings for ${name}</title></html>`, {status: 200});
 	}
 	if (url.pathname === '/market/itemordershistogram') {
-		return json({success: 1, highest_buy_order: '120', lowest_sell_order: '150'});
+		// 盘口分档(累计数量):在售 1.50×3、1.52×2、1.60×10;求购 1.20×5、1.15×20
+		return json({success: 1, highest_buy_order: '120', lowest_sell_order: '150',
+			sell_order_graph: [[1.5, 3, ''], [1.52, 5, ''], [1.6, 15, '']], buy_order_graph: [[1.2, 5, ''], [1.15, 25, '']],
+			sell_order_count: '15', buy_order_count: '25'});
+	}
+	// 价格走势:没登录回 [](和真 Steam 一样);登录了给最近 3 天每天一个点
+	if (url.pathname === '/market/pricehistory/') {
+		if (!owner) {
+			return json([]);
+		}
+		return json({success: true, price_prefix: '$', price_suffix: '', prices: [
+			['Nov 15 2026 01: +0', 1.4, '12'], ['Nov 16 2026 01: +0', 1.45, '20'], ['Nov 17 2026 01: +0', 1.5, '7']
+		]});
 	}
 	if (url.pathname === '/market/priceoverview/') {
 		return json({success: true, lowest_price: '$1.50', median_price: '$1.40', volume: '321'});
@@ -538,6 +579,10 @@ function fakeMarket(url, init) {
 		return new Response('<html>Sign In</html>', {status: 200});   // 没登录:Steam 回登录页
 	}
 	const csrfOk = !!form.sessionid && form.sessionid === cookieValue(headers.cookie, 'sessionid');
+	const sold = fakeSell(url, owner, form, csrfOk, scenario, json);
+	if (sold) {
+		return sold;
+	}
 	switch (url.pathname) {
 		case '/market/createbuyorder/': {
 			if (!csrfOk) {
@@ -575,10 +620,148 @@ function fakeMarket(url, init) {
 				.filter(([id, order]) => order.owner === owner && !filled.has(id))
 				.map(([id, order]) => ({buy_orderid: id, price: String(order.price), quantity: String(order.quantity), quantity_remaining: String(order.quantity),
 					description: {appid: order.appid, market_hash_name: order.name}}));
-			return json({success: true, buy_orders: buyOrders});
+			return json({success: true, buy_orders: buyOrders, ...myListingsBody(owner, url)});
 		}
 	}
 	return json({success: 8});
+}
+
+// ===== 假市场出售 =====
+// 手续费和 Steam 网页一样:Steam 5%、发行商 10%,各至少 1 分(price 是卖家到手)
+function sellFees(price) {
+	const steam = Math.floor(Math.max(price * 0.05, 1));
+	const publisher = Math.floor(Math.max(price * 0.1, 1));
+	return {steam, publisher, fee: steam + publisher};
+}
+
+/** 卖家库存里(730/2)这件物品的描述;不在库存里为 null */
+function ownedDescription(owner, assetid) {
+	const {assets, descriptions} = inventoryData();
+	const asset = assets.find(item => String(item.assetid) === String(assetid));
+	if (!asset || listedAssets(owner).has(String(assetid))) {
+		return null;
+	}
+	return descriptions.find(item => item.classid === asset.classid && item.instanceid === asset.instanceid) || null;
+}
+
+/** 这个账号挂在市场上的物品(待确认 / 在售 / 已卖出),不在库存里 */
+function listedAssets(owner) {
+	return new Set([...market.listings.values()].filter(item => item.owner === owner && item.status !== 'cancelled').map(item => item.assetid));
+}
+
+function historyEvent(owner, listing, eventType, extra) {
+	market.history.push({owner, listingid: listing.listingid, event_type: eventType, time_event: Math.floor(Date.now() / 1000) + market.history.length, ...extra});
+}
+
+function listingJson(listing) {
+	const d = listing.description || {};
+	return {
+		listingid: listing.listingid, time_created: listing.created, steamid_lister: '', price: listing.price, original_price: listing.price, fee: listing.fee,
+		steam_fee: listing.steamFee, publisher_fee: listing.publisherFee, publisher_fee_percent: '0.100000001490116119', currencyid: '2001',
+		active: listing.status === 'active' ? 1 : 0, status: listing.status === 'active' ? 1 : 2,
+		asset: {currency: 0, appid: listing.appid, contextid: listing.contextid, id: listing.newAssetId, amount: String(listing.amount), unowned_id: listing.assetid, unowned_contextid: listing.contextid,
+			market_hash_name: d.market_hash_name, name: d.name, icon_url: d.icon_url || ''}
+	};
+}
+
+/** mylistings 里出售那部分:在售分页(start / count),待确认全给 */
+function myListingsBody(owner, url) {
+	const mine = [...market.listings.values()].filter(item => item.owner === owner);
+	const active = mine.filter(item => item.status === 'active');
+	const start = Number(url.searchParams.get('start') || 0);
+	const count = Number(url.searchParams.get('count') || 10);
+	return {
+		start, pagesize: count, total_count: active.length, num_active_listings: active.length,
+		listings: active.slice(start, start + count).map(listingJson),
+		listings_on_hold: [],
+		listings_to_confirm: mine.filter(item => item.status === 'to_confirm').map(listingJson),
+		assets: {}
+	};
+}
+
+/** 场景 soldListings 里的在售单:变成已卖出,记一条卖出事件 */
+function applySold(scenario) {
+	for (const id of (scenario.soldListings || []).map(String)) {
+		const listing = market.listings.get(id);
+		if (listing && listing.status === 'active') {
+			listing.status = 'sold';
+			historyEvent(listing.owner, listing, 3, {purchaseid: String(8000 + ++market.seq), steamid_actor: '76561190000099999'});
+		}
+	}
+}
+
+/** 出售的几个端点;不是这几个返回 null */
+function fakeSell(url, owner, form, csrfOk, scenario, json) {
+	applySold(scenario);
+	if (url.pathname === '/market/sellitem/') {
+		if (!csrfOk) {
+			return json({success: false, message: 'There was a problem listing your item. Refresh the page and try again.'});
+		}
+		const fail = (scenario.sellFail || {})[form.assetid];
+		if (fail) {
+			return new Response(JSON.stringify({success: false, message: fail}), {status: 502, headers: {'content-type': 'application/json'}});
+		}
+		const description = ownedDescription(owner, form.assetid);
+		const price = Number(form.price);
+		if (!description || !description.marketable || form.appid !== '730' || form.contextid !== '2') {
+			return json({success: false, message: 'The item specified is no longer in your inventory or is not allowed to be traded on the Community Market.'});
+		}
+		if (!Number.isInteger(price) || price < 1 || Number(form.amount) !== 1) {
+			return json({success: false, message: 'The price entered is invalid.'});
+		}
+		const listingid = String(6000000000 + ++market.seq);
+		const fees = sellFees(price);
+		const confirm = !scenario.sellNoConfirmation;
+		const listing = {
+			listingid, owner, appid: 730, contextid: '2', assetid: String(form.assetid), newAssetId: String(30000 + market.seq), amount: 1,
+			price, fee: fees.fee, steamFee: fees.steam, publisherFee: fees.publisher, status: confirm ? 'to_confirm' : 'active',
+			created: Math.floor(Date.now() / 1000), description
+		};
+		market.listings.set(listingid, listing);
+		if (confirm) {
+			market.sellConfs.set(String(9500 + ++market.seq), {owner, listingId: listingid, allowed: false});
+		}
+		historyEvent(owner, listing, 1, {});
+		return json({success: true, requires_confirmation: confirm ? 1 : 0, needs_mobile_confirmation: confirm, needs_email_confirmation: false, email_domain: ''});
+	}
+	const remove = /^\/market\/removelisting\/(\d+)$/.exec(url.pathname);
+	if (remove) {
+		const listing = market.listings.get(remove[1]);
+		if (!csrfOk || !listing || listing.owner !== owner || !['active', 'to_confirm'].includes(listing.status)) {
+			return new Response('', {status: 500});
+		}
+		listing.status = 'cancelled';
+		for (const [id, conf] of market.sellConfs) {
+			if (conf.listingId === listing.listingid) {
+				market.sellConfs.delete(id);
+			}
+		}
+		historyEvent(owner, listing, 2, {});
+		return json([]);
+	}
+	if (url.pathname === '/market/myhistory/render/') {
+		const start = Number(url.searchParams.get('start') || 0);
+		const count = Number(url.searchParams.get('count') || 10);
+		const all = market.history.filter(event => event.owner === owner).slice().reverse();
+		const page = all.slice(start, start + count);
+		const listings = {};
+		const purchases = {};
+		const assets = {730: {2: {}}};
+		for (const event of page) {
+			const listing = market.listings.get(event.listingid);
+			const d = listing.description || {};
+			assets[730][2][listing.newAssetId] = {appid: 730, contextid: '2', id: listing.newAssetId, market_hash_name: d.market_hash_name, name: d.name, icon_url: d.icon_url || ''};
+			listings[listing.listingid] = {listingid: listing.listingid, price: listing.price, fee: listing.fee, currencyid: '2001',
+				asset: {currency: 0, appid: 730, contextid: '2', id: listing.newAssetId, amount: '1'}};
+			if (event.purchaseid) {
+				purchases[`${listing.listingid}_${event.purchaseid}`] = {listingid: listing.listingid, purchaseid: event.purchaseid, steamid_purchaser: event.steamid_actor,
+					paid_amount: listing.price, paid_fee: listing.fee, currencyid: '2001', received_amount: listing.price, received_currencyid: '2001',
+					persona_actor: 'Fake Buyer', avatar_actor: '', asset: {currency: 0, appid: 730, contextid: '2', id: listing.newAssetId, amount: '1'}};
+			}
+		}
+		return json({success: true, pagesize: count, total_count: all.length, start, assets, events: page.map(({owner: _, ...event}) => event), listings, purchases});
+	}
+	return null;
 }
 
 // ===== 假 Steam 商店结算 =====
@@ -836,8 +1019,31 @@ function fakeInventory(url, init) {
 		return new Response('Forbidden', {status: 403});
 	}
 	const json = value => new Response(JSON.stringify(value), {status: 200, headers: {'content-type': 'application/json'}});
+	const listed = listedAssets(owner);
+	const {assets, descriptions, custom} = inventoryData(scenario);
+	const left = assets.filter(asset => !listed.has(String(asset.assetid)));
+	if (custom) {
+		return json({success: 1, total_inventory_count: left.length, assets: left, descriptions});
+	}
+	// 默认两页:第一页 101、102,第二页 103
+	const first = left.filter(asset => asset.assetid !== '103');
+	if (!url.searchParams.get('start_assetid')) {
+		return json({success: 1, more_items: 1, last_assetid: '102', total_inventory_count: left.length, descriptions, assets: first});
+	}
+	return json({success: 1, total_inventory_count: left.length, descriptions, assets: left.filter(asset => asset.assetid === '103')});
+}
+
+/** 假库存的全部物品:FAKE_INVENTORY_FILE 里给了 assets + descriptions 就用它(custom),否则默认 3 件 */
+function inventoryData(scenario) {
+	if (!scenario) {
+		try {
+			scenario = process.env.FAKE_INVENTORY_FILE ? JSON.parse(fs.readFileSync(process.env.FAKE_INVENTORY_FILE, 'utf8')) : {};
+		} catch (_) {
+			scenario = {};
+		}
+	}
 	if (Array.isArray(scenario.assets) && Array.isArray(scenario.descriptions)) {
-		return json({success: 1, total_inventory_count: scenario.assets.length, assets: scenario.assets, descriptions: scenario.descriptions});
+		return {assets: scenario.assets, descriptions: scenario.descriptions, custom: true};
 	}
 	const rifle = {
 		classid: '1', instanceid: '0', name: 'AK-47 | 红线 (久经沙场)', market_hash_name: 'AK-47 | Redline (Field-Tested)', tradable: 1, marketable: 1, icon_url: 'ak',
@@ -847,13 +1053,11 @@ function fakeInventory(url, init) {
 		classid: '2', instanceid: '0', name: '武器箱钥匙', market_hash_name: 'CS:GO Case Key', tradable: 0, marketable: 0,
 		owner_descriptions: [{value: 'Tradable After Feb 03, 2099 (7:00:00) GMT'}], tags: [{category: 'Type', internal_name: 'CSGO_Tool_WeaponCase_KeyTag', localized_tag_name: '钥匙'}]
 	};
-	if (!url.searchParams.get('start_assetid')) {
-		return json({
-			success: 1, more_items: 1, last_assetid: '102', total_inventory_count: 3, descriptions: [rifle, key],
-			assets: [{assetid: '101', classid: '1', instanceid: '0', amount: '1'}, {assetid: '102', classid: '2', instanceid: '0', amount: '1'}]
-		});
-	}
-	return json({success: 1, total_inventory_count: 3, descriptions: [rifle], assets: [{assetid: '103', classid: '1', instanceid: '0', amount: '1'}]});
+	return {
+		assets: [{assetid: '101', classid: '1', instanceid: '0', amount: '1'}, {assetid: '102', classid: '2', instanceid: '0', amount: '1'}, {assetid: '103', classid: '1', instanceid: '0', amount: '1'}],
+		descriptions: [rifle, key],
+		custom: false
+	};
 }
 
 // ===== 假交易报价隐私设置页 =====
@@ -868,150 +1072,224 @@ function fakeTradeUrlPage(url, init) {
 		{status: 200, headers: {'content-type': 'text/html'}});
 }
 
-// ===== 假 C5GAME 开放平台 =====
-// 场景文件 FAKE_C5_FILE(启动时读一次,之后状态都在内存里):
-// {balance: 20, steamId, steamAccounts: [{steamId, nickname, username, autoType, accountStatus}], items: {<marketHashName>: {listings: [价格, ...], purchaseMax}}, restock: false}
-// 在售 id 是 19 位整数(JS 数字放不下),回包里按原样的数字写,收到的请求体也按原文解析,方便测试核对没丢精度。
-// restock: true 时每次查行情都可能在原价附近补一件新在售(演示服务用,让页面有东西可看)。
-const c5 = {loaded: false, balance: 0, steamId: '', steamAccounts: [], items: new Map(), orders: new Map(), seq: 0, restock: false};
+// ===== 假 ECOSteam 开放平台 =====
+// 场景文件 FAKE_ECO_FILE(启动时读一次,之后状态都在内存里):
+// {partnerId, publicKey, balance: 20, steamAccounts: [{SteamId, NickName, TradeLink, ...}],
+//  items: {<HashName>: {goodsName, listings: [价格, ...], qgMax}}, restock: false}
+// 有 publicKey 时按官方 Python 示例的规则(参数名不分大小写排序、数组 / 对象写成紧凑 JSON)独立验签,验不过回 5004;
+// PartnerId 不对回 5005。restock: true 时每次查行情都可能在原价附近补一件新在售(演示服务用,让页面有东西可看)。
+const eco = {loaded: false, partnerId: '', publicKey: '', balance: 0, steamAccounts: [], items: new Map(), orders: new Map(), seq: 0, restock: false};
 
-function c5State() {
-	if (!c5.loaded) {
-		c5.loaded = true;
+function ecoState() {
+	if (!eco.loaded) {
+		eco.loaded = true;
 		let scenario = {};
 		try {
-			scenario = process.env.FAKE_C5_FILE ? JSON.parse(fs.readFileSync(process.env.FAKE_C5_FILE, 'utf8')) : {};
+			scenario = process.env.FAKE_ECO_FILE ? JSON.parse(fs.readFileSync(process.env.FAKE_ECO_FILE, 'utf8')) : {};
 		} catch (_) {}
-		c5.balance = Number(scenario.balance ?? 100);
-		c5.steamId = String(scenario.steamId || '76561190100005555');
-		// C5 上绑定的 Steam 账号;默认只有 alpha(假 steam-user 按账号名长度算出来的 SteamID)
-		c5.steamAccounts = Array.isArray(scenario.steamAccounts) ? scenario.steamAccounts
-			: [{steamId: c5.steamId, nickname: '演示收货号', username: 'alpha', autoType: 0, accountStatus: 1}];
-		c5.restock = !!scenario.restock;
+		eco.partnerId = String(scenario.partnerId || '');
+		eco.publicKey = String(scenario.publicKey || '');
+		eco.balance = Number(scenario.balance ?? 100);
+		const steamId = String(scenario.steamId || '76561190100005555');
+		// ECO 上绑定的 Steam 账号;默认只有 alpha(假 steam-user 按账号名长度算出来的 SteamID)
+		eco.steamAccounts = Array.isArray(scenario.steamAccounts) ? scenario.steamAccounts : [{
+			SteamId: steamId, NickName: '演示收货号', IsDefaultSteam: true, AccountStatus: 1, TradeLinkIsEnable: true, Remark: '',
+			TradeLink: `https://steamcommunity.com/tradeoffer/new/?partner=${BigInt(steamId) & 0xFFFFFFFFn}&token=eco${steamId.slice(-4)}`
+		}];
+		eco.restock = !!scenario.restock;
 		for (const [name, item] of Object.entries(scenario.items || {})) {
 			const prices = item.listings || [];
-			c5.items.set(name, {
+			eco.items.set(name, {
+				goodsName: item.goodsName || name,
 				base: prices.length ? Math.min(...prices) : 1,
-				purchaseMax: item.purchaseMax ?? null,
-				listings: prices.map(price => ({productId: c5ProductId(), price}))
+				qgMax: item.qgMax ?? null,
+				listings: prices.map(price => ({goodsNum: ecoGoodsNum(), price}))
 			});
 		}
 	}
-	return c5;
+	return eco;
 }
 
-function c5ProductId() {
-	c5.seq += 1;
-	return String(1444544795338000000n + BigInt(c5.seq));
+function ecoGoodsNum() {
+	eco.seq += 1;
+	return `G${String(eco.seq).padStart(8, '0')}`;
 }
 
-function c5Restock() {
-	if (!c5.restock) {
+function ecoRestock() {
+	if (!eco.restock) {
 		return;
 	}
-	for (const item of c5.items.values()) {
+	for (const item of eco.items.values()) {
 		if (item.listings.length < 25 && Math.random() < 0.35) {
 			const price = Math.round(item.base * (0.92 + Math.random() * 0.16) * 100) / 100;
-			item.listings.push({productId: c5ProductId(), price});
+			item.listings.push({goodsNum: ecoGoodsNum(), price});
 		}
 	}
 }
 
-function c5Buy(item, listing) {
-	item.listings.splice(item.listings.indexOf(listing), 1);
-	c5.balance = Math.round((c5.balance - listing.price) * 100) / 100;
-	return String(9000000000000000000n + BigInt(++c5.seq));
+/** 官方 Python 示例 sign_data 的写法:sorted(key=str.lower),dict / list 用 json.dumps(separators=(',', ':')) */
+function ecoSigningString(params) {
+	return Object.keys(params)
+		.filter(key => key !== 'Sign')
+		.sort((a, b) => (a.toLowerCase() < b.toLowerCase() ? -1 : a.toLowerCase() > b.toLowerCase() ? 1 : 0))
+		.map(key => `${key}=${typeof params[key] === 'object' ? JSON.stringify(params[key]) : String(params[key])}`)
+		.join('&');
 }
 
-function fakeC5(url, init) {
-	const state = c5State();
-	const headers = Object.fromEntries(Object.entries((init && init.headers) || {}).map(([key, value]) => [key.toLowerCase(), String(value)]));
-	const parse = text => JSON.parse(text, (key, value, context) =>
-		typeof value === 'number' && !Number.isSafeInteger(value) && context && /^-?\d+$/.test(context.source) ? context.source : value);
-	const body = init && init.body ? parse(String(init.body)) : {};
-	const appKey = url.searchParams.get('app-key') || '';
-	record({event: 'c5Request', method: (init && init.method) || 'GET', path: url.pathname, query: Object.fromEntries(url.searchParams), acceptEncoding: headers['accept-encoding'] || '', body});
-	const raw = id => JSON.rawJSON(id);
-	const ok = data => new Response(JSON.stringify({success: true, data, errorCode: 0, errorMsg: null}), {status: 200, headers: {'content-type': 'application/json'}});
-	const fail = (errorCode, errorMsg) => new Response(JSON.stringify({success: false, data: null, errorCode, errorMsg}), {status: 200, headers: {'content-type': 'application/json'}});
-	if (!appKey || appKey.startsWith('bad')) {
-		return fail(400001, '请输入正确的 app-Key');
+function fakeEco(url, init) {
+	const state = ecoState();
+	const body = init && init.body ? JSON.parse(String(init.body)) : {};
+	record({event: 'ecoRequest', path: url.pathname, body});
+	const reply = (code, msg, data) => new Response(JSON.stringify({ResultCode: String(code), ResultMsg: msg, ResultData: data}),
+		{status: 200, headers: {'content-type': 'application/json'}});
+	const ok = data => reply(0, '成功', data);
+	if (state.partnerId && body.PartnerId !== state.partnerId) {
+		return reply(5005, '身份ID无效', null);
 	}
-	const findListing = productId => {
-		for (const item of state.items.values()) {
-			const listing = item.listings.find(entry => entry.productId === String(productId));
-			if (listing) {
-				return {item, listing};
-			}
+	if (!body.Timestamp || Math.abs(Date.now() / 1000 - Number(body.Timestamp)) > 300) {
+		return reply(5003, '时间戳已失效', null);
+	}
+	if (state.publicKey) {
+		const pem = `-----BEGIN PUBLIC KEY-----\n${state.publicKey}\n-----END PUBLIC KEY-----\n`;
+		let valid = false;
+		try {
+			valid = require('node:crypto').verify('sha256', Buffer.from(ecoSigningString(body), 'utf8'), pem, Buffer.from(String(body.Sign || ''), 'base64'));
+		} catch (_) {}
+		if (!valid) {
+			return reply(5004, '验签失败', null);
 		}
-		return null;
+	}
+	const nameOf = target => [...state.items].find(([, item]) => item === target)[0];
+	const placeOrder = (merchantNo, item, listing) => {
+		item.listings.splice(item.listings.indexOf(listing), 1);
+		state.balance = Math.round((state.balance - listing.price) * 100) / 100;
+		const orderNo = `DB${String(++state.seq).padStart(10, '0')}`;
+		state.orders.set(String(merchantNo), {orderNo, goodsNum: listing.goodsNum, name: nameOf(item), price: listing.price});
+		return {OrderNo: orderNo, MerchantNo: merchantNo, PaymentPrice: listing.price, UsedWaitSettlementMoney: 0};
 	};
-	const placeOrder = (outTradeNo, name, item, listing) => {
-		const orderId = c5Buy(item, listing);
-		state.orders.set(String(outTradeNo), {orderId, productId: listing.productId, name, price: listing.price});
-		return orderId;
+	const duplicate = merchantNo => {
+		const order = state.orders.get(String(merchantNo));
+		return order ? reply(7008, '商户号重复', {OrderIdList: [order.orderNo]}) : null;
 	};
 	switch (url.pathname) {
-		case '/merchant/account/v2/balance':
-			return ok({moneyAmount: state.balance, tradeSettleAmount: 0, depositAmount: 0});
-		case '/merchant/account/v1/steamInfo':
-			return ok({steamList: state.steamAccounts});
-		case '/merchant/market/v2/item/stat/hash/name': {
-			c5Restock();
-			const out = {};
-			for (const name of body.marketHashNames || []) {
+		case '/Api/Merchant/GetTotalMoney':
+			return ok({UserName: 'e2e', Money: state.balance, LockMoney: 0, PurchaseMoney: 0, PurchaseFrozenMoney: 0, WaitSettlementMoney: 0});
+		case '/Api/Merchant/QuerySteamAccountPageList':
+			return ok({PageIndex: 1, PageSize: 100, TotalRecord: state.steamAccounts.length, PageResult: state.steamAccounts});
+		case '/Api/Market/BatchSearchSellingPrice': {
+			ecoRestock();
+			const out = [];
+			for (const name of body.HashName || []) {
 				const item = state.items.get(name);
 				if (item) {
 					const prices = item.listings.map(listing => listing.price);
-					out[name] = {sellPrice: prices.length ? Math.min(...prices) : null, sellCount: prices.length, purchaseMaxPrice: item.purchaseMax};
+					out.push({HashName: name, GoodsName: item.goodsName, MinPrice: prices.length ? String(Math.min(...prices)) : '0',
+						SellCount: String(prices.length), QGMaxPrice: item.qgMax == null ? '0' : String(item.qgMax)});
 				}
 			}
 			return ok(out);
 		}
-		case '/merchant/market/v2/products/search': {
-			if (appKey.startsWith('ip')) {
-				return fail(403, '当前 IP 不在白名单');
-			}
-			const item = state.items.get(body.marketHashName);
-			const list = (item ? item.listings : []).filter(listing => listing.price <= Number(body.priceMax))
-				.map(listing => ({productId: raw(listing.productId), price: listing.price, delivery: 2, assetInfo: {amount: 1}}));
-			return ok({list, total: list.length});
+		case '/Api/Market/SellGoodsList': {
+			const item = state.items.get(body.HashName);
+			// 故意不按价格排:调用方自己排
+			const list = (item ? [...item.listings].reverse() : [])
+				.map(listing => ({GoodsNum: listing.goodsNum, HashName: body.HashName, GoodsName: item.goodsName, SellingPrice: listing.price}));
+			return ok({PageIndex: 1, PageSize: Number(body.PageSize) || 20, TotalRecord: list.length, PageResult: list});
 		}
-		case '/merchant/trade/v1/batch/buy': {
-			const successList = [];
-			const failedList = [];
-			for (const product of body.productList || []) {
-				const found = findListing(product.productId);
-				if (!found || found.listing.price > Number(product.buyPrice)) {
-					failedList.push({productId: raw(String(product.productId)), outTradeNo: product.outTradeNo, failReason: '商品已售出或价格已变'});
-				} else if (state.balance < found.listing.price) {
-					failedList.push({productId: raw(String(product.productId)), outTradeNo: product.outTradeNo, failReason: '余额不足'});
-				} else {
-					const name = [...state.items].find(([, item]) => item === found.item)[0];
-					const orderId = placeOrder(product.outTradeNo, name, found.item, found.listing);
-					successList.push({productId: raw(found.listing.productId), outTradeNo: product.outTradeNo, orderId: raw(orderId), actualPay: found.listing.price});
+		case '/Api/open/buy/BuyByGoodsNum': {
+			const dup = duplicate(body.MerchantNo);
+			if (dup) {
+				return dup;
+			}
+			let found = null;
+			for (const item of state.items.values()) {
+				const listing = item.listings.find(entry => entry.goodsNum === body.GoodsNum);
+				if (listing) {
+					found = {item, listing};
 				}
 			}
-			return ok({successList, failedList});
+			if (!found) {
+				return reply(7005, '商品不可购买', null);
+			}
+			if (Math.abs(found.listing.price - Number(body.Price)) > 1e-9) {
+				return reply(7009, '商品价格发生变化，不可购买', {NewPrice: found.listing.price});
+			}
+			if (state.balance < found.listing.price) {
+				return reply(1, '余额不足,请充值或者使用其他支付方式', null);
+			}
+			return ok(placeOrder(body.MerchantNo, found.item, found.listing));
 		}
-		case '/merchant/trade/v2/quick-buy': {
-			const item = state.items.get(body.marketHashName);
-			const listing = item && item.listings.filter(entry => entry.price <= Number(body.maxPrice)).sort((a, b) => a.price - b.price)[0];
+		case '/Api/open/buy/BuyByHashName': {
+			const dup = duplicate(body.MerchantNo);
+			if (dup) {
+				return dup;
+			}
+			const item = state.items.get(body.HashName);
+			const listing = item && item.listings.filter(entry => entry.price <= Number(body.Price)).sort((a, b) => a.price - b.price)[0];
 			if (!listing) {
-				return fail(500102, '没有符合条件的在售');
+				return reply(1, '没有符合条件的商品', null);
 			}
 			if (state.balance < listing.price) {
-				return fail(500103, '余额不足');
+				return reply(1, '余额不足,请充值或者使用其他支付方式', null);
 			}
-			const orderId = placeOrder(body.outTradeNo, body.marketHashName, item, listing);
-			return ok({orderId: raw(orderId), actualPay: listing.price, payStatus: 1});
+			return ok([placeOrder(body.MerchantNo, item, listing)]);
 		}
-		case '/merchant/order/v2/buy/detail': {
-			const order = state.orders.get(url.searchParams.get('outTradeNo') || '');
-			if (!order) {
-				return fail(500404, '订单不存在');
+		case '/Api/Merchant/CheckTradeLink':
+			// 是某个绑定账号当前的链接、token 不以 bad 开头才算有效
+			return ok(state.steamAccounts.some(account => account.TradeLink === body.TradeLink) && !/token=bad/.test(String(body.TradeLink)));
+		case '/Api/Merchant/UserSteamHandle': {
+			// 用 refreshToken 重新取链接:假 Steam 发的 RT-GOOD- 开头才认;换一个新 token 的链接
+			if (!/^RT-GOOD-/.test(String(body.RefreshToken || ''))) {
+				return reply(1, 'Steam登录状态已失效', null);
 			}
-			return ok({orderId: raw(order.orderId), productId: raw(order.productId), status: 1, statusName: '待发货', marketHashName: order.name});
+			const steamId = String(body.SteamID || '');
+			const tradeLink = `https://steamcommunity.com/tradeoffer/new/?partner=${BigInt(steamId) & 0xFFFFFFFFn}&token=new${steamId.slice(-4)}`;
+			const existing = state.steamAccounts.find(account => account.SteamId === steamId);
+			if (existing) {
+				existing.TradeLink = tradeLink;
+				existing.TradeLinkIsEnable = true;
+			} else {
+				state.steamAccounts.push({SteamId: steamId, NickName: steamId, Remark: '', AccountStatus: 1, IsDefaultSteam: false, TradeLinkIsEnable: true, TradeLink: tradeLink});
+			}
+			return ok({SteamId: steamId, Apikey: '', TradeLink: tradeLink, InventoryPublic: true});
+		}
+		case '/Api/Merchant/ImportSteamGuardAccount': {
+			// 令牌 JSON 按原文解析(17 位 SteamID 不舍入);密码 pw-wrong 当作密码错;同一个 SteamID 再绑就更新分组
+			let guard = null;
+			try {
+				guard = JSON.parse(String(body.GuardContent || ''), (key, value, context) =>
+					typeof value === 'number' && !Number.isSafeInteger(value) && context && /^-?\d+$/.test(context.source) ? context.source : value);
+			} catch (_) {}
+			if (!guard || !guard.shared_secret) {
+				return reply(2001, '令牌内容格式错误', false);
+			}
+			if (!body.Account || !body.Password || body.Password === 'pw-wrong') {
+				return reply(1, 'Steam账号或密码错误', false);
+			}
+			const steamId = String((guard.Session && guard.Session.SteamID) || '');
+			if (!/^\d{17}$/.test(steamId)) {
+				return reply(2001, '令牌里没有有效的SteamID', false);
+			}
+			const existing = state.steamAccounts.find(account => account.SteamId === steamId);
+			if (existing) {
+				existing.GroupName = body.GroupName || existing.GroupName || '';
+			} else {
+				state.steamAccounts.push({
+					SteamId: steamId, NickName: body.Account, Remark: body.Account, GroupName: body.GroupName || '', AccountStatus: 1, IsDefaultSteam: false,
+					TradeLinkIsEnable: true, TradeLink: `https://steamcommunity.com/tradeoffer/new/?partner=${BigInt(steamId) & 0xFFFFFFFFn}&token=eco${steamId.slice(-4)}`
+				});
+			}
+			return ok(true);
+		}
+		case '/Api/open/order/OrderStatusQuery': {
+			const rows = [];
+			for (const merchantNo of body.MerchantNos || []) {
+				const order = state.orders.get(String(merchantNo));
+				if (order) {
+					rows.push({OrderNum: order.orderNo, MerchantNo: String(merchantNo), OrderAmount: order.price, OrderState: '等待发货', OrderStateCode: 1});
+				}
+			}
+			return ok(rows);
 		}
 	}
 	return new Response('not found', {status: 404});
@@ -1028,8 +1306,8 @@ globalThis.fetch = async function offlineFetch(input, init) {
 	if (url.hostname.endsWith('.youpin898.com')) {
 		return fakeUu(url, init);
 	}
-	if (url.hostname === 'openapi.c5game.com') {
-		return fakeC5(url, init);
+	if (url.hostname === 'openapi.ecosteam.cn') {
+		return fakeEco(url, init);
 	}
 	if (url.hostname === 'steamcommunity.com' && url.pathname.startsWith('/market/')) {
 		return fakeMarket(url, init);

@@ -70,7 +70,7 @@ test('SteamID 从 steamLoginSecure 取;Steam 的域名才算 Steam', () => {
 	assert.ok(isSteamHost('store.steampowered.com'));
 	assert.ok(isSteamHost('steamcommunity.com'));
 	assert.ok(isSteamHost('community.fastly.steamstatic.com'));
-	assert.ok(!isSteamHost('openapi.c5game.com'));
+	assert.ok(!isSteamHost('openapi.ecosteam.cn'));
 	assert.ok(!isSteamHost('notsteamcommunity.com.evil.io'));
 });
 
@@ -146,7 +146,7 @@ test('Steam 的 fetch:按 Cookie 认账号选代理,每个账号各用各的连�
 	await service.fetch('https://steamcommunity.com/market/', {headers: new Headers(cookie(ALPHA_ID))});
 	await service.fetch('https://store.steampowered.com/account/', {headers: cookie(BRAVO_ID)});
 	await service.fetch('https://store.steampowered.com/api/packagedetails?packageids=1');
-	await service.fetch('https://openapi.c5game.com/merchant/account/v1/balance', {headers: cookie(ALPHA_ID)});
+	await service.fetch('https://openapi.ecosteam.cn/Api/Merchant/GetTotalMoney', {headers: cookie(ALPHA_ID)});
 	await service.fetch('https://steamcommunity.com/', {headers: cookie('76561190100009999')});
 	assert.deepEqual(used, [url('c'), url('c'), url('a'), url('a'), '', url('a')]);
 	assert.deepEqual(created, [url('c'), url('a'), url('a')], 'alpha、bravo、认不出账号的各一套连接');

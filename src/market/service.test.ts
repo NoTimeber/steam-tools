@@ -59,6 +59,10 @@ function harness(attempts: Attempt[], files: Record<string, unknown> = {}, extra
 			h.calls.push(`context ${params.marketHashName} nameid=${params.itemNameId} cur=${params.currency} ${params.country}`);
 			return {...params, currency: Number(params.currency), itemNameId: params.itemNameId || '', itemName: 'N', highestBuyOrderCents: 1, lowestSellOrderCents: 2, lowestPrice: '', medianPrice: '', volume: ''} as MarketContext;
 		},
+		async fetchPriceHistory(params) {
+			h.calls.push(`history ${params.marketHashName} cur=${params.currency}`);
+			return [{time: Date.UTC(2026, 10, 1), priceCents: 150, volume: 3}, {time: Date.UTC(2026, 10, 2), priceCents: 160, volume: 5}];
+		},
 		async createBuyOrder(params) {
 			const name = who(params);
 			h.createParams.push(params);

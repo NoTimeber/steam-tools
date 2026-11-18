@@ -8,8 +8,8 @@
 //   charlie  要移动令牌验证码,填 24680
 //   delta    密码错误,登录失败
 // UU 发货:「获取 Token」用短信登录,手机号随便填 11 位、验证码随便填,拿到的演示 token 在 UU 侧绑定的是 alpha 的 SteamID。
-// C5 扫货:app-key 随便填(bad 开头的会被拒);假平台有 500 元余额和四个箱子的在售,每次查行情可能在原价附近补货;
-// 绑了两个 Steam 账号:alpha(登录后自动取交易链接)和一个交易助手(选它时要贴交易链接)。
+// ECO 扫货:PartnerId 随便填,私钥贴一个或点「生成密钥对」(演示平台不验签);假平台有 500 元余额和四个箱子的在售,
+// 每次查行情可能在原价附近补货;绑了两个带交易链接的 Steam 账号(alpha 和一个演示小号)。
 // 代理管理:演示里有个假代理 127.0.0.1:<PORT+1>(DEMO_PROXY_PORT 可改;用户名、密码随便填,用户名以 -rotate 结尾的每次连接换出口 IP),
 // 检测能过(出口 IP 是假的);经它的 Steam 网页请求会失败(假代理不转发 HTTPS)。
 // 库存:每个登录的账号看到同一份假社区库存(随包皮肤库里挑的皮肤 + 武器箱 + 终端机,有冷却中、锁定、重复的)。
@@ -51,21 +51,20 @@ const uuScenarioFile = join(root, 'fake-uu.json');
 mkdirSync(root, {recursive: true});
 writeFileSync(uuScenarioFile, JSON.stringify({smsToken: uuToken, tokens: {[uuToken]: {steamId: '76561190100005555'}}, orders: {}}, null, 2));
 
-// 假 C5 开放平台的初始场景(每次启动重写;运行中的余额、在售、订单只在内存里)
-const c5ScenarioFile = join(root, 'fake-c5.json');
-writeFileSync(c5ScenarioFile, JSON.stringify({
+// 假 ECO 开放平台的初始场景(每次启动重写;运行中的余额、在售、订单只在内存里)。没给 publicKey:不验签
+const ecoScenarioFile = join(root, 'fake-eco.json');
+writeFileSync(ecoScenarioFile, JSON.stringify({
 	balance: 500,
 	restock: true,
-	// C5 上绑定的账号:alpha 在账户管理里(登录后自动取交易链接);交易助手不在,选它时要贴一次交易链接
 	steamAccounts: [
-		{steamId: '76561190100005555', nickname: '演示收货号', username: 'alpha', autoType: 0, accountStatus: 1},
-		{steamId: '76561198012345678', nickname: '演示交易助手', username: 'c5_helper', autoType: 2, accountStatus: 1}
+		{SteamId: '76561190100005555', NickName: '演示收货号', TradeLink: 'https://steamcommunity.com/tradeoffer/new/?partner=729674419&token=eco5555', TradeLinkIsEnable: true, AccountStatus: 1, IsDefaultSteam: true, Remark: 'alpha'},
+		{SteamId: '76561198012345678', NickName: '演示小号', TradeLink: 'https://steamcommunity.com/tradeoffer/new/?partner=52079950&token=eco5678', TradeLinkIsEnable: true, AccountStatus: 1, IsDefaultSteam: false, Remark: ''}
 	],
 	items: {
-		'Kilowatt Case': {listings: [0.62, 0.64, 0.66, 0.7, 0.72], purchaseMax: 0.58},
-		'Dreams & Nightmares Case': {listings: [6.1, 6.2, 6.35], purchaseMax: 5.9},
-		'Revolution Case': {listings: [1.05, 1.08], purchaseMax: 0.98},
-		'Recoil Case': {listings: [1.45, 1.5], purchaseMax: 1.35}
+		'Kilowatt Case': {goodsName: '千瓦武器箱', listings: [0.62, 0.64, 0.66, 0.7, 0.72], qgMax: 0.58},
+		'Dreams & Nightmares Case': {goodsName: '梦魇武器箱', listings: [6.1, 6.2, 6.35], qgMax: 5.9},
+		'Revolution Case': {goodsName: '变革武器箱', listings: [1.05, 1.08], qgMax: 0.98},
+		'Recoil Case': {goodsName: '反冲武器箱', listings: [1.45, 1.5], qgMax: 1.35}
 	}
 }, null, 2));
 
@@ -172,7 +171,7 @@ const child = spawn(process.execPath, ['--require', join(REPO_ROOT, 'test', 'e2e
 		FAKE_STORE_COUNTRY: process.env.FAKE_STORE_COUNTRY || 'US',
 		FAKE_STEAM_LOG: join(root, 'fake-steam.log'),
 		FAKE_UU_FILE: uuScenarioFile,
-		FAKE_C5_FILE: c5ScenarioFile,
+		FAKE_ECO_FILE: ecoScenarioFile,
 		FAKE_INVENTORY_FILE: inventoryFile,
 		FAKE_CONFIRMATIONS_FILE: confirmationsFile,
 		PROXY_TEST_URL: 'http://ip.demo.test/',

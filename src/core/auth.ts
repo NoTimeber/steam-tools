@@ -5,7 +5,7 @@
 //   2) APP_PASSWORD 环境变量(明文,只作引导/兼容);
 //   3) 都没有 = 未配置:除首次设置接口和登录页外一律锁定。首次设置必须带启动日志里打印的「初始化令牌」,
 //      防止部署到公网后被别人抢先设置。
-// 会话 token 存内存(进程重启 = 全部失效)。
+// 会话:内存里一份;给了 sessionFile 时同时存盘(只存 token 的 sha256 和过期时间),重启后仍然有效,不用重新输口令。
 
 import {createHash, randomBytes, scryptSync, timingSafeEqual} from 'node:crypto';
 import {readJsonFileSafe, writeJsonAtomic} from './atomic-file.ts';
@@ -84,6 +84,8 @@ export interface AuthOptions {
 	envPassword?: string;
 	/** data/config/auth.json */
 	authFile?: string;
+	/** 登录会话存盘的文件;不给就只在内存(重启全部失效) */
+	sessionFile?: string;
 	ttlMs?: number;
 	/** true 总加 Secure;false 从不加;'auto' 请求经 HTTPS(含反代的 X-Forwarded-Proto)时加 */
 	cookieSecure?: boolean | 'auto';
@@ -111,7 +113,28 @@ export function createAuth(options: AuthOptions = {}) {
 	const random = options.random ?? randomBytes;
 	const setupToken = String(options.setupToken || '') || random(12).toString('hex');
 	const logger = options.logger ?? console;
-	const sessions = new Map<string, number>();   // token → 过期时间
+	const sessionFile = options.sessionFile || '';
+	const sessions = new Map<string, number>();   // sha256(token) → 过期时间
+	const tokenKey = (token: string) => createHash('sha256').update(token).digest('hex');
+	if (sessionFile) {
+		const saved = readJsonFileSafe(sessionFile, logger);
+		const at = now();
+		for (const [key, expiresAt] of Object.entries(saved && typeof saved === 'object' ? saved as Record<string, unknown> : {})) {
+			if (/^[0-9a-f]{64}$/.test(key) && typeof expiresAt === 'number' && expiresAt > at) {
+				sessions.set(key, expiresAt);
+			}
+		}
+	}
+	function saveSessions(): void {
+		if (!sessionFile) {
+			return;
+		}
+		try {
+			writeJsonAtomic(sessionFile, Object.fromEntries(sessions));
+		} catch (err) {
+			logger.warn(`[auth] 登录会话存盘失败(重启后要重新登录): ${(err as Error).message}`);
+		}
+	}
 	const failsByIp = new Map<string, FailEntry>();
 	const globalFails: FailEntry = {count: 0, firstAt: 0, lockedUntil: 0};
 
@@ -212,10 +235,15 @@ export function createAuth(options: AuthOptions = {}) {
 
 	function pruneSessions(): void {
 		const at = now();
-		for (const [token, expiresAt] of sessions) {
+		let changed = false;
+		for (const [key, expiresAt] of sessions) {
 			if (expiresAt <= at) {
-				sessions.delete(token);
+				sessions.delete(key);
+				changed = true;
 			}
+		}
+		if (changed) {
+			saveSessions();
 		}
 	}
 
@@ -223,12 +251,14 @@ export function createAuth(options: AuthOptions = {}) {
 		if (!token) {
 			return false;
 		}
-		const expiresAt = sessions.get(token);
+		const key = tokenKey(token);
+		const expiresAt = sessions.get(key);
 		if (!expiresAt) {
 			return false;
 		}
 		if (expiresAt <= now()) {
-			sessions.delete(token);
+			sessions.delete(key);
+			saveSessions();
 			return false;
 		}
 		return true;
@@ -252,7 +282,8 @@ export function createAuth(options: AuthOptions = {}) {
 
 	function issueToken(req: AuthRequest, res: AuthResponse): void {
 		const token = random(32).toString('hex');
-		sessions.set(token, now() + ttlMs);
+		sessions.set(tokenKey(token), now() + ttlMs);
+		saveSessions();
 		setSessionCookie(req, res, token, Math.floor(ttlMs / 1000));
 	}
 
@@ -319,14 +350,14 @@ export function createAuth(options: AuthOptions = {}) {
 			return res.status(400).json({success: false, error: (err as Error).message});
 		}
 		sessions.clear();
-		issueToken(req, res);
+		issueToken(req, res);   // 里面会存盘
 		return res.json({success: true});
 	}
 
 	function logout(req: AuthRequest, res: AuthResponse): unknown {
 		const token = tokenFromReq(req);
-		if (token) {
-			sessions.delete(token);
+		if (token && sessions.delete(tokenKey(token))) {
+			saveSessions();
 		}
 		setSessionCookie(req, res, '', 0);
 		return res.json({success: true});

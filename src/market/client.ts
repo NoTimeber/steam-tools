@@ -37,6 +37,93 @@ export interface MarketTarget {
 	marketHashName: string;
 }
 
+/** 盘口的一档:这个价位(分)上有几件 / 几个求购,以及到这一档为止的累计 */
+export interface OrderLevel {
+	priceCents: number;
+	quantity: number;
+	cumulative: number;
+}
+
+/** 最多给几档(Steam 的 graph 往后会合并成一大档,太长也没用) */
+export const ORDER_LEVELS_MAX = 30;
+
+/**
+ * itemordershistogram 的 sell_order_graph / buy_order_graph:[[价格(主单位,浮点), 累计数量, 文字], ...],
+ * 在售从低到高、求购从高到低,数量是累计的。转成每档的分价格和本档数量
+ */
+export function parseOrderGraph(graph: unknown, max = ORDER_LEVELS_MAX): OrderLevel[] {
+	if (!Array.isArray(graph)) {
+		return [];
+	}
+	const out: OrderLevel[] = [];
+	let previous = 0;
+	for (const row of graph) {
+		if (!Array.isArray(row)) {
+			continue;
+		}
+		const priceCents = Math.round(Number(row[0]) * 100);
+		const cumulative = Math.round(Number(row[1]));
+		if (!Number.isFinite(priceCents) || priceCents <= 0 || !Number.isFinite(cumulative) || cumulative < previous) {
+			continue;
+		}
+		if (cumulative > previous) {
+			out.push({priceCents, quantity: cumulative - previous, cumulative});
+		}
+		previous = cumulative;
+		if (out.length >= max) {
+			break;
+		}
+	}
+	return out;
+}
+
+/** 盘口里的总数(Steam 给的是带千分位的文本或数字) */
+function orderCount(value: unknown): number | null {
+	const digits = String(value ?? '').replace(/[^\d]/g, '');
+	return digits ? Number(digits) : null;
+}
+
+/** sell_order_summary / buy_order_summary 的 HTML 里第一个高亮数字(总件数) */
+function summaryCount(html: unknown): number | null {
+	const match = /market_commodity_orders_header_promote">([\d,.\s]+)</.exec(String(html ?? ''));
+	return match ? orderCount(match[1]) : null;
+}
+
+/** 价格走势的一个点:这个时段(小时或天)的成交中位价(分)和售出数量 */
+export interface PricePoint {
+	/** 时段开始,毫秒(UTC) */
+	time: number;
+	priceCents: number;
+	volume: number;
+}
+
+const MONTHS: Record<string, number> = {Jan: 0, Feb: 1, Mar: 2, Apr: 3, May: 4, Jun: 5, Jul: 6, Aug: 7, Sep: 8, Oct: 9, Nov: 10, Dec: 11};
+
+/**
+ * pricehistory 的 prices:[["Nov 18 2026 01: +0", 2.345, "123"], ...](时间 UTC、价格主单位浮点、数量文本)。
+ * 最近一个月按小时、更早的按天。按时间排好,坏行跳过
+ */
+export function parsePriceHistory(prices: unknown): PricePoint[] {
+	if (!Array.isArray(prices)) {
+		return [];
+	}
+	const out: PricePoint[] = [];
+	for (const row of prices) {
+		if (!Array.isArray(row)) {
+			continue;
+		}
+		const match = /^([A-Z][a-z]{2}) (\d{1,2}) (\d{4}) (\d{1,2}):/.exec(String(row[0] ?? ''));
+		const month = match ? MONTHS[match[1]!] : undefined;
+		const priceCents = Math.round(Number(row[1]) * 100);
+		const volume = Number(String(row[2] ?? '').replace(/[^\d]/g, ''));
+		if (!match || month == null || !Number.isFinite(priceCents) || priceCents <= 0 || !Number.isFinite(volume)) {
+			continue;
+		}
+		out.push({time: Date.UTC(Number(match[3]), month, Number(match[2]), Number(match[4])), priceCents, volume});
+	}
+	return out.sort((a, b) => a.time - b.time);
+}
+
 export interface MarketContext extends MarketTarget {
 	currency: number;
 	itemNameId: string;
@@ -44,6 +131,12 @@ export interface MarketContext extends MarketTarget {
 	/** 最高求购价 / 最低在售价(钱包币种的分);拿不到为 null */
 	highestBuyOrderCents: number | null;
 	lowestSellOrderCents: number | null;
+	/** 盘口分档:在售从低到高、求购从高到低,最多 ORDER_LEVELS_MAX 档;拿不到为空数组 */
+	sellOrders: OrderLevel[];
+	buyOrders: OrderLevel[];
+	/** 在售总件数 / 求购总数;拿不到为 null */
+	sellTotal: number | null;
+	buyTotal: number | null;
 	/** priceoverview 返回的带币种符号的文本 */
 	lowestPrice: string;
 	medianPrice: string;
@@ -121,7 +214,7 @@ function pageTitle(text: string): string | null {
 }
 
 /** 响应摘要(日志和报错用):状态码、被跳转到哪、HTML 只取标题,其它取开头一段 */
-function responseSummary(res: Response, text: string, max = 200): string {
+export function responseSummary(res: Response, text: string, max = 200): string {
 	const parts = [`HTTP ${res.status}`];
 	if (res.redirected && res.url) {
 		parts.push(`跳转到 ${res.url}`);
@@ -138,7 +231,7 @@ function responseSummary(res: Response, text: string, max = 200): string {
  * Steam 没回 JSON 时说清楚是哪种情况:429 是出口 IP 被限流(账号走机房代理时 Steam 常对市场请求这样);
  * 被带到登录页才是 cookie 失效;别的带上状态码、跳转地址和页面标题,免得一律说成 cookie 失效
  */
-function noJsonError(res: Response, text: string): Error {
+export function noJsonError(res: Response, text: string): Error {
 	if (res.status === 429) {
 		return new Error('Steam 拒绝了这个出口 IP 的市场请求(HTTP 429 限流)。账号走代理时多半是代理 IP 被限制,换个代理或让这个账号不走代理再试');
 	}
@@ -165,7 +258,7 @@ export function describeBuyOrderError(code: unknown, message?: unknown, rawText?
 	return `${action}(success=${code})${extra}`;
 }
 
-function truncate(value: unknown, max = 400): string {
+export function truncate(value: unknown, max = 400): string {
 	const text = typeof value === 'string' ? value : JSON.stringify(value);
 	if (!text) {
 		return '';
@@ -187,7 +280,7 @@ function extractSessionId(cookies: readonly string[]): string {
 	return '';
 }
 
-function buildCookieHeader(cookies: readonly string[] | undefined, sessionidFallback?: string): {cookieHeader: string; sessionid: string} {
+export function buildCookieHeader(cookies: readonly string[] | undefined, sessionidFallback?: string): {cookieHeader: string; sessionid: string} {
 	const list = (Array.isArray(cookies) ? cookies : []).filter(Boolean);
 	let sessionid = extractSessionId(list);
 	if (!sessionid && sessionidFallback) {
@@ -204,7 +297,7 @@ function finiteOrNull(value: unknown): number | null {
 	return Number.isFinite(number) ? number : null;
 }
 
-async function readJson(response: Response): Promise<{text: string; json: any}> {
+export async function readJson(response: Response): Promise<{text: string; json: any}> {
 	const text = await response.text();
 	let json: any = null;
 	try {
@@ -261,7 +354,7 @@ export function parseListingUrl(input: unknown): MarketTarget {
 
 const ENTITIES: Readonly<Record<string, string>> = {amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' '};
 
-function decodeEntities(text: string): string {
+export function decodeEntities(text: string): string {
 	return text.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (all, code: string) => {
 		if (code[0] === '#') {
 			const point = code[1] === 'x' || code[1] === 'X' ? parseInt(code.slice(2), 16) : Number(code.slice(1));
@@ -335,6 +428,10 @@ export function createMarketClient(options: MarketClientOptions = {}) {
 			itemName: '',
 			highestBuyOrderCents: null,
 			lowestSellOrderCents: null,
+			sellOrders: [],
+			buyOrders: [],
+			sellTotal: null,
+			buyTotal: null,
 			lowestPrice: '',
 			medianPrice: '',
 			volume: '',
@@ -401,6 +498,10 @@ export function createMarketClient(options: MarketClientOptions = {}) {
 				// 而最高求购 0 时它会建议出价 0.01,正合适
 				result.highestBuyOrderCents = finiteOrNull(json.highest_buy_order);
 				result.lowestSellOrderCents = finiteOrNull(json.lowest_sell_order);
+				result.sellOrders = parseOrderGraph(json.sell_order_graph);
+				result.buyOrders = parseOrderGraph(json.buy_order_graph);
+				result.sellTotal = orderCount(json.sell_order_count) ?? summaryCount(json.sell_order_summary) ?? (result.sellOrders.at(-1)?.cumulative ?? null);
+				result.buyTotal = orderCount(json.buy_order_count) ?? summaryCount(json.buy_order_summary) ?? (result.buyOrders.at(-1)?.cumulative ?? null);
 			}
 		} else {
 			result.issues.push('盘口:找不到这件的 item_nameid,查不了最高求购和最低在售');
@@ -598,7 +699,37 @@ export function createMarketClient(options: MarketClientOptions = {}) {
 		return name;
 	}
 
-	return {fetchMarketContext, createBuyOrder, cancelBuyOrder, fetchMyBuyOrders, fetchGroupName};
+	/**
+	 * 价格走势(成交中位价 + 售出数量)。要登录的网页会话;价格是会话账号的钱包币种。
+	 * 没登录时 Steam 回 [] 或 success:false
+	 */
+	async function fetchPriceHistory(params: WebSessionParams & MarketTarget & {currency?: number | null; country?: string}): Promise<PricePoint[]> {
+		const cookies = (params.cookies ?? []).filter(Boolean);
+		if (!cookies.length) {
+			throw new Error('缺少 WebSession cookies,查不了价格走势');
+		}
+		const url = new URL(COMMUNITY + '/market/pricehistory/');
+		url.searchParams.set('country', params.country || 'US');
+		url.searchParams.set('currency', String(params.currency || 1));
+		url.searchParams.set('appid', String(params.appid));
+		url.searchParams.set('market_hash_name', params.marketHashName);
+		const res = await http(url, {headers: {
+			Cookie: cookies.join('; '),
+			'User-Agent': params.userAgent || STEAM_WEB_USER_AGENT,
+			Accept: 'application/json',
+			Referer: listingUrl(params.appid, params.marketHashName)
+		}});
+		const {text, json} = await readJson(res);
+		if (res.status === 429) {
+			throw new Error('Steam 限流(HTTP 429),过一会再查');
+		}
+		if (!res.ok || !json || Array.isArray(json) || !json.success) {
+			throw new Error(`价格走势没拿到:${!res.ok || !json ? responseSummary(res, text, 120) : Array.isArray(json) ? '会话可能失效了(Steam 返回空)' : `success=${json.success}`}`);
+		}
+		return parsePriceHistory(json.prices);
+	}
+
+	return {fetchMarketContext, fetchPriceHistory, createBuyOrder, cancelBuyOrder, fetchMyBuyOrders, fetchGroupName};
 }
 
 export type MarketClient = ReturnType<typeof createMarketClient>;

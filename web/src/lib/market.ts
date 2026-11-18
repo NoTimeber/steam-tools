@@ -3,6 +3,7 @@
 
 import {currencySymbol} from './accounts.ts';
 import type {CookieAccount} from './buygame.ts';
+import type {OrderLevel} from './orderbook.ts';
 
 export type MarketAccount = CookieAccount;
 
@@ -21,6 +22,12 @@ export interface MarketContext {
 	volume: string;
 	/** 没拿到的部分和原因(老版本服务端没有) */
 	issues?: string[];
+	/** 盘口分档:在售从低到高、求购从高到低(最多 30 档);拿不到为空数组,老版本服务端没有 */
+	sellOrders?: OrderLevel[];
+	buyOrders?: OrderLevel[];
+	/** 在售总件数 / 求购总数;拿不到为 null */
+	sellTotal?: number | null;
+	buyTotal?: number | null;
 }
 
 /** 搜商品的一条(src/market/index.ts 的 MarketSearchItem) */

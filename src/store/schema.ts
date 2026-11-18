@@ -1,7 +1,7 @@
 import type {Migration} from '../core/db.ts';
 
 // 敏感列(密码、shared_secret、maFile、session、UU token)存的都是 vault 密文,
-// 其余列明文,方便查询和排查。C5 app-key 是 settings 表里的一条 vault 密文(见 ./c5.ts)。
+// 其余列明文,方便查询和排查。ECO 私钥是 settings 表里的一条 vault 密文(见 ./eco.ts)。
 export const MIGRATIONS: readonly Migration[] = [
 	{
 		version: 1,
@@ -159,6 +159,40 @@ export const MIGRATIONS: readonly Migration[] = [
 				received INTEGER NOT NULL DEFAULT 0,
 				PRIMARY KEY (day, proxy_id, account, kind)
 			);
+		`
+	},
+	{
+		version: 6,
+		name: 'eco-sweeper',
+		sql: `
+			-- ECO 扫货的监控列表。整表替换,position 保持顺序。
+			-- (C5 扫货已删除;版本 3 建的 c5_watch_items / c5_purchases 留着不动,旧的购买流水还在)
+			CREATE TABLE eco_watch_items (
+				name       TEXT PRIMARY KEY,
+				position   INTEGER NOT NULL,
+				max_price  REAL NOT NULL,
+				max_qty    INTEGER NOT NULL,
+				max_spend  REAL NOT NULL DEFAULT 0,
+				game_id    INTEGER NOT NULL DEFAULT 730,
+				updated_at TEXT NOT NULL
+			);
+
+			-- ECO 购买流水。数量和预算上限都从这里累计,重启不清零。时间都是毫秒。
+			CREATE TABLE eco_purchases (
+				merchant_no      TEXT PRIMARY KEY,
+				ts               INTEGER NOT NULL,
+				name             TEXT NOT NULL,
+				goods_num        TEXT NOT NULL DEFAULT '',
+				price            REAL NOT NULL,
+				status           TEXT NOT NULL,
+				order_no         TEXT,
+				actual_pay       REAL,
+				order_state      INTEGER,
+				order_state_name TEXT,
+				checked_at       INTEGER NOT NULL DEFAULT 0,
+				error            TEXT
+			);
+			CREATE INDEX idx_eco_purchases_status ON eco_purchases (status);
 		`
 	}
 ];

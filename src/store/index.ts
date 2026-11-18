@@ -9,8 +9,8 @@ import {createAccountGroupStore} from './account-groups.ts';
 import type {AccountGroupStore} from './account-groups.ts';
 import {createAccountStore} from './accounts.ts';
 import type {AccountStore} from './accounts.ts';
-import {createC5Store} from './c5.ts';
-import type {C5Store} from './c5.ts';
+import {createEcoStore} from './eco.ts';
+import type {EcoStore} from './eco.ts';
 import {importLegacyFiles} from './legacy-import.ts';
 import {createLoginIntentStore} from './login-intents.ts';
 import type {LoginIntentStore} from './login-intents.ts';
@@ -58,7 +58,7 @@ export interface Store {
 	mafiles: MaFileStore;
 	sessions: SteamSessionStore;
 	uu: UuStore;
-	c5: C5Store;
+	eco: EcoStore;
 	proxies: ProxyStore;
 	loginIntents: LoginIntentStore;
 	legacyImport: ImportReport | null;
@@ -95,7 +95,7 @@ export function openStore(options: OpenStoreOptions): Store {
 		const mafiles = createMaFileStore(db, vault);
 		const sessions = createSteamSessionStore(db, vault);
 		const uu = createUuStore(db, vault, settings);
-		const c5 = createC5Store(db, vault, settings);
+		const eco = createEcoStore(db, vault, settings);
 		const proxies = createProxyStore(settings, vault);
 		const loginIntents = createLoginIntentStore(db);
 		const legacyImport = options.legacy
@@ -112,7 +112,7 @@ export function openStore(options: OpenStoreOptions): Store {
 			mafiles,
 			sessions,
 			uu,
-			c5,
+			eco,
 			proxies,
 			loginIntents,
 			legacyImport,

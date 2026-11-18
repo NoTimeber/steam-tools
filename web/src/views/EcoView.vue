@@ -1,26 +1,28 @@
 <script setup lang="ts">
-// C5 扫货:顶栏是运行状态(停止 / 自动扫货,真实下单)和汇总;中间是监控列表(直接改目标价、数量、花费上限,
+// ECO 扫货:顶栏是运行状态(停止 / 自动扫货,真实下单)和汇总;中间是监控列表(直接改目标价、数量、花费上限、游戏,
 // 改过没保存的格子标黄,点「保存」后下一轮按新价扫);下面是购买流水。运行日志写在右下角的「实时运行日志」里。设置、查在售在弹窗里。
-// 添加饰品输中文或英文搜(C5 接口只认 Steam 英文名,后端词库把中文换成英文名),表格里显示中文名。
+// 添加饰品输中文或英文搜(ECO 接口只认 Steam 英文名,后端词库把中文换成英文名),表格里显示中文名。
 import {computed, h, onMounted, onUnmounted, reactive, ref} from 'vue';
 import {
-	NAlert, NButton, NCard, NDataTable, NInput, NInputNumber, NModal, NRadioButton, NRadioGroup, NSelect, NSpace, NTag, NTooltip, useDialog, useMessage
+	NAlert, NButton, NCard, NDataTable, NInputNumber, NRadioButton, NRadioGroup, NSelect, NSpace, NTag, NTooltip, useDialog, useMessage
 } from 'naive-ui';
 import type {DataTableColumns, SelectOption} from 'naive-ui';
 import {withTip} from '../components/tip.ts';
-import type {VNodeChild} from 'vue';
-import {ApiError, errorText} from '../api/http.ts';
+import type {VNode, VNodeChild} from 'vue';
+import {errorText} from '../api/http.ts';
 import {
-	ASSET_TYPE_OPTIONS, budgetText, DELIVERY_OPTIONS, dirtyFields, formatTime, isTradeUrlOf, itemLabel, itemStatus, money, partnerOf, priceText, purchaseStatus,
-	receiverC5Note, receiverMatches, receiverOptionLabel, receiverText, removedNames, RUN_LABELS, sortReceiverAccounts, sweepBlocker, sweepConfirmText
-} from '../lib/c5.ts';
-import type {C5NameOption, C5Purchase, C5ReceiverAccount, C5RunState, DraftField, DraftRow} from '../lib/c5.ts';
+	budgetText, currentLinkStatus, DEFAULT_GAME_ID, dirtyFields, formatTime, GAME_OPTIONS, itemLabel, itemStatus, linkStatus, money, priceText, purchaseStatus,
+	receiverEcoNote, receiverMatches, receiverOptionLabel, receiverText, receiverUsable, removedNames, RUN_LABELS, sortReceiverAccounts, sweepBlocker,
+	sweepConfirmText, updateLinkBlocker
+} from '../lib/eco.ts';
+import type {DraftField, DraftRow, EcoNameOption, EcoPurchase, EcoReceiverAccount, EcoRunState, LinkStatus} from '../lib/eco.ts';
 import {
-	addDraft, c5, checkConnection, dirty, discardDrafts, enterC5, fetchReceivers, leaveC5, refreshOrders, removeDraft, resolvePurchase,
-	saveReceiverTradeUrl, saveWatchlist, searchNames, serverItems, setRun, switchReceiver
-} from '../stores/c5.ts';
-import ListingsModal from './c5/ListingsModal.vue';
-import SettingsModal from './c5/SettingsModal.vue';
+	addDraft, checkConnection, dirty, discardDrafts, eco, enterEco, fetchReceivers, leaveEco, refreshOrders, removeDraft, resolvePurchase,
+	saveReceiverTradeUrl, saveWatchlist, searchNames, serverItems, setRun, updateReceiverLink, verifyReceiverLinks
+} from '../stores/eco.ts';
+import BindModal from './eco/BindModal.vue';
+import ListingsModal from './eco/ListingsModal.vue';
+import SettingsModal from './eco/SettingsModal.vue';
 
 const message = useMessage();
 const dialog = useDialog();
@@ -33,35 +35,36 @@ function warnUnsaved(event: BeforeUnloadEvent): void {
 }
 
 onMounted(() => {
-	enterC5();
+	enterEco();
 	loadReceivers();
 	window.addEventListener('beforeunload', warnUnsaved);
 });
 onUnmounted(() => {
-	leaveC5();
+	leaveEco();
 	window.removeEventListener('beforeunload', warnUnsaved);
 });
 
-const state = computed(() => c5.state);
+const state = computed(() => eco.state);
 const viewByName = computed(() => new Map((state.value?.items ?? []).map(item => [item.name, item])));
 const labelOf = (name: string) => itemLabel(viewByName.value.get(name) ?? {name});
-const removed = computed(() => removedNames(c5.drafts, serverItems.value).map(labelOf));
+const removed = computed(() => removedNames(eco.drafts, serverItems.value).map(labelOf));
 
 const settingsOpen = ref(false);
 const listingsName = ref('');
+const bindOpen = ref(false);
 
-// ===== 收货账号:顶栏下拉,从 C5 上绑定的 Steam 账号里选,选中马上取交易链接并保存 =====
-// C5 开放平台不给交易链接,下单又必须带:账户管理里有同一个账号的自动去 Steam 取,取不到用记下的,都没有就弹框让人贴一次
-const receiverAccounts = ref<C5ReceiverAccount[]>([]);
+// ===== 收货账号:顶栏下拉,从 ECO 上绑定的 Steam 账号里选,选中就用 ECO 上登记的交易链接并马上保存 =====
+// 只有没有交易链接的不能选(ECO 列表里的失效标记不可靠,链接好坏点「验证」查);别的链接在「设置」里直接贴
+const receiverAccounts = ref<EcoReceiverAccount[]>([]);
 const receiversError = ref<string | null>(null);
 const receiversLoading = ref(false);
 const switchingReceiver = ref(false);
-const receiverNote = computed(() => receiverC5Note(state.value?.receiver ?? null));
+const receiverNote = computed(() => receiverEcoNote(state.value?.receiver ?? null, state.value?.settings.tradeUrl ?? ''));
 
-async function loadReceivers(): Promise<void> {
+async function loadReceivers(refresh = false): Promise<void> {
 	receiversLoading.value = true;
 	try {
-		const result = await fetchReceivers();
+		const result = await fetchReceivers(refresh);
 		receiverAccounts.value = result.accounts;
 		receiversError.value = result.boundError;
 	} catch (err) {
@@ -71,67 +74,113 @@ async function loadReceivers(): Promise<void> {
 	}
 }
 
-// 状态正常的在前;昵称、Steam 登录名、SteamID、账户管理里的账号名都能搜
+// 能选的在前;昵称、备注、SteamID、账户管理里的账号名都能搜
 const receiverOptions = computed(() => sortReceiverAccounts(receiverAccounts.value).map(account => ({
 	value: account.steamId,
 	label: receiverOptionLabel(account),
+	disabled: !receiverUsable(account),
 	item: account
 })));
-const filterReceiver = (pattern: string, option: SelectOption) => receiverMatches(option.item as C5ReceiverAccount, pattern);
-/** 当前收货账号是下拉里的哪一个;不是 C5 绑定的链接不在下拉里,显示成占位文字 */
+const filterReceiver = (pattern: string, option: SelectOption) => receiverMatches(option.item as EcoReceiverAccount, pattern);
+/** 当前收货账号是下拉里的哪一个;不是 ECO 绑定的链接不在下拉里,显示成占位文字 */
 const receiverValue = computed(() => {
 	const steamId = state.value?.receiver?.steamId;
 	return steamId && receiverAccounts.value.some(entry => entry.steamId === steamId) ? steamId : null;
 });
 const receiverPlaceholder = computed(() => (state.value?.receiver ? receiverText(state.value.receiver) : '选收货账号'));
-const nameOfReceiver = (steamId: string) => {
-	const account = receiverAccounts.value.find(entry => entry.steamId === steamId);
-	return account ? account.nickname || account.username || steamId : steamId;
-};
+const hasUnusableReceiver = computed(() => receiverAccounts.value.some(account => !receiverUsable(account)));
+
+function linkTag(link: LinkStatus): VNodeChild {
+	return h(NTag, {size: 'small', bordered: false, type: link.tone, title: link.title, class: link.muted ? 'link-muted' : ''}, () => link.text);
+}
+
+/** 下拉菜单每一行:原来的选项 + 右边交易链接状态(只加在菜单里,选中后的框里不加) */
+function renderReceiverOption({node, option}: {node: VNode; option: SelectOption}): VNodeChild {
+	const account = option.item as EcoReceiverAccount;
+	return account.tradeUrl ? h('div', {class: 'receiver-option'}, [node, linkTag(linkStatus(account))]) : node;
+}
+
+/** 当前收货账号在下拉里的那一项(不是 ECO 绑定的为 null) */
+const currentAccount = computed(() => {
+	const steamId = state.value?.receiver?.steamId;
+	return steamId ? receiverAccounts.value.find(entry => entry.steamId === steamId) ?? null : null;
+});
+/** 当前交易链接的状态:设置里的链接就是 ECO 登记的那条时才有 */
+const currentLink = computed(() => currentLinkStatus(currentAccount.value, state.value?.settings.tradeUrl ?? ''));
+const updateBlocker = computed(() => updateLinkBlocker(currentAccount.value));
+
+// ===== 验证 / 更新交易链接 =====
+const verifying = ref(false);
+const updatingLink = ref(false);
+
+async function verifyLinks(): Promise<void> {
+	verifying.value = true;
+	try {
+		const result = await verifyReceiverLinks();
+		receiverAccounts.value = result.accounts;
+		receiversError.value = result.boundError;
+		const checks = result.accounts.filter(account => account.tradeUrl).map(account => account.linkCheck?.valid);
+		const parts = [`有效 ${checks.filter(valid => valid === true).length} 个`];
+		const bad = checks.filter(valid => valid === false).length;
+		const failed = checks.filter(valid => valid == null).length;
+		if (bad) parts.push(`无效 ${bad} 个`);
+		if (failed) parts.push(`验证失败 ${failed} 个`);
+		const text = `交易链接验证完成:${parts.join(',')}`;
+		if (bad || failed) {
+			message.warning(text, {duration: 6000});
+		} else {
+			message.success(text);
+		}
+	} catch (err) {
+		message.error('验证交易链接失败:' + errorText(err));
+	} finally {
+		verifying.value = false;
+	}
+}
+
+async function updateLink(): Promise<void> {
+	const account = currentAccount.value;
+	if (!account || updateBlocker.value) {
+		return;
+	}
+	updatingLink.value = true;
+	try {
+		const result = await updateReceiverLink(account.steamId);
+		receiverAccounts.value = result.accounts;
+		const name = account.nickname || account.steamId;
+		if (!result.tradeUrl) {
+			message.warning(`已让 ECO 更新 ${name} 的交易链接,但平台没返回链接`, {duration: 6000});
+		} else if (result.valid === false) {
+			message.warning(`已更新 ${name} 的交易链接,但验证仍然无效;检查 Steam 库存是否公开、账号能否交易`, {duration: 8000});
+		} else {
+			message.success(`已更新 ${name} 的交易链接${result.valid ? ',验证有效' : ''}`);
+		}
+		// 服务端用的是刚重查的绑定列表;下拉的缓存也强制刷新一遍
+		void loadReceivers(true);
+	} catch (err) {
+		message.error('更新交易链接失败:' + errorText(err), {duration: 8000});
+	} finally {
+		updatingLink.value = false;
+	}
+}
 
 async function pickReceiver(steamId: string | null): Promise<void> {
-	if (!steamId || steamId === receiverValue.value) {
+	const account = receiverAccounts.value.find(entry => entry.steamId === steamId);
+	if (!account || (steamId === receiverValue.value && account.tradeUrl === state.value?.settings.tradeUrl)) {
+		return;
+	}
+	if (!receiverUsable(account)) {
+		message.warning('这个账号在 ECO 上没有交易链接,先去 ECO 官网更新,或者在「设置」里直接贴交易链接');
 		return;
 	}
 	switchingReceiver.value = true;
 	try {
-		const {warning} = await switchReceiver(steamId);
-		if (warning) {
-			message.warning(`收货账号已改为 ${nameOfReceiver(steamId)}。${warning}`, {duration: 6000});
-		} else {
-			message.success(`收货账号已改为 ${nameOfReceiver(steamId)}`);
-		}
-		void loadReceivers();
+		await saveReceiverTradeUrl(account.tradeUrl);
+		message.success(`收货账号已改为 ${account.nickname || account.steamId}`);
 	} catch (err) {
-		if (err instanceof ApiError && err.status === 409) {
-			Object.assign(paste, {show: true, steamId, tradeUrl: '', error: ''});
-		} else {
-			message.error('换收货账号失败:' + errorText(err));
-		}
+		message.error('换收货账号失败:' + errorText(err));
 	} finally {
 		switchingReceiver.value = false;
-	}
-}
-
-// 贴交易链接:只收这个账号自己的链接(partner 对得上 SteamID)
-const paste = reactive({show: false, steamId: '', tradeUrl: '', error: '', saving: false});
-
-async function savePastedTradeUrl(): Promise<void> {
-	const tradeUrl = paste.tradeUrl.trim();
-	if (!isTradeUrlOf(tradeUrl, paste.steamId)) {
-		paste.error = partnerOf(tradeUrl) == null ? '不是交易链接' : `这不是 ${nameOfReceiver(paste.steamId)} 的交易链接(SteamID 对不上)`;
-		return;
-	}
-	paste.saving = true;
-	try {
-		await saveReceiverTradeUrl(tradeUrl);
-		message.success(`收货账号已改为 ${nameOfReceiver(paste.steamId)},交易链接已记下`);
-		paste.show = false;
-		void loadReceivers();
-	} catch (err) {
-		paste.error = errorText(err);
-	} finally {
-		paste.saving = false;
 	}
 }
 
@@ -145,7 +194,7 @@ const cycleText = computed(() => {
 // ===== 运行状态 =====
 const runBusy = ref(false);
 
-async function doRun(next: C5RunState): Promise<void> {
+async function doRun(next: EcoRunState): Promise<void> {
 	runBusy.value = true;
 	try {
 		await setRun(next);
@@ -156,7 +205,7 @@ async function doRun(next: C5RunState): Promise<void> {
 	}
 }
 
-function changeRun(next: C5RunState): void {
+function changeRun(next: EcoRunState): void {
 	const value = state.value;
 	if (!value || next === value.run) return;
 	if (next === 'stopped') {
@@ -167,7 +216,7 @@ function changeRun(next: C5RunState): void {
 		message.warning('不能开始自动扫货:还没选收货账号,先在页面顶部选');
 		return;
 	}
-	const blocker = value.configured ? sweepBlocker(value.settings) : '没填 C5 app-key';
+	const blocker = value.configured ? sweepBlocker(value.settings) : '没配好 ECO 的 PartnerId 和私钥';
 	if (blocker) {
 		message.warning(`不能开始自动扫货:${blocker},先在「设置」里填`);
 		settingsOpen.value = true;
@@ -180,7 +229,7 @@ function changeRun(next: C5RunState): void {
 	}
 	dialog.warning({
 		title: '开始自动扫货(真实下单)',
-		content: () => h('div', {class: 'pre'}, sweepConfirmText(value.settings, serverItems.value.length, value.receiver)),
+		content: () => h('div', {style: 'white-space: pre-wrap'}, sweepConfirmText(value.settings, serverItems.value.length, value.receiver, currentLink.value)),
 		positiveText: '开始',
 		negativeText: '取消',
 		onPositiveClick: () => {
@@ -192,9 +241,14 @@ function changeRun(next: C5RunState): void {
 // ===== 检查连接 =====
 const checking = ref(false);
 
+/** 检查连接结果里每个账号的备注;ECO 列表的失效标记不可靠,只提一句「未验证」 */
+function boundNote(account: {tradeUrl: string; tradeUrlOk: boolean; isDefault: boolean}): string {
+	return [account.isDefault ? ' · 默认' : '', !account.tradeUrl ? ' · 没有交易链接' : !account.tradeUrlOk ? ' · ECO 列表标记链接失效(未验证)' : ''].join('');
+}
+
 async function check(): Promise<void> {
 	if (!state.value?.configured) {
-		message.warning('先在「设置」里填 C5 app-key');
+		message.warning('先在「设置」里填 ECO 的 PartnerId 和私钥');
 		settingsOpen.value = true;
 		return;
 	}
@@ -202,15 +256,17 @@ async function check(): Promise<void> {
 	try {
 		const result = await checkConnection();
 		dialog.success({
-			title: '连接正常,app-key 有效',
+			title: '连接正常,密钥有效',
 			content: () => h('div', {class: 'check-result'}, [
-				h('div', `可用余额 ${money(result.balance.money)}(待结算 ${money(result.balance.settle)},保证金 ${money(result.balance.deposit)})`),
+				h('div', `可用余额 ${money(result.balance.money)}(冻结 ${money(result.balance.locked)},待结算 ${money(result.balance.waitSettlement)})`),
 				...(result.steamAccounts.length
-					? result.steamAccounts.map(account => h('div', `Steam 账号 ${account.steamId} ${account.nickname} · ${account.status}`))
-					: [h('div', {class: 'muted'}, 'C5 上没有绑定 Steam 账号,先去官网绑定收货账号')])
+					? result.steamAccounts.map(account => h('div', `Steam 账号 ${account.steamId} ${account.nickname} · ${account.status}${boundNote(account)}`))
+					: [h('div', {class: 'muted'}, 'ECO 上没有绑定 Steam 账号,先去官网绑定收货账号')]),
+				h('div', {class: 'muted'}, '下单还要在 ECO 开放平台开通「购买权限」')
 			]),
 			positiveText: '知道了'
 		});
+		void loadReceivers();
 	} catch (err) {
 		message.error('检查连接失败:' + errorText(err));
 	} finally {
@@ -235,19 +291,19 @@ function numberInput(row: DraftRow, field: 'maxPrice' | 'maxQty' | 'maxSpend', p
 	}));
 }
 
-function selectInput(row: DraftRow, field: 'delivery' | 'assetType', options: Array<{value: number; label: string}>) {
-	return cell(row, field, h(NSelect, {
+function gameInput(row: DraftRow) {
+	return cell(row, 'gameId', h(NSelect, {
 		size: 'small',
-		value: row[field],
-		options,
+		value: row.gameId,
+		options: GAME_OPTIONS as SelectOption[],
 		consistentMenuWidth: false,
 		'onUpdate:value': (value: number) => {
-			row[field] = value;
+			row.gameId = value;
 		}
 	}));
 }
 
-/** 中文名一行,英文名(C5 接口用的)小字一行;词库里没有的只有英文名 */
+/** 中文名一行,英文名(ECO 接口用的)小字一行;没有中文名的只有英文名 */
 function nameCell(row: DraftRow): VNodeChild {
 	return h('div', {class: 'item-name', title: row.name}, [
 		h('div', {class: 'item-zh'}, itemLabel(row)),
@@ -262,6 +318,7 @@ const columns: DataTableColumns<DraftRow> = [
 		width: 260,
 		render: row => (row.origName == null ? cell(row, 'name', nameCell(row)) : nameCell(row))
 	},
+	{title: '游戏', key: 'gameId', width: 100, render: row => gameInput(row)},
 	{
 		title: '状态',
 		key: 'status',
@@ -275,7 +332,7 @@ const columns: DataTableColumns<DraftRow> = [
 		}
 	},
 	{
-		title: 'C5 最低',
+		title: 'ECO 最低',
 		key: 'lowest',
 		width: 84,
 		render: row => {
@@ -297,8 +354,6 @@ const columns: DataTableColumns<DraftRow> = [
 	{title: '目标价 ≤', key: 'maxPrice', width: 104, render: row => numberInput(row, 'maxPrice', {min: 0, step: 0.01, placeholder: '必填'})},
 	{title: '数量上限', key: 'maxQty', width: 92, render: row => numberInput(row, 'maxQty', {min: 1, precision: 0, placeholder: '必填'})},
 	{title: '花费上限', key: 'maxSpend', width: 98, render: row => numberInput(row, 'maxSpend', {min: 0, step: 1, placeholder: '不限'})},
-	{title: '发货', key: 'delivery', width: 108, render: row => selectInput(row, 'delivery', DELIVERY_OPTIONS)},
-	{title: '在售类型', key: 'assetType', width: 116, render: row => selectInput(row, 'assetType', ASSET_TYPE_OPTIONS)},
 	{
 		title: '已买 · 已花',
 		key: 'bought',
@@ -317,7 +372,7 @@ const columns: DataTableColumns<DraftRow> = [
 				size: 'tiny',
 				secondary: true,
 				disabled: row.origName == null,
-				title: row.origName == null ? '先保存' : '看目标价以内的在售(也能验证 IP 白名单)',
+				title: row.origName == null ? '先保存' : '看目标价以内的在售(也能验证密钥和 IP 白名单)',
 				onClick: () => {
 					listingsName.value = row.origName || '';
 				}
@@ -327,10 +382,10 @@ const columns: DataTableColumns<DraftRow> = [
 	}
 ];
 
-// ===== 添加饰品:输中文或英文,停 300 毫秒后向后端搜(带 C5 在售最低价),从下拉里选 =====
-const newItem = reactive({maxPrice: null as number | null, maxQty: null as number | null});
+// ===== 添加饰品:先选游戏,输中文或英文,停 300 毫秒后向后端搜(带 ECO 在售最低价),从下拉里选 =====
+const newItem = reactive({maxPrice: null as number | null, maxQty: null as number | null, gameId: DEFAULT_GAME_ID});
 const nameSearch = reactive({
-	query: '', loading: false, options: [] as C5NameOption[], picked: null as C5NameOption | null, priced: false, priceError: null as string | null
+	query: '', loading: false, options: [] as EcoNameOption[], picked: null as EcoNameOption | null, priced: false, priceError: null as string | null
 });
 let searchSeq = 0;
 let searchTimer: number | undefined;
@@ -352,9 +407,10 @@ function onSearch(query: string): void {
 		return;
 	}
 	nameSearch.loading = true;
+	const gameId = newItem.gameId;
 	searchTimer = window.setTimeout(async () => {
 		try {
-			const result = await searchNames(q);
+			const result = await searchNames(q, gameId);
 			if (seq === searchSeq) {
 				Object.assign(nameSearch, {options: result.options, priced: result.priced, priceError: result.priceError});
 			}
@@ -371,13 +427,21 @@ function onSearch(query: string): void {
 	}, 300);
 }
 
-function pickName(value: string | null, option: SelectOption | null): void {
-	nameSearch.picked = value && option ? option.item as C5NameOption : null;
+/** 换了游戏:价格要按新游戏重查,原来的搜索结果作废 */
+function changeNewGame(gameId: number): void {
+	newItem.gameId = gameId;
+	searchSeq++;
+	window.clearTimeout(searchTimer);
+	Object.assign(nameSearch, {query: '', loading: false, options: [], picked: null, priced: false, priceError: null});
 }
 
-/** 下拉每一行:左边中文名 + 英文名,右边 C5 在售最低价和在售数 */
+function pickName(value: string | null, option: SelectOption | null): void {
+	nameSearch.picked = value && option ? option.item as EcoNameOption : null;
+}
+
+/** 下拉每一行:左边中文名 + 英文名,右边 ECO 在售最低价和在售数 */
 function renderNameOption(option: SelectOption): VNodeChild {
-	const item = option.item as C5NameOption;
+	const item = option.item as EcoNameOption;
 	const small = {class: 'muted', style: 'font-size: 12px; margin-left: 8px'};
 	const price = priceText(item, nameSearch.priced);
 	return h('div', {style: 'display: flex; justify-content: space-between; gap: 16px; width: 100%'}, [
@@ -394,9 +458,9 @@ const priceNote = computed(() => {
 		return '';
 	}
 	if (nameSearch.priceError) {
-		return `C5 价格没查到:${nameSearch.priceError}`;
+		return `ECO 价格没查到:${nameSearch.priceError}`;
 	}
-	return nameSearch.priced ? '价格是 C5 在售最低价(元)' : '填了 C5 app-key 才显示价格';
+	return nameSearch.priced ? 'ECO 在售最低价(元)' : '配好 ECO 的 PartnerId 和私钥才显示价格';
 });
 
 const targetPlaceholder = computed(() => {
@@ -410,11 +474,11 @@ function add(): void {
 		message.warning('先在饰品框里输中文或英文名(如 千瓦、红线 久经),从下拉里选一个');
 		return;
 	}
-	if (c5.drafts.some(row => row.name.trim() === picked.name)) {
+	if (eco.drafts.some(row => row.name.trim() === picked.name)) {
 		message.warning(`${itemLabel(picked)} 已经在列表里了`);
 		return;
 	}
-	addDraft({name: picked.name, zh: picked.zh, maxPrice: newItem.maxPrice, maxQty: newItem.maxQty});
+	addDraft({name: picked.name, zh: picked.zh, maxPrice: newItem.maxPrice, maxQty: newItem.maxQty, gameId: newItem.gameId});
 	nameSearch.picked = null;
 	nameSearch.options = [];
 	newItem.maxPrice = null;
@@ -445,16 +509,16 @@ async function sync(): Promise<void> {
 	}
 }
 
-function confirmResolve(purchase: C5Purchase, status: 'ok' | 'failed'): void {
+function confirmResolve(purchase: EcoPurchase, status: 'ok' | 'failed'): void {
 	dialog.warning({
 		title: status === 'ok' ? '标记为已成交' : '标记为未成交',
-		content: `${itemLabel(purchase)} 单号 ${purchase.outTradeNo}:先去 C5 官网核对这笔单的真实结果。`
+		content: `${itemLabel(purchase)} 商户单号 ${purchase.merchantNo}:先去 ECO 官网核对这笔单的真实结果。`
 			+ (status === 'ok' ? '标记已成交后会继续占用数量和预算。' : '标记未成交后会释放数量和预算,可能再买一件。'),
 		positiveText: '标记',
 		negativeText: '取消',
 		onPositiveClick: async () => {
 			try {
-				await resolvePurchase(purchase.outTradeNo, status);
+				await resolvePurchase(purchase.merchantNo, status);
 				message.success('已标记');
 			} catch (err) {
 				message.error('标记失败:' + errorText(err));
@@ -463,7 +527,7 @@ function confirmResolve(purchase: C5Purchase, status: 'ok' | 'failed'): void {
 	});
 }
 
-const purchaseColumns: DataTableColumns<C5Purchase> = [
+const purchaseColumns: DataTableColumns<EcoPurchase> = [
 	{title: '时间', key: 'ts', width: 130, render: purchase => formatTime(purchase.ts)},
 	{title: '饰品', key: 'name', minWidth: 150, ellipsis: {tooltip: true}, render: purchase => itemLabel(purchase)},
 	{title: '价格', key: 'cost', width: 70, render: purchase => money(purchase.cost)},
@@ -483,8 +547,9 @@ const purchaseColumns: DataTableColumns<C5Purchase> = [
 		minWidth: 150,
 		ellipsis: {tooltip: true},
 		render: purchase => {
-			const parts = [purchase.orderId || '-', purchase.orderStatusName || (purchase.orderStatus != null ? `状态 ${purchase.orderStatus}` : '')].filter(Boolean);
-			return h('span', {title: `商户单号 ${purchase.outTradeNo}${purchase.error ? '\n' + purchase.error : ''}`}, parts.join(' · '));
+			const parts = [purchase.orderNo || '-', purchase.orderStateName || (purchase.orderState != null ? `状态 ${purchase.orderState}` : '')].filter(Boolean);
+			const title = [`商户单号 ${purchase.merchantNo}`, purchase.goodsNum ? `商品编号 ${purchase.goodsNum}` : '', purchase.error ?? ''].filter(Boolean).join('\n');
+			return h('span', {title}, parts.join(' · '));
 		}
 	},
 	{
@@ -505,12 +570,12 @@ const purchaseColumns: DataTableColumns<C5Purchase> = [
 	<div class="module-page">
 		<header class="module-header">
 			<div>
-				<h1>C5 扫货</h1>
+				<h1>ECO 扫货</h1>
 				<div class="module-counts">
 					<span>策略:{{ state?.settings.strategy === 'quick' ? '快速购买' : '按在售列表' }}</span>
 					<span>已花 / 预算:{{ state ? budgetText(state.budget) : '-' }}</span>
 					<span>已买:{{ state?.budget.qty ?? 0 }} 件</span>
-					<span>C5 余额:{{ money(state?.balance?.value) }}</span>
+					<span>ECO 余额:{{ money(state?.balance?.value) }}</span>
 					<span class="receiver">
 						收货账号:
 						<NSelect
@@ -524,18 +589,51 @@ const purchaseColumns: DataTableColumns<C5Purchase> = [
 							:disabled="switchingReceiver"
 							:consistent-menu-width="false"
 							:filter="filterReceiver"
+							:render-option="renderReceiverOption"
 							:title="state?.receiver ? receiverText(state.receiver) : ''"
 							@update:show="(open: boolean) => open && loadReceivers()"
 							@update:value="pickReceiver"
 						>
 							<template #empty>
-								<span class="muted">{{ receiversError || (receiverAccounts.length ? '没搜到这个账号' : 'C5 上还没绑定 Steam 账号') }}</span>
+								<span class="muted">{{ receiversError || (receiverAccounts.length ? '没搜到这个账号' : 'ECO 上还没绑定 Steam 账号') }}</span>
 							</template>
-							<template v-if="receiverAccounts.some(account => account.link === 'none')" #action>
-								<span class="muted price-note">标「要贴链接」的:C5 开放平台不给交易链接,选它时贴一次,之后会记住</span>
+							<template #action>
+								<div class="receiver-action">
+									<span class="muted price-note">
+										{{ hasUnusableReceiver ? '没有交易链接的不能选,去 ECO 官网更新;' : '' }}链接状态点「验证」查;别的交易链接在「设置」里直接贴
+									</span>
+									<NButton size="tiny" quaternary :loading="receiversLoading" @click="loadReceivers(true)">刷新</NButton>
+								</div>
 							</template>
 						</NSelect>
+						<NTooltip placement="bottom">
+							<template #trigger>
+								<NButton size="tiny" secondary :loading="verifying" :disabled="!state?.configured" @click="verifyLinks">验证</NButton>
+							</template>
+							用 ECO 的验证接口逐个验证绑定账号的交易链接(每个约 0.5 秒)
+						</NTooltip>
 						<NTag v-if="receiverNote && !receiverNote.ok" size="small" :bordered="false" type="warning">{{ receiverNote.text }}</NTag>
+						<NTag
+							v-if="currentLink"
+							size="small"
+							:bordered="false"
+							:type="currentLink.tone"
+							:title="currentLink.title"
+							:class="currentLink.muted ? 'link-muted' : ''"
+						>
+							{{ currentLink.text }}
+						</NTag>
+						<NTooltip v-if="state?.receiver" placement="bottom">
+							<template #trigger>
+								<!-- 禁用的按钮收不到鼠标事件,包一层让提示能出来 -->
+								<span>
+									<NButton size="tiny" secondary :loading="updatingLink" :disabled="!state?.configured || !!updateBlocker" @click="updateLink">
+										更新交易链接
+									</NButton>
+								</span>
+							</template>
+							{{ updateBlocker || '让 ECO 用工具里存的登录会话重新从 Steam 取这个账号的交易链接(链接换过 token 时用)' }}
+						</NTooltip>
 					</span>
 					<span>{{ cycleText }}</span>
 				</div>
@@ -546,21 +644,34 @@ const purchaseColumns: DataTableColumns<C5Purchase> = [
 					<NRadioButton value="sweeping">{{ RUN_LABELS.sweeping }}</NRadioButton>
 				</NRadioGroup>
 				<NButton :loading="checking" @click="check">检查连接</NButton>
+				<NTooltip placement="bottom" :disabled="!!state?.configured">
+					<template #trigger>
+						<!-- 禁用的按钮收不到鼠标事件,包一层让提示能出来 -->
+						<span>
+							<NButton :disabled="!state?.configured" @click="bindOpen = true">绑定 Steam 账号</NButton>
+						</span>
+					</template>
+					先在「设置」里配好 ECO 的 PartnerId 和私钥
+				</NTooltip>
 				<NButton type="primary" @click="settingsOpen = true">设置</NButton>
 			</NSpace>
 		</header>
 
-		<NAlert v-if="c5.error && !state" type="error" :bordered="false">加载失败:{{ c5.error }}</NAlert>
+		<NAlert v-if="eco.error && !state" type="error" :bordered="false">加载失败:{{ eco.error }}</NAlert>
 		<template v-if="state">
-			<NAlert v-if="!state.configured" type="warning" :bordered="false">
-				还没填 C5 app-key。点右上角「设置」填写(C5GAME 官网 → 个人中心 → API 管理 申请),并在同一页把服务器的公网 IP 加进白名单。
+			<NAlert v-if="state.keyError" type="error" :bordered="false">
+				存的 ECO 私钥用不了:{{ state.keyError }}。到「设置」里重新贴私钥,或者生成新密钥对。
+			</NAlert>
+			<NAlert v-else-if="!state.configured" type="warning" :bordered="false">
+				还没配好 ECO 的 PartnerId 和私钥。点右上角「设置」生成密钥对,把公钥填到 ECO 开放平台的「RSA 公钥」里,拿到 PartnerId 填回来;
+				下单还要在开放平台开通「购买权限」。
 			</NAlert>
 			<NAlert v-if="state.settingsError" type="warning" :bordered="false">数据库里的设置无效,已退回默认值:{{ state.settingsError }}</NAlert>
 			<NAlert v-if="state.run !== 'stopped' && state.cycle.error" type="error" :bordered="false">
 				本轮失败(连续 {{ state.cycle.errors }} 次,自动退避重试):{{ state.cycle.error }}
 			</NAlert>
 			<NAlert v-if="state.unknown > 0" type="warning" :bordered="false">
-				有 {{ state.unknown }} 笔下单结果未知,先按已花费占着额度,正在自动对账;一直对不上的,去 C5 官网核对后在购买流水里手工标记。
+				有 {{ state.unknown }} 笔下单结果未知,先按已花费占着额度,正在自动对账;一直对不上的,去 ECO 官网核对后在购买流水里手工标记。
 			</NAlert>
 			<NAlert v-if="state.run !== 'stopped' && state.cycle.done && state.items.length" type="info" :bordered="false">
 				所有目标已买满或预算用完。改价、加饰品或调预算后自动继续。
@@ -571,24 +682,25 @@ const purchaseColumns: DataTableColumns<C5Purchase> = [
 			<template #header-extra>
 				<NSpace v-if="dirty" align="center" :size="8">
 					<span class="dirty-hint">有改动没保存{{ removed.length ? `(将删除 ${removed.join('、')})` : '' }}</span>
-					<NButton size="small" :disabled="c5.savingList" @click="discardDrafts">放弃修改</NButton>
-					<NButton size="small" type="primary" :loading="c5.savingList" @click="save">保存</NButton>
+					<NButton size="small" :disabled="eco.savingList" @click="discardDrafts">放弃修改</NButton>
+					<NButton size="small" type="primary" :loading="eco.savingList" @click="save">保存</NButton>
 				</NSpace>
 				<span v-else class="muted hint">直接改目标价、数量、花费上限,点保存后下一轮按新价扫</span>
 			</template>
 			<NDataTable
 				size="small"
 				:columns="columns"
-				:data="c5.drafts"
+				:data="eco.drafts"
 				:row-key="(row: DraftRow) => row.uid"
-				:loading="!state && c5.loading"
-				:scroll-x="1300"
+				:loading="!state && eco.loading"
+				:scroll-x="1180"
 			>
 				<template #empty>
 					<span class="muted">还没有要监控的饰品,在下面添加</span>
 				</template>
 			</NDataTable>
 			<div class="add-row">
+				<NSelect size="small" :value="newItem.gameId" :options="(GAME_OPTIONS as SelectOption[])" @update:value="changeNewGame" />
 				<NSelect
 					size="small"
 					filterable
@@ -625,35 +737,15 @@ const purchaseColumns: DataTableColumns<C5Purchase> = [
 					立刻向平台查一遍全部未完结订单(平时每轮自动查几笔)
 				</NTooltip>
 			</template>
-			<NDataTable size="small" :columns="purchaseColumns" :data="state?.purchases ?? []" :row-key="(row: C5Purchase) => row.outTradeNo" :max-height="360" :scroll-x="720">
+			<NDataTable size="small" :columns="purchaseColumns" :data="state?.purchases ?? []" :row-key="(row: EcoPurchase) => row.merchantNo" :max-height="360" :scroll-x="720">
 				<template #empty>
 					<span class="muted">还没有买入</span>
 				</template>
 			</NDataTable>
 		</NCard>
 
-		<SettingsModal :show="settingsOpen" @close="settingsOpen = false" />
-		<NModal :show="paste.show" :mask-closable="!paste.saving" @update:show="(value: boolean) => !value && !paste.saving && (paste.show = false)">
-			<NCard :title="`贴 ${nameOfReceiver(paste.steamId)} 的交易链接`" style="width: 560px; max-width: calc(100vw - 32px)" :bordered="false" role="dialog" aria-modal="true">
-				<p class="muted paste-hint">
-					C5 开放平台不给已绑定账号的交易链接,下单又必须带,所以要贴一次,之后会记住。
-					在这个 Steam 账号的「库存 → 交易报价 → 谁可以向我发送交易报价」页面复制(SteamID {{ paste.steamId }})。
-				</p>
-				<NInput
-					v-model:value="paste.tradeUrl"
-					placeholder="https://steamcommunity.com/tradeoffer/new/?partner=...&token=..."
-					:input-props="{spellcheck: false}"
-					@keyup.enter="savePastedTradeUrl"
-				/>
-				<NAlert v-if="paste.error" type="error" :bordered="false" class="paste-error">{{ paste.error }}</NAlert>
-				<template #footer>
-					<NSpace justify="end">
-						<NButton :disabled="paste.saving" @click="paste.show = false">取消</NButton>
-						<NButton type="primary" :loading="paste.saving" @click="savePastedTradeUrl">保存并设为收货账号</NButton>
-					</NSpace>
-				</template>
-			</NCard>
-		</NModal>
+		<SettingsModal :show="settingsOpen" @close="settingsOpen = false; loadReceivers()" />
+		<BindModal :show="bindOpen" @close="bindOpen = false" @bound="loadReceivers(true)" />
 		<ListingsModal :name="listingsName" :label="labelOf(listingsName)" @close="listingsName = ''" />
 	</div>
 </template>
@@ -684,17 +776,36 @@ const purchaseColumns: DataTableColumns<C5Purchase> = [
 	width: 220px;
 }
 
+.link-muted {
+	opacity: 0.65;
+}
+
+/* 下拉菜单挂在 body 下,scoped 样式要 :deep 也够不到,用全局类名前缀避免冲突 */
+:global(.receiver-option) {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding-right: 8px;
+}
+
+:global(.receiver-option > .n-base-select-option) {
+	flex: 1;
+	min-width: 0;
+}
+
+:global(.receiver-option .link-muted) {
+	opacity: 0.65;
+}
+
+.receiver-action {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+}
+
 .price-note {
 	font-size: 12px;
-}
-
-.paste-hint {
-	margin: 0 0 10px;
-	font-size: 13px;
-}
-
-.paste-error {
-	margin-top: 8px;
 }
 
 .warn-text {
@@ -703,7 +814,7 @@ const purchaseColumns: DataTableColumns<C5Purchase> = [
 
 .add-row {
 	display: grid;
-	grid-template-columns: minmax(0, 1fr) 110px 110px auto;
+	grid-template-columns: 90px minmax(0, 1fr) 110px 110px auto;
 	gap: 6px;
 	margin-top: 10px;
 }

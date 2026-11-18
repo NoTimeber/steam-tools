@@ -10,7 +10,7 @@
 
 - 一台 Linux 服务器，装好 Docker 和 compose 插件（`docker compose version` 能输出版本）。
 - 反代和 HTTPS 证书自己配（Nginx、Caddy 等都行），要求见第 5 节。
-- 服务器能直连 `steamcommunity.com`、`store.steampowered.com`、Steam CM 节点和 `youpin898.com`；用 C5 扫货的话还要能连 `openapi.c5game.com`。
+- 服务器能直连 `steamcommunity.com`、`store.steampowered.com`、Steam CM 节点和 `youpin898.com`。
 - 服务器能拉 `ghcr.io` 的镜像。镜像在发版时由 GitHub Actions 构建好（只有 amd64，ARM 服务器跑不了），服务器上不用构建；拉不到时见第 7 节最后。
 
 ## 2. 拉代码、写配置
@@ -27,7 +27,7 @@ cp .env.example .env
 
 ## 3. 生成主密钥
 
-账号密码、shared_secret、maFile、Steam session、UU token、C5 app-key 在数据库里都是 AES-256-GCM 密文，解密全靠这把主密钥。
+账号密码、shared_secret、maFile、Steam session、UU token 在数据库里都是 AES-256-GCM 密文，解密全靠这把主密钥。
 
 ```bash
 mkdir -p secrets
@@ -171,8 +171,8 @@ git pull && docker compose -f docker-compose.yml -f compose.build.yaml up -d --b
 - 应用端口只绑定宿主机 `127.0.0.1`，公网只能经反代的 HTTPS 访问。不要把 53110 直接开到公网。
 - cookie 已设置 `HttpOnly` 和 `SameSite=Lax`；经 HTTPS 访问时自动加上 `Secure`。
 - 所有写请求和 WebSocket 握手都会校验 `Origin`，跨站请求会被拒绝。
-- 账号密码、shared_secret、maFile、Steam session、UU token、C5 app-key 在数据库里是 AES-256-GCM 密文，主密钥单独挂载。
-- 浏览器不再保存或接收 Steam 密码、shared_secret、UU token、C5 app-key 原文。
+- 账号密码、shared_secret、maFile、Steam session、UU token 在数据库里是 AES-256-GCM 密文，主密钥单独挂载。
+- 浏览器不再保存或接收 Steam 密码、shared_secret、UU token 原文。
 - 返回 Steam cookies 的 `/api/cookies/:id`，以及能真实下单的 `/api/steam-purchase/test`，默认都关闭。需要时在 `.env` 里设 `ENABLE_DEBUG_ENDPOINTS=1`。
 
 ## 注意事项
@@ -180,6 +180,6 @@ git pull && docker compose -f docker-compose.yml -f compose.build.yaml up -d --b
 - **所有账号都会从服务器 IP 登录 Steam 和 UU。**
   - 账号以前常用的登录地区和服务器所在地区差得远时，可能触发 Steam 的风控或邮件提醒。
   - UU 那边同样会看到 IP 变化。
-- **C5 扫货的 IP 白名单要填服务器的公网出口 IP。** 「按在售列表」策略用到的在售查询是内测接口，C5 官网 API 管理里没加白名单会被拒；拿不到权限就在页面设置里换「快速购买」。
+- C5 扫货已在 1.6.35 移除，旧库里的 `c5_*` 表（购买流水）保留不动。
 - **服务器在大陆时**，连 Steam 社区和 raw.githubusercontent.com（皮肤库、nameid 库）可能不稳定。
 - **网页请求的 User-Agent 是程序自己生成的。** 每个账号从「新版 Chrome × Windows / Mac」里挑一条(目前只用实测放行的 Chrome 150)，固定记在 `data/fingerprint_cache.json`；`data/ua_cache.json` 不再使用（里面是老版本 Chrome，Steam 会对这种请求回 429）。以前存下的老 UA 会在账号下次登录时自动换掉。以后这批 UA 过时了，改环境变量 `STEAM_WEB_USER_AGENT`（填一条新的 Chrome UA），账号池会跟着它的版本号走。

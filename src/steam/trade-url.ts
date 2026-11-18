@@ -1,7 +1,7 @@
 // Steam 交易链接(https://steamcommunity.com/tradeoffer/new/?partner=<32 位账号 id>&token=<令牌>):
 // partner 是账号 id,也就是 SteamID64 的低 32 位,拿它对账号就知道链接是谁的;
 // 账号自己的链接在登录后的「交易报价隐私设置」页里。
-// C5 扫货选收货账号时用:从本工具里已登录的账号取链接,不用手动去 Steam 复制。
+// ECO 扫货按交易链接认收货账号是谁;fetchTradeUrl 能用已登录账号的网页会话取它自己的链接。
 
 const STEAMID64_BASE = 76561197960265728n;
 const COMMUNITY = 'https://steamcommunity.com';

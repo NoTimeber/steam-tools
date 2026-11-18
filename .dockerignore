@@ -3,6 +3,7 @@ data/
 logs/
 .env
 .env.*
+web/.env.local
 !.env.example
 inspect_key.txt
 secrets/
